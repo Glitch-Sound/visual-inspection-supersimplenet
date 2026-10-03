@@ -1,0 +1,282 @@
+## Context
+
+現行実装は `src/app/__init__.py` の挨拶表示と、その単体テストだけである。`pyproject.toml` は Python 3.13、src レイアウト、Typer、Loguru、Pydantic Settings を採用しているが、画像処理、機械学習、探索、GPU 実行の依存関係と CLI は未登録である。`uv.lock` にも PyTorch、torchvision、Anomalib、Optuna、OpenCV は含まれず、既存の正式仕様と永続データはない。
+
+実装はローカル CLI とファイルシステムを境界とし、撮影装置、ネットワークサービス、認証・認可は対象外とする。元画像を不変入力として扱い、設定、派生画像、学習済みパラメータ、探索履歴、検査結果を型番単位で管理する。
+
+2026-10-03 時点の公式情報では、PyTorch 2.13.0 と torchvision 0.28.0 の CUDA 13.0 wheel が Linux / Windows 向けに提供され、torchvision の互換表は Python 3.10〜3.14 を対象としている。Anomalib 2.6.2 は `py3-none-any` wheel を提供し、同版のドキュメントに SuperSimpleNet 実装がある。CUDA 13.0 の最低ドライバは Linux 580.65.06、Windows 580.88 である。これらを初期固定候補として採用し、実機スモーク試験の結果を運用記録へ残す。
+
+参照:
+
+- https://pytorch.org/get-started/previous-versions/
+- https://pypi.org/project/torchvision/
+- https://pypi.org/project/anomalib/2.6.2/
+- https://anomalib.readthedocs.io/en/lib-v2.6.2/markdown/guides/reference/models/image/supersimplenet.html
+- https://docs.nvidia.com/datacenter/tesla/tesla-release-notes-580-65-06/
+
+## Goals / Non-Goals
+
+### Goals
+
+- 5つの型番指定 CLI（`check`、`train-pre`、`train`、`test-pre`、`test`）を同一の設定・ログ・終了状態契約で提供する。
+- ORB 位置合わせ、範囲検証、ブラックリスト、元画像と分割画像の追跡を純粋な契約と責務境界に分け、固定画像で自動試験できるようにする。
+- SuperSimpleNet の学習・推論をアダプタ境界へ隔離し、Optuna の探索、元画像単位分離、学習時限定データ拡張、再開をテストダブルで検証可能にする。
+- 型番別の単一モデル、暫定閾値、探索履歴、分割結果、元画像集約結果を機械可読かつ再現可能に保存する。
+- GPU 優先・CPU フォールバックを実装し、Ubuntu 24.04 LTS / Windows 11 の実機スモーク試験手順と記録形式を固定する。
+
+### Non-Goals
+
+- 初期モデルの本番精度・処理時間目標の決定、および本番利用承認。
+- 異常ラベルを用いた教師あり評価、閾値・データ拡張を含む同時最適化。
+- GUI、Web API、撮影装置・通知サービスとの連携、複数利用者向け認証・認可。
+- 旧成果物の長期保管・世代管理。明示的な再生成前の任意退避は運用手順に委ねる。
+
+## Requirements Traceability
+
+| 要件ID | 対応する設計節 | 責務・境界 | 実装タスク | 試験ケース | 検証方法 |
+| --- | --- | --- | --- | --- | --- |
+| REQ-001 | Workflow / Interfaces / Decision 2 | 設定、座標検証、確認画像 | 1.2, 2.1, 4.1 | TC-001〜TC-002 | 設定・画像統合テスト |
+| REQ-002 | Workflow / Processing Flow 2 | 学習準備、位置合わせ、ブラックリスト | 2.2, 4.2 | TC-003〜TC-006 | 固定画像統合テスト |
+| REQ-003 | Workflow / Processing Flow 3 | 試験準備、未判定引き継ぎ | 2.3, 4.2 | TC-007〜TC-009 | 固定画像統合テスト |
+| REQ-004 | Processing Flow 4 / Decision 4 | 元画像単位データ分離 | 3.1, 4.3 | TC-010〜TC-011 | 分離ロジック単体テスト |
+| REQ-005 | Processing Flow 4 / Decision 5 | 探索・暫定指標 | 3.2, 4.3 | TC-012〜TC-013 | 探索アダプタ統合テスト |
+| REQ-006 | Decision 6 | 学習時データ拡張 | 3.3, 4.3 | TC-014〜TC-015 | 変換境界単体テスト |
+| REQ-007 | Data Contracts / Decision 3 | モデル、閾値、探索成果物 | 3.4, 4.3 | TC-016〜TC-017 | ファイル契約統合テスト |
+| REQ-008 | Interfaces / Decision 7 | 探索再開・再学習 | 3.5, 4.3 | TC-018〜TC-019 | SQLite・削除範囲統合テスト |
+| REQ-009 | Decision 8 | デバイス選択 | 1.3, 4.4 | TC-020〜TC-021 | デバイス検出単体テスト |
+| REQ-010 | Processing Flow 5 / Decision 3 | 推論、閾値判定、可視化 | 3.6, 4.4 | TC-022〜TC-023 | 推論アダプタ統合テスト |
+| REQ-011 | Decision 9 | 元画像判定集約 | 3.7, 4.4 | TC-024〜TC-026 | 判定組合せ単体テスト |
+| REQ-012 | Data Contracts | 検査結果 JSON | 1.4, 3.8, 4.4 | TC-027 | JSON スキーマ統合テスト |
+| REQ-013 | Interfaces / Decision 7 | 明示的な再検査 | 3.9, 4.4 | TC-028 | 削除範囲統合テスト |
+| NREQ-001 | Security, Performance, and Operations | 依存関係、OS、実行記録 | 1.1, 4.5 | TC-029〜TC-030 | CI と対象実機スモーク試験 |
+
+## Workflow and Responsibilities
+
+### Responsibility Map
+
+| 責務 / 境界 | 変更種別 | 入力 | 出力・副作用 | 依存先 | 実装候補・確定状況 |
+| --- | --- | --- | --- | --- | --- |
+| CLI 調停 | 追加 | コマンド、`--model`、`--restart` | 終了コード、構造化ログ、処理時間 | 全ユースケース | `src/app/cli.py` の5エントリポイントで確定 |
+| 設定・パス解決 | 追加 | `setting.ini`、`part_<model>.json`、型番 | 検証済み設定と型番配下パス | Pydantic、標準ライブラリ | `src/app/config.py`、`src/app/paths.py` で確定 |
+| 画像位置合わせ・分割 | 追加 | 基準画像、元画像、分割範囲 | 変換済み画像、分割画像、位置合わせ結果 | OpenCV | `src/app/imaging.py` と `src/app/preparation.py` で確定 |
+| 学習データ構成 | 追加 | 学習 manifest、比率、seed | 元画像単位の train / validation 集合 | ファイル契約 | `src/app/training.py` 内の独立関数で確定 |
+| モデル・探索境界 | 追加 | 探索条件、学習・検証集合、デバイス | 試行結果、最良 checkpoint、スコア | Anomalib、PyTorch、Optuna | `src/app/modeling.py` のアダプタと `src/app/training.py` の調停で確定 |
+| 推論・結果集約 | 追加 | checkpoint、閾値、試験 manifest | 分割判定、ヒートマップ、元画像判定 | モデル境界、画像処理 | `src/app/evaluation.py`、`src/app/results.py` で確定 |
+| デバイス・実行記録 | 追加 | GPU 利用可否、パッケージ版 | 選択デバイス、理由、運用記録 | PyTorch、Loguru | `src/app/runtime.py` で確定 |
+
+### Processing Flow
+
+1. CLI は `--model` を検証し、全体設定と型番設定を読み、型番から許可されたデータルートだけを解決する。入力不備は処理開始前に終了コード2で返す。
+2. `check` は基準画像と全分割範囲を検証して確認画像をステージング先へ生成し、成功時に置換する。`train-pre` は各学習元画像を ORB で位置合わせし、ブラックリストを除外して分割画像と manifest をステージング先へ生成する。位置合わせ失敗は警告付き除外、範囲外は実行全体のエラーとする。
+3. `test-pre` はブラックリストを無視して試験元画像を処理する。位置合わせ失敗は manifest に `undetermined` と理由を残し、範囲外は実行全体のエラーとする。成功時に試験分割画像と manifest を置換する。
+4. `train` は manifest を元画像単位で train / validation に分け、学習集合だけに設定済みデータ拡張を適用する。Optuna は SQLite の既存 study を再利用し、検証スコアの99パーセンタイルを最小化する。完了時に最良 checkpoint、探索結果、暫定閾値、環境情報を整合する一式として保存する。
+5. `test` はモデルと閾値を読み、利用可能なら GPU、利用不能なら CPU を選ぶ。全分割へ同じモデルを適用し、`score >= threshold` を異常とする。正常画像は内容を変えず結果領域へ保存し、異常画像はヒートマップを保存する。
+6. 結果集約は `anomaly` を最優先し、全分割 `normal` のときだけ `normal`、それ以外を `undetermined` とする。元画像単位 JSON は成功・未判定・エラーのいずれでも原子的に保存し、評価者が次の処置を判断できるようにする。
+7. `--restart` を伴う `train` は対象型番の `optuna/<model>/` と `weights/<model>.ckpt` だけを、`test` は `data/06_result/<model>/` だけを削除して再生成する。削除前に対象パスが解決済みルート直下であることを検証する。
+
+### Data Contracts and State
+
+| データ / 契約 | 変更 | フィールド・型・必須性 | 制約・既定値 | 生成・更新主体 | 互換性 / 移行 |
+| --- | --- | --- | --- | --- | --- |
+| `config/setting.ini` | 追加 | `IMAGE.SIZE: int` | 正数、正方形、一辺500pxを初期値 | 運用者 | 新規。未知キーは警告、必須欠落はエラー |
+| `config/part_<model>.json` | 追加 | `base: str`、`range[]: {id:int,x:int,y:int}`、`blacklist[]`、`optuna_settings`、`augmentation`、`alignment` | 型番は安全な識別子、IDは0〜99で一意、比率合計1、percentile=99、trials=50、seed=42、ORB初期値20/0.5 | 運用者。学習完了時は `threshold` だけ原子的更新 | 新規。Pydantic で全体検証し不明な破壊的形式を拒否 |
+| 準備 manifest | 追加 | `source_image`、`split_id`、`split_image`、`status`、`alignment`、`warning` | 学習は success/skipped、試験は success/undetermined/error。UTF-8 JSON | preparation | `data/04_train/<model>/manifest.json` と `data/05_test/<model>/manifest.json` |
+| 学習済みパラメータ | 追加 | checkpoint と型番・backbone・layers・環境メタデータ | `weights/<model>.ckpt`。全分割共通 | training/modeling | 新規。異なる型番の流用を拒否 |
+| Optuna study | 追加 | study DB、試行条件、指標、状態 | `optuna/<model>/study.db`、方向 minimize、既定50試行 | training | 通常実行は再開、`--restart` のみ置換 |
+| 最良試行結果 | 追加 | trial番号、条件、objective、checkpoint、threshold、データ集合、seed、依存版 | `optuna/<model>/best_trial.json`、checkpoint と相互参照 | training | 新規。閾値は型番設定と同値であることを検証 |
+| 事前学習重み | 追加 | `wide_resnet50_2.tv_in1k` のキャッシュ | `pretrained/`、存在時は再取得しない | modeling | 再学習で削除しない |
+| 分割検査結果 | 追加 | `id:int`、`image:str`、`score:float|null`、`status: enum`、`heatmap:str|null` | status は normal/anomaly/undetermined/error | evaluation | 新規 |
+| 元画像検査結果 | 追加 | `source_image`、`model`、`checkpoint`、`threshold`、`splits[]`、`overall_status`、`processed_at`、`alignment`、`errors[]`、`warnings[]`、`runtime` | ISO 8601 UTC、元画像ごとに `data/06_result/<model>/<stem>.json` | results | 新規。必須項目欠落を許さない |
+| 実行記録 | 追加 | command、開始終了時刻、duration、exit status、OS、Python、主要依存版、device、warnings/errors | 秘密情報と画像内容を含めない | runtime/CLI | コンソールと `data/06_result` または `optuna` 配下の run metadata |
+
+### Interfaces and Failure Outcomes
+
+| 境界 / 操作 | 呼び出し元 → 呼び出し先 | 入力 | 成功結果 | 失敗条件 → 結果 | 冪等性・再試行・タイムアウト |
+| --- | --- | --- | --- | --- | --- |
+| `check --model` | 運用者 → 画像確認 | 安全な型番 | 確認画像、exit 0 | 設定不備・範囲外 → 対象項目表示、exit 2、不完全出力なし | 同一入力で置換可能 |
+| `train-pre --model` | 運用者 → 学習準備 | 設定、学習元画像 | 分割画像、manifest、exit 0/警告 | ORB失敗 → 画像単位除外。範囲外・I/O失敗 → exit 3、現行一式維持 | ステージング後に原子的置換 |
+| `test-pre --model` | 運用者 → 試験準備 | 設定、試験元画像 | 分割画像、未判定を含むmanifest | ORB失敗 → 未判定を保存。範囲外・I/O失敗 → exit 3 | ステージング後に原子的置換 |
+| `train --model [--restart]` | 運用者 → 学習・探索 | manifest、探索設定 | checkpoint、study、最良結果、閾値 | データ不足・設定不備 → 開始前exit 2。学習失敗 → 試行失敗を記録してexit 3 | 通常はstudy再開。restartのみ対象成果物削除 |
+| `test --model [--restart]` | 運用者 → 推論・集約 | manifest、checkpoint、閾値 | 結果画像と元画像JSON | モデル・閾値不足 → exit 2。画像単位失敗 → error/undetermined JSON、他画像は継続 | restartのみ対象結果一式を置換 |
+| 事前学習重み取得 | modeling → 配布元/キャッシュ | backbone ID | キャッシュ済み重み | ネットワーク・整合性失敗 → 学習中止、再実行案内 | キャッシュ優先。ライブラリ既定timeoutを記録 |
+
+## Decisions
+
+### Decision 1: CLI とモジュール境界
+
+- **状態**: 確定
+- **採用内容**: Typer の独立 console script 5本を `src/app/cli.py` へ置き、設定、画像準備、モデル境界、学習、評価、結果、実行環境を別モジュールへ分離する。
+- **根拠**: 入力資料の `uv run <command> --model` 契約を維持し、重い依存境界を単体試験から置換可能にするため。
+- **代替案**: 単一サブコマンドアプリは操作契約が変わるため不採用。全処理をCLI関数へ集約する案は試験性が低いため不採用。
+- **実装規則 / 不変条件**: CLI は調停だけを行い、業務判断を持たない。各コマンドは結果、処理時間、警告・エラー、終了コードを返す。
+- **影響**: `pyproject.toml` の scripts と `src/app/` を拡張する。
+
+### Decision 2: 設定検証と座標契約
+
+- **状態**: 確定
+- **採用内容**: INI を全体設定、JSON を型番設定として Pydantic モデルへ読み込み、処理前に相互検証する。型番は `^[A-Za-z0-9][A-Za-z0-9_-]*$` に制限する。
+- **根拠**: 型不正、範囲外、パストラバーサルを処理開始前に検出し、OS間で同じ契約にするため。
+- **代替案**: 辞書を都度参照する案はエラー箇所と既定値が不明確になるため不採用。
+- **実装規則 / 不変条件**: `[x,x+SIZE) × [y,y+SIZE)`、IDは0〜99で一意、比率合計1。設定書込みは一時ファイルから原子的置換する。
+- **影響**: `config.py`、`paths.py`、設定フィクスチャ。
+
+### Decision 3: SuperSimpleNet と依存関係
+
+- **状態**: 確定
+- **採用内容**: Python 3.13、Anomalib 2.6.2、PyTorch 2.13.0、torchvision 0.28.0、CUDA 13.0、SuperSimpleNet、`wide_resnet50_2.tv_in1k` を初期構成とし、uv のプラットフォーム別 source と lockfile で固定する。画像処理は OpenCV headless、探索は Optuna SQLite を用いる。
+- **根拠**: 入力要件と公式配布情報が一致し、Anomalib 2.6.2 が SuperSimpleNet を提供するため。
+- **代替案**: 独自モデル実装は保守範囲が広がるため不採用。GUI版OpenCVは画面を使わずOS依存を増やすため不採用。
+- **実装規則 / 不変条件**: Linux/Windowsはcu130 wheel、GPU不能時は同じコードでCPUへ切替。依存版はrun metadataへ保存する。
+- **影響**: `pyproject.toml`、`uv.lock`、実機セットアップ記録。
+
+### Decision 4: 元画像単位の分離
+
+- **状態**: 確定
+- **採用内容**: manifest の `source_image` をグループキーに、seed付きで80/20に分離し、両集合を空にしない。分割単位のランダム分離は禁止する。
+- **根拠**: 同じ元画像の類似分割が学習・検証へ混在する情報漏洩を防ぐため。
+- **代替案**: 分割画像単位の分離は要件違反のため不採用。
+- **実装規則 / 不変条件**: 同一元画像の全成功分割は必ず同じ集合。両集合を作れなければ学習開始前エラー。
+- **影響**: `training.py` と学習フィクスチャ。
+
+### Decision 5: 正常画像のみの Optuna 目的関数
+
+- **状態**: 確定
+- **採用内容**: 学習率、バッチサイズ、エポック数、特徴抽出層、前処理条件を探索し、検証集合の分割スコア全体の99パーセンタイルを最小化する。データ拡張条件と閾値は初期探索対象に含めない。
+- **根拠**: 正解ラベルがない初期評価で再現可能な暫定指標を得るため。入力資料末尾の明示的な初期範囲を優先する。
+- **代替案**: 学習損失のみ、分割ごとの平均、異常検出指標としての表示は目的と契約に合わないため不採用。
+- **実装規則 / 不変条件**: 指標は性能値と表示しない。全試行条件・値・状態をstudyへ保存する。
+- **影響**: `training.py`、`modeling.py`、結果表示。
+
+### Decision 6: データ拡張境界
+
+- **状態**: 確定
+- **採用内容**: 型番設定で固定した変換パイプラインを学習 dataset の読込み時だけ適用し、検証・試験 pipeline は決定的前処理だけにする。
+- **根拠**: 元画像不変、非永続化、検証値の比較可能性を同時に満たすため。
+- **代替案**: 拡張画像の事前生成は保存禁止に反するため不採用。初期Optuna探索対象化も範囲外。
+- **実装規則 / 不変条件**: 変換単位は入力仕様どおり。ぼかしカーネルは正の奇数。seedを記録する。
+- **影響**: `modeling.py` のデータ境界、設定検証、テスト。
+
+### Decision 7: ステージング、再開、明示的再生成
+
+- **状態**: 確定
+- **採用内容**: 画像準備と結果生成は同一ファイルシステム上の一時ディレクトリで完了後に置換する。学習はOptuna studyを通常再開し、`--restart` のみ対象型番の派生成果物を削除する。
+- **根拠**: 中途半端な一式を後続処理が利用することと、誤った広範囲削除を防ぐため。
+- **代替案**: 出力先への逐次上書きは失敗時の一貫性がないため不採用。
+- **実装規則 / 不変条件**: 削除対象は解決済みの型番ディレクトリまたは単一checkpointに限定し、元画像・設定・pretrainedを削除しない。
+- **影響**: preparation、training、evaluation、paths。
+
+### Decision 8: GPU優先・CPUフォールバック
+
+- **状態**: 確定
+- **採用内容**: CUDA利用可否を実行時に判定し、利用可能ならCUDA、不能ならCPUを選ぶ。選択・切替理由・デバイス名をrun metadataへ保存する。
+- **根拠**: 同じコマンドを両経路で動かし、結果の由来を追跡するため。
+- **代替案**: GPU必須は要件違反。例外時だけ暗黙フォールバックする案は記録不足のため不採用。
+- **実装規則 / 不変条件**: 明示的なデバイス選択結果をモデル生成前に確定し、CUDA初期化失敗時も一度だけCPUへ切替える。
+- **影響**: `runtime.py`、modeling adapter、ログ。
+
+### Decision 9: 判定優先順位
+
+- **状態**: 確定
+- **採用内容**: 分割スコアが閾値以上なら `anomaly`。元画像集約は `anomaly` > `undetermined/error` > `normal` の優先順位とする。
+- **根拠**: 異常の見逃しを避けつつ、全分割が判定できない画像を正常と誤表示しないため。
+- **代替案**: エラーを無視して正常とする案、未判定を異常とする案はいずれも評価者の判断材料を歪めるため不採用。
+- **実装規則 / 不変条件**: `normal` は必要な全分割が揃い全て閾値未満の場合だけ。判定不能スコアはnull。
+- **影響**: `results.py`、JSON契約、評価テスト。
+
+## Edge Cases and Failure Modes
+
+| 事象 / 境界条件 | 検知する責務 | 処理・状態変更 | 利用者 / 呼び出し元への結果 | 記録・監視 | 復旧 |
+| --- | --- | --- | --- | --- | --- |
+| 型番が不正・設定なし | config/paths | 書込みなし | 項目と期待形式、exit 2 | error log | 設定・型番を修正して再実行 |
+| 基準画像なし・読込不能 | preparation | 書込みなし | 対象パス、exit 2/3 | error log | ファイルを配置・修復 |
+| ORB特徴不足・homography失敗 | imaging | 学習は元画像全除外、試験は未判定引継ぎ | 警告と対象画像 | manifest、警告件数 | 撮り直しまたは設定調整 |
+| crop範囲外 | preparation | ステージング破棄、現行一式維持 | 元画像・split ID、exit 3 | error log | 範囲または位置合わせを修正 |
+| ブラックリストが未知画像/IDを参照 | config/preparation | 処理開始前に拒否 | 参照不整合、exit 2 | error log | 設定修正 |
+| train/validation片方が空 | training | 学習開始なし | 必要数と現在数、exit 2 | error log | 元画像追加または比率変更 |
+| 1試行の学習失敗 | training | 試行をfailedとしてstudy保持 | 試行番号と理由 | study、error log | 原因修正後通常再開 |
+| 全試行失敗 | training | checkpoint/threshold更新なし | exit 3、既存成果物維持 | study、run metadata | 原因修正後再開/明示restart |
+| pretrained取得失敗 | modeling | 学習中止、既存キャッシュ不変 | 依存先失敗、exit 3 | error log | 通信確認またはキャッシュ配置 |
+| checkpointと型番不一致 | evaluation | 推論開始なし | 期待/実際の型番、exit 2 | error log | 正しいモデルを指定 |
+| threshold欠落・不一致 | evaluation | 推論開始なし | 不足/不一致、exit 2 | error log | 学習完了または設定同期 |
+| 分割推論失敗 | evaluation/results | 分割error、元画像undetermined（他分割anomalyならanomaly） | JSONを保存し継続 | JSON、warning/error | 原因修正後再検査 |
+| 結果JSON書込み失敗 | results | ステージング破棄、現行結果維持 | exit 3 | error log | 容量・権限確認後再実行 |
+
+## Security, Performance, and Operations
+
+| 観点 | 設計上の対応 | 判定基準 / 監視方法 |
+| --- | --- | --- |
+| 入力安全性 | 型番を安全な文字へ制限し、全パスを既知ルート配下へresolveする。JSON/INIは型検証し、checkpointはこのアプリが生成した型番メタデータ付き成果物だけを受け入れる | パストラバーサル・不正設定・型番不一致の自動テストが成功する |
+| 秘密情報 | 画像内容、環境変数、絶対ユーザーパスを通常ログへ出さず、ファイル名と相対パス、必要な環境版だけを記録する | リポジトリ検査とログフィクスチャで秘密情報・画像バイトがないことを確認する |
+| 再現性 | lockfile、seed、探索条件、dataset manifest、依存版、device、checkpoint対応を保存する | `best_trial.json` と run metadata の必須項目、自動読戻しが成功する |
+| 性能 | 各コマンドと各画像の処理時間を記録する。数値上限は初期評価後まで設定しない | 実機スモーク記録にdurationが存在し、評価者が後続目標を決定できる |
+| GPU運用 | CUDA 13.0最低ドライバ以上を前提とし、採用版は実機試験後に記録する。GPU不能時はCPUへ切替える | Ubuntu/WindowsそれぞれGPU・CPUスモーク結果を保存する |
+| 障害復旧 | 原子的置換、Optuna再開、対象限定restart、元画像不変を採用する | 中断・I/O失敗・restartテストで既存一式と非対象データが保持される |
+
+## Migration and Rollback
+
+1. 既存の正式仕様・業務データ・公開APIはなく、データ移行は不要である。
+2. 導入時は依存関係とCLIを追加し、サンプル設定で自動試験後、対象OS実機へ同じlockfileを導入する。実データは運用者が `config/` と `data/01_original_train` / `data/02_original_test` へ配置する。
+3. ロールバック時はCLIと追加依存を前版へ戻す。派生成果物は退避後に型番単位で削除できるが、元画像、型番設定、pretrainedキャッシュは自動削除しない。
+4. 本番利用への移行はこのchangeに含めず、評価者が数値基準と承認条件を決定した後の別changeで扱う。
+
+## Test Design
+
+| TC ID | 要件ID | Scenario ID | テスト層 | 前提・操作 | 期待値 | pytest 実装 | 自動化 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| TC-001 | REQ-001 | REQ-001-S01 | integration | 有効設定でcheck | ID付き矩形画像と処理情報 | `tests/test_preparation.py::test_check_writes_labeled_ranges` | はい |
+| TC-002 | REQ-001 | REQ-001-S02 | unit/integration | 範囲外・重複ID・非正サイズでcheck | exit 2、不完全出力なし | `tests/test_config.py::test_check_rejects_invalid_ranges` | はい |
+| TC-003 | REQ-002 | REQ-002-S01 | integration | 位置合わせ可能な学習画像でtrain-pre | 命名契約どおり全分割保存、元画像不変 | `tests/test_preparation.py::test_train_pre_aligns_and_crops_images` | はい |
+| TC-004 | REQ-002 | REQ-002-S02 | integration | blacklist一致でtrain-pre | 対象分割なし、除外記録あり | `tests/test_preparation.py::test_train_pre_excludes_blacklist_entries` | はい |
+| TC-005 | REQ-002 | REQ-002-S03 | integration | ORB失敗画像でtrain-pre | 元画像全分割除外と警告 | `tests/test_preparation.py::test_train_pre_warns_and_skips_alignment_failure` | はい |
+| TC-006 | REQ-002 | REQ-002-S04 | integration | 位置合わせ後にcrop範囲外 | exit 3、現行一式維持 | `tests/test_preparation.py::test_train_pre_rejects_out_of_bounds_crop_atomically` | はい |
+| TC-007 | REQ-003 | REQ-003-S01 | integration | blacklist一致を含む試験画像でtest-pre | 全分割を命名契約どおり保存 | `tests/test_preparation.py::test_test_pre_does_not_apply_blacklist` | はい |
+| TC-008 | REQ-003 | REQ-003-S02 | integration | ORB失敗画像でtest-pre | 未判定manifestと警告 | `tests/test_preparation.py::test_test_pre_carries_alignment_failure` | はい |
+| TC-009 | REQ-003 | REQ-003-S03 | integration | 試験crop範囲外 | exit 3、正常入力扱いなし | `tests/test_preparation.py::test_test_pre_rejects_out_of_bounds_crop` | はい |
+| TC-010 | REQ-004 | REQ-004-S01 | unit | 複数元画像、80/20、seed42で分離 | 再現可能かつグループ非混在 | `tests/test_training.py::test_split_groups_by_source_image` | はい |
+| TC-011 | REQ-004 | REQ-004-S02 | unit | 両集合を作れない元画像数 | 学習前エラーに現在数を含む | `tests/test_training.py::test_split_rejects_insufficient_source_images` | はい |
+| TC-012 | REQ-005 | REQ-005-S01 | integration | 50試行をテストダブルで実行 | 全条件・p99記録、最小試行選択 | `tests/test_training.py::test_search_selects_lowest_validation_percentile` | はい |
+| TC-013 | REQ-005 | REQ-005-S02 | unit | 正常画像のみの探索結果表示 | 暫定指標と表示し性能指標を称さない | `tests/test_training.py::test_search_report_labels_objective_as_provisional` | はい |
+| TC-014 | REQ-006 | REQ-006-S01 | unit/integration | 各拡張設定で学習入力読込み | 設定変換適用、元・準備画像不変、非永続 | `tests/test_training.py::test_augmentation_is_training_only_and_ephemeral` | はい |
+| TC-015 | REQ-006 | REQ-006-S02 | unit | 拡張有効設定で検証入力読込み | 拡張なしのスコア入力 | `tests/test_training.py::test_validation_pipeline_disables_augmentation` | はい |
+| TC-016 | REQ-007 | REQ-007-S01 | integration | 最良試行完了 | checkpoint、best trial、同一threshold保存 | `tests/test_training.py::test_training_persists_best_model_and_threshold` | はい |
+| TC-017 | REQ-007 | REQ-007-S02 | integration | cache有/無で学習開始 | cache再利用、無い時だけ取得 | `tests/test_training.py::test_pretrained_weights_are_cached` | はい |
+| TC-018 | REQ-008 | REQ-008-S01 | integration | 一部完了studyで通常train | 完了試行保持、残試行から再開 | `tests/test_training.py::test_training_resumes_existing_study` | はい |
+| TC-019 | REQ-008 | REQ-008-S02 | integration | 旧成果物ありでtrain --restart | study/modelのみ置換、入力・設定・cache保持 | `tests/test_training.py::test_training_restart_replaces_only_derived_artifacts` | はい |
+| TC-020 | REQ-009 | REQ-009-S01 | unit | CUDA利用可能を模擬 | CUDA選択とdevice記録 | `tests/test_runtime.py::test_select_device_prefers_available_cuda` | はい |
+| TC-021 | REQ-009 | REQ-009-S02 | unit | CUDA不能を模擬 | CPU選択と理由記録 | `tests/test_runtime.py::test_select_device_falls_back_to_cpu` | はい |
+| TC-022 | REQ-010 | REQ-010-S01 | integration | score < thresholdでtest | normal、score、未変更結果画像 | `tests/test_evaluation.py::test_evaluation_records_normal_split` | はい |
+| TC-023 | REQ-010 | REQ-010-S02 | integration | score ==/> thresholdでtest | anomaly、score、heatmap | `tests/test_evaluation.py::test_evaluation_visualizes_anomalous_split` | はい |
+| TC-024 | REQ-011 | REQ-011-S01 | unit | 一つ以上anomaly | overall anomaly | `tests/test_results.py::test_aggregate_prefers_anomaly` | はい |
+| TC-025 | REQ-011 | REQ-011-S02 | unit | 必要分割が全てnormal | overall normal | `tests/test_results.py::test_aggregate_accepts_only_all_normal` | はい |
+| TC-026 | REQ-011 | REQ-011-S03 | unit | anomalyなし、undetermined/errorあり | overall undetermined、再撮影案内 | `tests/test_results.py::test_aggregate_marks_incomplete_result_undetermined` | はい |
+| TC-027 | REQ-012 | REQ-012-S01 | integration | 各終了状態の元画像結果確定 | 必須JSON、enum、null score、UTC日時 | `tests/test_results.py::test_result_json_contains_traceable_contract` | はい |
+| TC-028 | REQ-013 | REQ-013-S01 | integration | 旧結果ありでtest --restart | 結果のみ置換し他データ保持 | `tests/test_evaluation.py::test_evaluation_restart_replaces_only_results` | はい |
+| TC-029 | NREQ-001 | NREQ-001-S01 | integration/e2e | 対象OSの固定環境で全CLIスモーク | 終了状態・時間・版・device記録、成果物読戻し | `tests/test_platform_smoke.py::test_workflow_records_runtime_contract` | はい（実機実行併用） |
+| TC-030 | NREQ-001 | NREQ-001-S02 | integration/e2e | GPU無効でtrain/testスモーク | CPU完了、理由・時間記録 | `tests/test_platform_smoke.py::test_workflow_completes_with_cpu_fallback` | はい（実機実行併用） |
+
+## Coverage Confirmation
+
+| 要件ID | Scenario数 | 対応TC数 | 未対応Scenario | 状態 |
+| --- | --- | --- | --- | --- |
+| REQ-001 | 2 | 2 | なし | 網羅 |
+| REQ-002 | 4 | 4 | なし | 網羅 |
+| REQ-003 | 3 | 3 | なし | 網羅 |
+| REQ-004 | 2 | 2 | なし | 網羅 |
+| REQ-005 | 2 | 2 | なし | 網羅 |
+| REQ-006 | 2 | 2 | なし | 網羅 |
+| REQ-007 | 2 | 2 | なし | 網羅 |
+| REQ-008 | 2 | 2 | なし | 網羅 |
+| REQ-009 | 2 | 2 | なし | 網羅 |
+| REQ-010 | 2 | 2 | なし | 網羅 |
+| REQ-011 | 3 | 3 | なし | 網羅 |
+| REQ-012 | 1 | 1 | なし | 網羅 |
+| REQ-013 | 1 | 1 | なし | 網羅 |
+| NREQ-001 | 2 | 2 | なし | 網羅 |
+
+## Open Questions
+
+| 質問 | 回答期限 / 必要な工程 | 決定者 | 影響・未回答時の扱い |
+| --- | --- | --- | --- |
+| 本番利用に必要な検出性能、誤検出、処理時間の数値と承認条件は何か | 初期評価完了後・本番利用changeのproposal確定前 | 評価者 | 初期評価用の実装・試験は進める。本番利用へ移行しない |
+| CUDA 13.0最低要件以上のどの安定版NVIDIAドライバを各OSで固定するか | 対象実機スモーク試験後・運用受け入れ前 | 運用者 | 最低版を下限として試験し、採用版未記録の環境を運用開始しない |
+| 明示的再生成前に旧成果物を退避する運用を採用するか | 運用手順承認前 | 運用者 | 実装既定は対象派生成果物の削除・再生成とし、必要なら利用者が事前退避する |
