@@ -8,14 +8,38 @@ authors = [
 ]
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "anomalib==2.6.2",
     "loguru>=0.7.3",
+    "numpy>=2.0.0",
+    "opencv-python-headless>=4.12.0.88",
+    "optuna>=4.5.0",
     "pydantic-settings>=2.15.0",
     "rich>=15.0.0",
+    "torch==2.13.0",
+    "torchvision==0.28.0",
     "typer>=0.27.1",
 ]
 
 [project.scripts]
 python-template = "app:main"
+check = "app.cli:check_cli"
+train-pre = "app.cli:train_pre_cli"
+train = "app.cli:train_cli"
+test-pre = "app.cli:test_pre_cli"
+test = "app.cli:test_cli"
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]

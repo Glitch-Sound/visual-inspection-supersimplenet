@@ -54,6 +54,57 @@ npx --no-install openspec update
 uv run python-template
 ```
 
+### 2.1. 外観検査ワークフロー
+
+対象型番ごとに、次の入力を配置します。`<model>` には英数字・`_`・`-`だけを使用できます。
+
+```text
+config/setting.ini                  # [IMAGE] SIZE（正の整数）
+config/part_<model>.json            # 分割、位置合わせ、探索、拡張、閾値
+data/01_original_train/<model>/     # 基準画像と正常な学習画像
+data/02_original_test/<model>/      # 検査対象画像
+```
+
+初回は、確認画像を目視してから前処理、学習、検査の順に実行します。
+
+```bash
+uv run --locked check --model XX
+uv run --locked train-pre --model XX
+uv run --locked test-pre --model XX
+uv run --locked train --model XX
+uv run --locked test --model XX
+```
+
+主な成果物は次の場所へ保存されます。
+
+| 成果物 | 保存先 |
+| --- | --- |
+| 分割位置の確認画像 | `data/03_check/<model>.png` |
+| 学習・試験用分割画像とmanifest | `data/04_train/<model>/`、`data/05_test/<model>/` |
+| Optuna studyと最良試行 | `optuna/<model>/study.db`、`best_trial.json` |
+| 学習済みcheckpoint | `weights/<model>.ckpt` |
+| 可視化画像と元画像単位のJSON結果 | `data/06_result/<model>/` |
+
+`train` は既存のOptuna studyを再開します。探索とcheckpointを破棄して再生成する場合だけ `train --model XX --restart`、検査結果だけを再生成する場合は `test --model XX --restart` を使用します。元画像、型番設定、事前学習重みキャッシュは削除されません。
+
+位置合わせはORB対応点20件以上、RANSAC再投影誤差3.0px、信頼確率0.995、返却マスクのインライア比率0.5以上を初期値とします。学習時の失敗画像は理由付きで除外し、試験時の失敗画像は正常とはせず`undetermined`として引き継ぎます。異常がなくても必要な分割が揃わない場合は`undetermined`となるため、結果JSONの案内に従って再撮影または評価者判断を行います。
+
+初期探索はseed 42で50試行を行い、学習率倍率`0.25`〜`4.0`、batch size `4/8/16`、epoch `200/300/400`、特徴層`layer2`・`layer2+layer3`・`layer3`、画像サイズ`256/384/500`を対象とします。学習入力だけに、平行移動、回転、明るさ、コントラスト、色温度、ガンマ、センサーノイズ、Gaussian blurを`config/part_<model>.json`の順序・確率・範囲で適用し、拡張画像は保存しません。検証・試験には適用しません。
+
+探索、暫定閾値、検査判定はすべてAnomalib PostProcessorを無効にした`supersimplenet.pred_score`を使用します。最良モデルで学習集合を再推論したスコアの99パーセンタイルを暫定閾値とし、checkpoint、`best_trial.json`、型番設定へ同じ値を保存します。この0〜1の値は校正済み確率ではなく、探索の目的値も本番の検出性能値ではありません。
+
+`--restart`は対象成果物を直ちに削除するため、旧成果物が必要な運用では実行前に任意の場所へ退避してください。ロールバック時はコードと依存関係を前版へ戻し、必要に応じて退避済み成果物を復元します。元画像、型番設定、`pretrained/`はロールバック時にも自動削除しません。
+
+CUDAが利用可能な場合はGPUを優先し、利用不能または初期化失敗時はCPUへ切り替えます。各コマンドの標準出力と検査結果JSONには、OS、Python・依存版、デバイス、開始・終了時刻、処理時間、警告・エラー、終了コードが記録されます。終了コードは成功`0`、入力不備`2`、処理失敗`3`です。
+
+Ubuntu 24.04 / Windows 11のGPU・CPU実機確認では、少量の評価用データを配置して次を実行し、生成されたJSONを試験証跡として保存します。本番利用の性能・誤検出基準はこの初期評価とは別に決定してください。
+
+```bash
+uv run --locked python scripts/run_visual_inspection_smoke.py \
+  --model XX \
+  --output smoke/visual-inspection-XX.json
+```
+
 ## 3. 開発
 
 コミット前には高速な基礎検査を実行します。<br />
