@@ -42,14 +42,14 @@ def write_change(root: Path, *, include_scenario: bool = True) -> None:
         encoding="utf-8",
     )
     (change / "design.md").write_text(
-        """## Requirements Traceability
+        """## 要件トレーサビリティ
 
 | 要件ID | 対応する設計節 | 責務・境界 | 実装タスク | 試験ケース | 検証方法 |
 | --- | --- | --- | --- | --- | --- |
-| REQ-001 | Workflow | 結果生成 | 2.1 | TC-001 | unit test |
-| NREQ-001 | Performance | 処理時間 | 2.2 | TC-002 | performance test |
+| REQ-001 | 業務フロー | 結果生成 | 2.1 | TC-001 | 単体試験 |
+| NREQ-001 | 性能 | 処理時間 | 2.2 | TC-002 | 性能試験 |
 
-## Test Design
+## 試験設計
 
 | TC ID | 要件ID | Scenario ID | テスト層 | 前提・操作 | 期待値 | pytest 実装 | 自動化 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -111,7 +111,7 @@ def test_check_reports_requirement_missing_from_traceability(tmp_path: Path) -> 
     design_file = tmp_path / "openspec" / "changes" / "example" / "design.md"
     design_file.write_text(
         design_file.read_text(encoding="utf-8").replace(
-            "| REQ-001 | Workflow | 結果生成 | 2.1 | TC-001 | unit test |\n",
+            "| REQ-001 | 業務フロー | 結果生成 | 2.1 | TC-001 | 単体試験 |\n",
             "",
         ),
         encoding="utf-8",
@@ -120,7 +120,7 @@ def test_check_reports_requirement_missing_from_traceability(tmp_path: Path) -> 
     result = run_check(tmp_path, "--change", "example")
 
     assert result.returncode == 1
-    assert "example: Requirements Traceability に REQ-001 がありません" in result.stderr
+    assert "example: 要件トレーサビリティに REQ-001 がありません" in result.stderr
 
 
 def test_check_reports_non_functional_requirement_missing_from_traceability(
@@ -130,7 +130,7 @@ def test_check_reports_non_functional_requirement_missing_from_traceability(
     design_file = tmp_path / "openspec" / "changes" / "example" / "design.md"
     design_file.write_text(
         design_file.read_text(encoding="utf-8").replace(
-            "| NREQ-001 | Performance | 処理時間 | 2.2 | TC-002 | performance test |\n",
+            "| NREQ-001 | 性能 | 処理時間 | 2.2 | TC-002 | 性能試験 |\n",
             "",
         ),
         encoding="utf-8",
@@ -139,9 +139,7 @@ def test_check_reports_non_functional_requirement_missing_from_traceability(
     result = run_check(tmp_path, "--change", "example")
 
     assert result.returncode == 1
-    assert (
-        "example: Requirements Traceability に NREQ-001 がありません" in result.stderr
-    )
+    assert "example: 要件トレーサビリティに NREQ-001 がありません" in result.stderr
 
 
 def test_check_reports_unknown_requirement_in_traceability(tmp_path: Path) -> None:
@@ -149,9 +147,9 @@ def test_check_reports_unknown_requirement_in_traceability(tmp_path: Path) -> No
     design_file = tmp_path / "openspec" / "changes" / "example" / "design.md"
     design_file.write_text(
         design_file.read_text(encoding="utf-8").replace(
-            "## Test Design",
-            "| REQ-999 | Workflow | 未知の責務 | 2.1 | TC-999 | unit test |\n\n"
-            "## Test Design",
+            "## 試験設計",
+            "| REQ-999 | 業務フロー | 未知の責務 | 2.1 | TC-999 | 単体試験 |\n\n"
+            "## 試験設計",
         ),
         encoding="utf-8",
     )
@@ -160,8 +158,7 @@ def test_check_reports_unknown_requirement_in_traceability(tmp_path: Path) -> No
 
     assert result.returncode == 1
     assert (
-        "example: Requirements Traceability の REQ-999 は仕様に存在しません"
-        in result.stderr
+        "example: 要件トレーサビリティの REQ-999 は仕様に存在しません" in result.stderr
     )
 
 
@@ -203,8 +200,8 @@ def test_check_reports_missing_task_referenced_by_design(tmp_path: Path) -> None
     design_file = tmp_path / "openspec" / "changes" / "example" / "design.md"
     design_file.write_text(
         design_file.read_text(encoding="utf-8").replace(
-            "| REQ-001 | Workflow | 結果生成 | 2.1 |",
-            "| REQ-001 | Workflow | 結果生成 | 9.9 |",
+            "| REQ-001 | 業務フロー | 結果生成 | 2.1 |",
+            "| REQ-001 | 業務フロー | 結果生成 | 9.9 |",
         ),
         encoding="utf-8",
     )

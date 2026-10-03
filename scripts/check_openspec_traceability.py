@@ -88,17 +88,15 @@ def check_change(change_dir: Path) -> list[str]:
         )
 
     traceability_requirements: set[str] = set()
-    if "## Requirements Traceability" not in design:
+    if "## 要件トレーサビリティ" not in design:
         errors.append(
-            f"{change_dir.name}: design.md に Requirements Traceability がありません"
+            f"{change_dir.name}: design.md に要件トレーサビリティがありません"
         )
     else:
-        traceability_rows = markdown_table_rows(design, "## Requirements Traceability")
+        traceability_rows = markdown_table_rows(design, "## 要件トレーサビリティ")
         for row in traceability_rows:
             if len(row) < 6 or not REQUIREMENT_ID_PATTERN.fullmatch(row[0]):
-                errors.append(
-                    f"{change_dir.name}: Requirements Traceability の行が不正です"
-                )
+                errors.append(f"{change_dir.name}: 要件トレーサビリティの行が不正です")
                 continue
             requirement_id = row[0]
             traceability_requirements.add(requirement_id)
@@ -124,21 +122,21 @@ def check_change(change_dir: Path) -> list[str]:
 
     for requirement_id in sorted(requirements - traceability_requirements):
         errors.append(
-            f"{change_dir.name}: Requirements Traceability に {requirement_id} がありません"
+            f"{change_dir.name}: 要件トレーサビリティに {requirement_id} がありません"
         )
     for requirement_id in sorted(traceability_requirements - requirements):
         errors.append(
-            f"{change_dir.name}: Requirements Traceability の {requirement_id} "
+            f"{change_dir.name}: 要件トレーサビリティの {requirement_id} "
             "は仕様に存在しません"
         )
 
-    if "## Test Design" not in design:
-        return [*errors, f"{change_dir.name}: design.md に Test Design がありません"]
-    test_cases = markdown_table_rows(design, "## Test Design")
+    if "## 試験設計" not in design:
+        return [*errors, f"{change_dir.name}: design.md に試験設計がありません"]
+    test_cases = markdown_table_rows(design, "## 試験設計")
     scenario_cases: dict[str, list[tuple[str, str]]] = {}
     for row in test_cases:
         if len(row) < 8 or not row[0].startswith("TC-"):
-            errors.append(f"{change_dir.name}: Test Design の試験ケース行が不正です")
+            errors.append(f"{change_dir.name}: 試験設計の試験ケース行が不正です")
             continue
         tc_id, _requirement_id, scenario_id, *_details, pytest_reference, _automated = (
             row
