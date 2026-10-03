@@ -1,17 +1,16 @@
 name: my-workflow
 version: 1
-description: 日本語・EARS 記法を用いる Python プロジェクト向けの OpenSpec ワークフロー
+description: 業務目的・運用判断から実装へ展開する、日本語・EARS 記法の Python プロジェクト向け OpenSpec ワークフロー
 artifacts:
   - id: proposal
     generates: proposal.md
-    description: 変更の目的、範囲、仕様対象を定める提案書
+    description: 利用者の目的、現行・変更後の業務フロー、運用開始条件を定める提案書
     template: proposal.md
     instruction: >
-      proposal.md を日本語で作成する。Why には現状、問題、放置時の影響、期待する状態を記述する。
-      What Changes には利用者または外部システムから観測できる差分を列挙し、破壊的変更には BREAKING を付ける。
-      Scope と Acceptance Criteria で対象・非対象・完了判定を明確にする。Capabilities は proposal と spec の契約であるため、
+      proposal.md を日本語で作成する。現行の業務、利用者・運用者の目的と判断、解決する問題、変更後の業務フローを時系列で記述する。
+      Scope と Operational Acceptance Criteria で対象・非対象・運用開始の判定を明確にする。該当しない業務項目は理由を示して省略できる。Capabilities は proposal と spec の契約であるため、
       既存仕様を調査し、追加または変更する capability の正確なパスを記述する。実装方法は design.md に記述し、
-      proposal には含めない。仕様レベルの振る舞いが変わらない変更は .openspec.yaml の skip_specs: true を使用する。
+      proposal にはモジュール名、ファイル配置、ライブラリなどを含めない。仕様レベルの振る舞いが変わらない変更は .openspec.yaml の skip_specs: true を使用する。
     requires: []
   - id: specs
     generates: specs/**/*.md
@@ -21,10 +20,10 @@ artifacts:
       proposal.md の Capabilities に対応する spec ファイルを日本語で作成する。仕様は実装計画ではなく、利用者または
       外部システムから観測できる振る舞いの契約とする。各 Requirement は EARS 記法で、単一かつ検証可能な
       「条件・トリガー・結果」を規定し、実装のクラス、関数、ライブラリ、処理手順を含めない。各 Requirement には
-      必ず #### Scenario: 見出しのシナリオを1つ以上含め、WHEN と THEN を記述する。新規 capability には
+      必ず #### Scenario: 見出しのシナリオを1つ以上含め、WHEN と THEN に利用者または外部システムから観測できる操作と結果を記述する。新規 capability には
       50文字以上の Purpose を記述する。機能要件には `REQ-001`、非機能要件には `NREQ-001` 形式の一意で不変なIDを付け、
       Scenario には `<要件ID>-S01` 形式のIDを付ける。spec.md には要件区分ごとの試験層、試験パターン、自動化必須条件を定める
-      Test Policy を記載する。既存要件を変更する場合は Requirement ブロック全体を MODIFIED Requirements に複写して更新し、
+      Test Policy を記載する。正常系に加え、入力不備、処理失敗、未判定、再実行など業務に影響する例外の結果と運用上の扱いを検討し、該当しない場合は理由を示す。案件固有の品質目標や承認者を推測せず、実装可否を左右する場合は Open Questions に明記する。既存要件を変更する場合は Requirement ブロック全体を MODIFIED Requirements に複写して更新し、
       廃止には Reason と Migration を含める。
     requires:
       - proposal
@@ -34,13 +33,12 @@ artifacts:
     template: design.md
     instruction: >
       proposal.md と specs を根拠に、design.md を日本語で作成する。spec の全要件を Requirements Traceability で
-      設計節、実装対象、検証方法へ対応付ける。Architecture and Responsibilities、Processing Flow、State and Data Design、
-      Interfaces and Error Handling により、責務の配置、処理順、データ・境界契約、成功・失敗時の結果を実装者が
-      判断せずに実装できる粒度で確定する。重要な技術選定には採用内容、根拠、代替案、不変条件を記述する。
-      Test Design では全ScenarioをTC-ID付き試験ケースに対応付け、前提、操作、期待値、テスト層、pytest 実装を記載する。
+      責務・境界、設計節、実装タスク、試験ケース、検証方法へ対応付ける。Workflow and Responsibilities、Processing Flow、Data Contracts and State、
+      Interfaces and Failure Outcomes により、業務フローを満たす責務、データ・境界契約、失敗時の結果と復旧を明確にする。方式の比較中は候補と確定条件を示し、根拠なくモジュール名、ファイル名、pytest 関数名を固定しない。重要な技術選定には採用内容、根拠、代替案、不変条件を記述する。
+      Test Design では全ScenarioをTC-ID付き試験ケースに対応付け、前提、操作、期待値、テスト層を先に定める。方式と配置を確定した後、tasks.md 確定前に pytest 実装先を記載する。
       Coverage Confirmation で全Scenarioの対応状況を確認し、実装変更を伴うScenarioに手動試験のみを許可しない。該当する場合は
       セキュリティ、性能、運用、移行、ロールバックを具体化する。仕様、採用方式、
-      タスク分解を変更し得る未解決事項を残してはならない。
+      タスク分解を変更し得る未解決事項は推測で埋めず Open Questions に明記し、解決するまで tasks.md を確定しない。
     requires:
       - specs
   - id: tasks
@@ -48,8 +46,8 @@ artifacts:
     description: 設計を実装・検証可能な順序に分解した実施チェックリスト
     template: tasks.md
     instruction: >
-      proposal.md、specs、design.md を根拠に tasks.md を日本語で作成する。各タスクは `- [ ] X.Y` のチェックボックス形式にし、
-      変更対象、具体的な実施内容、対応する要件または設計節、検証可能な完了条件を含める。依存関係順に並べ、
+      実装可否を左右する未決事項がないことを確認し、proposal.md、specs、確定した design.md を根拠に tasks.md を日本語で作成する。各タスクは `- [ ] X.Y` のチェックボックス形式にし、
+      一意なタスク番号、確定した変更対象、具体的な実施内容、対応する要件・設計節・TC-ID、検証可能な完了条件を含める。design.md の Requirements Traceability の実装タスク番号と一致させる。依存関係順に並べ、
       全要件とTC-IDに対応する自動テスト実装タスク、品質チェック、移行・運用作業を含める。「実装する」「テストを追加する」だけの曖昧なタスクを
       作らない。実施・検証済みの場合のみチェックボックスを完了にする。
     requires:

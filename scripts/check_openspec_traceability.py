@@ -8,10 +8,15 @@ import sys
 from pathlib import Path
 
 REQUIREMENT_PATTERN = re.compile(r"^### Requirement: ((?:N?REQ)-\d{3})\b", re.MULTILINE)
+REQUIREMENT_ID_PATTERN = re.compile(r"\b(?:N?REQ)-\d{3}\b")
 SCENARIO_PATTERN = re.compile(
     r"^#### Scenario: ((?:N?REQ)-\d{3}-S\d{2})\b", re.MULTILINE
 )
 PYTEST_REFERENCE_PATTERN = re.compile(r"^`?tests/.+\.py::test_[A-Za-z0-9_]+`?$")
+TASK_LINE_PATTERN = re.compile(
+    r"^\s*-\s*\[[^\]]*]\s+(?P<task_id>\d+\.\d+)\b(?P<description>.*)$"
+)
+TASK_REFERENCE_PATTERN = re.compile(r"(?<![\d.])\d+\.\d+(?![\d.])")
 
 
 def markdown_table_rows(content: str, heading: str) -> list[list[str]]:
@@ -62,6 +67,71 @@ def check_change(change_dir: Path) -> list[str]:
                 )
 
     design = design_file.read_text(encoding="utf-8")
+    tasks = tasks_file.read_text(encoding="utf-8")
+    task_lines = tasks.splitlines()
+    task_requirements: dict[str, set[str]] = {}
+    duplicate_task_ids: set[str] = set()
+    for line in task_lines:
+        task_match = TASK_LINE_PATTERN.match(line)
+        if not task_match:
+            continue
+        task_id = task_match.group("task_id")
+        if task_id in task_requirements:
+            duplicate_task_ids.add(task_id)
+            continue
+        task_requirements[task_id] = set(
+            REQUIREMENT_ID_PATTERN.findall(task_match.group("description"))
+        )
+    for task_id in sorted(duplicate_task_ids):
+        errors.append(
+            f"{change_dir.name}: tasks.md のタスク番号 {task_id} が重複しています"
+        )
+
+    traceability_requirements: set[str] = set()
+    if "## Requirements Traceability" not in design:
+        errors.append(
+            f"{change_dir.name}: design.md に Requirements Traceability がありません"
+        )
+    else:
+        traceability_rows = markdown_table_rows(design, "## Requirements Traceability")
+        for row in traceability_rows:
+            if len(row) < 6 or not REQUIREMENT_ID_PATTERN.fullmatch(row[0]):
+                errors.append(
+                    f"{change_dir.name}: Requirements Traceability の行が不正です"
+                )
+                continue
+            requirement_id = row[0]
+            traceability_requirements.add(requirement_id)
+            if requirement_id not in requirements:
+                continue
+            referenced_tasks = TASK_REFERENCE_PATTERN.findall(row[3])
+            if not referenced_tasks:
+                errors.append(
+                    f"{change_dir.name}: {requirement_id} に実装タスク参照がありません"
+                )
+                continue
+            for task_id in referenced_tasks:
+                if task_id not in task_requirements:
+                    errors.append(
+                        f"{change_dir.name}: {requirement_id} が参照する実装タスク "
+                        f"{task_id} は tasks.md に存在しません"
+                    )
+                elif requirement_id not in task_requirements[task_id]:
+                    errors.append(
+                        f"{change_dir.name}: {requirement_id} が参照する実装タスク "
+                        f"{task_id} はその要件を扱っていません"
+                    )
+
+    for requirement_id in sorted(requirements - traceability_requirements):
+        errors.append(
+            f"{change_dir.name}: Requirements Traceability に {requirement_id} がありません"
+        )
+    for requirement_id in sorted(traceability_requirements - requirements):
+        errors.append(
+            f"{change_dir.name}: Requirements Traceability の {requirement_id} "
+            "は仕様に存在しません"
+        )
+
     if "## Test Design" not in design:
         return [*errors, f"{change_dir.name}: design.md に Test Design がありません"]
     test_cases = markdown_table_rows(design, "## Test Design")
@@ -86,8 +156,6 @@ def check_change(change_dir: Path) -> list[str]:
                     f"{change_dir.name}: {tc_id} の pytest 実装先が不正です: {pytest_reference}"
                 )
 
-    tasks = tasks_file.read_text(encoding="utf-8")
-    task_lines = tasks.splitlines()
     for cases in scenario_cases.values():
         for tc_id, _pytest_reference in cases:
             has_test_task = any(
