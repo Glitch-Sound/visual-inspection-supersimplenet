@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -14,7 +14,12 @@ import numpy as np
 import optuna
 
 from app.config import AppConfig, write_threshold
-from app.contracts import BestTrialResult, PreparationManifest, ScoreContract
+from app.contracts import (
+    BestTrialResult,
+    PreparationManifest,
+    ScoreContract,
+    TrialParametersContract,
+)
 from app.modeling import (
     AnomalibTrainingAugmentation,
     create_supersimplenet,
@@ -22,6 +27,8 @@ from app.modeling import (
 )
 from app.paths import ProjectPaths
 from app.runtime import DeviceSelection, package_versions
+
+_TRANSACTION_FILENAME = ".artifact-transaction.json"
 
 
 @dataclass(frozen=True)
@@ -232,6 +239,7 @@ def persist_best_trial(
     study: optuna.Study,
     outcomes: dict[int, TrialOutcome],
 ) -> BestTrialResult:
+    recover_artifact_transaction(paths, config.model)
     best = study.best_trial
     if best.value is None:
         raise RuntimeError("best trial does not have an objective value")
@@ -253,31 +261,157 @@ def persist_best_trial(
         )
     )
     target_checkpoint = paths.checkpoint(config.model)
-    target_checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    temporary_checkpoint = target_checkpoint.with_suffix(".ckpt.tmp")
-    shutil.copy2(outcome.checkpoint, temporary_checkpoint)
-    _attach_checkpoint_metadata(
-        temporary_checkpoint,
-        model=config.model,
-        threshold=threshold,
-    )
-    temporary_checkpoint.replace(target_checkpoint)
-    write_threshold(paths.model_config(config.model), threshold)
-    result = BestTrialResult(
-        model=config.model,
-        trial_number=best.number,
-        parameters=best.params,
-        objective=float(best.value),
-        checkpoint=str(target_checkpoint.relative_to(paths.root)),
-        score_contract=ScoreContract(),
-        threshold=threshold,
-        train_sources=list(split.train_sources),
-        validation_sources=list(split.validation_sources),
-        seed=config.part.optuna_settings.execution.seed,
-        dependencies=package_versions(),
-    )
-    result.write_json(paths.study_dir(config.model) / "best_trial.json")
+    target_config = paths.model_config(config.model)
+    target_best = paths.study_dir(config.model) / "best_trial.json"
+    targets = {
+        "checkpoint": target_checkpoint,
+        "config": target_config,
+        "best_trial": target_best,
+    }
+    stages = {name: _transaction_path(path, "stage") for name, path in targets.items()}
+    backups = {
+        name: _transaction_path(path, "backup") for name, path in targets.items()
+    }
+    for path in (*stages.values(), *backups.values()):
+        if path.exists():
+            path.unlink()
+
+    try:
+        target_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        target_best.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(outcome.checkpoint, stages["checkpoint"])
+        _attach_checkpoint_metadata(
+            stages["checkpoint"],
+            model=config.model,
+            threshold=threshold,
+        )
+        write_threshold(target_config, threshold, destination=stages["config"])
+        result = BestTrialResult(
+            model=config.model,
+            trial_number=best.number,
+            parameters=_trial_parameters_contract(best.params),
+            objective=float(best.value),
+            checkpoint=str(target_checkpoint.relative_to(paths.root)),
+            score_contract=ScoreContract(),
+            threshold=threshold,
+            train_sources=list(split.train_sources),
+            validation_sources=list(split.validation_sources),
+            seed=config.part.optuna_settings.execution.seed,
+            dependencies=package_versions(),
+        )
+        result.write_json(stages["best_trial"])
+    except Exception:
+        _remove_transaction_files((*stages.values(), *backups.values()))
+        raise
+
+    existed = {name: path.exists() for name, path in targets.items()}
+    journal = _transaction_journal(paths, config.model)
+    try:
+        for name, path in targets.items():
+            if existed[name]:
+                shutil.copy2(path, backups[name])
+        _write_transaction_journal(journal, existed)
+        for name, target in targets.items():
+            _replace_staged_artifact(stages[name], target)
+        journal.unlink()
+    except Exception:
+        if journal.exists():
+            recover_artifact_transaction(paths, config.model)
+        else:
+            _remove_transaction_files((*stages.values(), *backups.values()))
+        raise
+    _remove_transaction_files(backups.values())
     return result
+
+
+def _trial_parameters_contract(
+    parameters: dict[str, object],
+) -> TrialParametersContract:
+    normalized = dict(parameters)
+    layers = normalized.get("feature_layers")
+    if isinstance(layers, str):
+        try:
+            normalized["feature_layers"] = json.loads(layers)
+        except json.JSONDecodeError as error:
+            raise ValueError("feature_layers must contain valid JSON") from error
+    return TrialParametersContract.model_validate(normalized)
+
+
+def _transaction_path(path: Path, kind: str) -> Path:
+    return path.with_name(f".{path.name}.artifact-{kind}")
+
+
+def _transaction_journal(paths: ProjectPaths, model: str) -> Path:
+    return paths.study_dir(model) / _TRANSACTION_FILENAME
+
+
+def _write_transaction_journal(journal: Path, existed: dict[str, bool]) -> None:
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    temporary = journal.with_suffix(journal.suffix + ".tmp")
+    try:
+        temporary.write_text(
+            json.dumps({"version": 1, "existed": existed}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(journal)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _replace_staged_artifact(source: Path, target: Path) -> None:
+    source.replace(target)
+
+
+def _remove_transaction_files(paths: Iterable[Path]) -> None:
+    for path in paths:
+        if path.exists():
+            path.unlink()
+
+
+def recover_artifact_transaction(paths: ProjectPaths, model: str) -> None:
+    """Restore the previous complete training artifact set after interruption."""
+
+    targets = {
+        "checkpoint": paths.checkpoint(model),
+        "config": paths.model_config(model),
+        "best_trial": paths.study_dir(model) / "best_trial.json",
+    }
+    stages = {name: _transaction_path(path, "stage") for name, path in targets.items()}
+    backups = {
+        name: _transaction_path(path, "backup") for name, path in targets.items()
+    }
+    journal = _transaction_journal(paths, model)
+    if not journal.exists():
+        _remove_transaction_files(
+            (
+                *stages.values(),
+                *backups.values(),
+                journal.with_suffix(journal.suffix + ".tmp"),
+            )
+        )
+        return
+    try:
+        payload = json.loads(journal.read_text(encoding="utf-8"))
+        existed = payload["existed"]
+        if payload.get("version") != 1 or set(existed) != set(targets):
+            raise ValueError("unexpected transaction contract")
+        if not all(isinstance(value, bool) for value in existed.values()):
+            raise ValueError("invalid transaction existence flags")
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"invalid artifact transaction journal: {error}") from error
+
+    for name, target in targets.items():
+        backup = backups[name]
+        if existed[name]:
+            if not backup.is_file():
+                raise RuntimeError(f"artifact transaction backup is missing: {name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup, target)
+        elif target.exists():
+            target.unlink()
+    journal.unlink()
+    _remove_transaction_files((*stages.values(), *backups.values()))
 
 
 def _attach_checkpoint_metadata(path: Path, *, model: str, threshold: float) -> None:

@@ -10,17 +10,27 @@ from typing import Any
 import typer
 
 from app.config import load_config
-from app.contracts import PreparationManifest
-from app.evaluation import evaluate_model, restart_evaluation
+from app.contracts import BestTrialResult, PreparationManifest
+from app.evaluation import (
+    evaluate_model,
+    restart_evaluation,
+    validate_best_trial_contract,
+)
 from app.modeling import CheckpointPredictor
 from app.paths import ProjectPaths
-from app.preparation import create_check_image, prepare_testing, prepare_training
+from app.preparation import (
+    alignment_warning,
+    create_check_image,
+    prepare_testing,
+    prepare_training,
+)
 from app.runtime import DeviceSelection, RunRecorder, select_device
 from app.training import (
     AnomalibTrialRunner,
     create_study,
     format_training_summary,
     persist_best_trial,
+    recover_artifact_transaction,
     restart_training,
     run_search,
     split_by_source,
@@ -53,17 +63,13 @@ def _run(
         result = action(paths, recorder)
     except (ValueError, FileNotFoundError) as error:
         recorder.errors.append(str(error))
-        typer.echo(
-            json.dumps(recorder.finish(ExitCode.INPUT_ERROR), ensure_ascii=False)
-        )
+        typer.echo(recorder.finish(ExitCode.INPUT_ERROR).model_dump_json())
         raise typer.Exit(ExitCode.INPUT_ERROR) from error
     except Exception as error:
         recorder.errors.append(str(error))
-        typer.echo(
-            json.dumps(recorder.finish(ExitCode.PROCESSING_ERROR), ensure_ascii=False)
-        )
+        typer.echo(recorder.finish(ExitCode.PROCESSING_ERROR).model_dump_json())
         raise typer.Exit(ExitCode.PROCESSING_ERROR) from error
-    metadata = recorder.finish(ExitCode.SUCCESS)
+    metadata = recorder.finish(ExitCode.SUCCESS).model_dump(mode="json")
     if result is not None:
         metadata["result"] = str(result)
     typer.echo(json.dumps(metadata, ensure_ascii=False))
@@ -88,7 +94,11 @@ def _train_pre_command(
     def action(paths: ProjectPaths, recorder: RunRecorder) -> str:
         manifest = prepare_training(load_config(paths.root, model), paths)
         recorder.warnings.extend(
-            str(item) for item in manifest.excluded if item.get("reason") != "blacklist"
+            alignment_warning(
+                str(item["source_image"]), str(item["reason"]), testing=False
+            )
+            for item in manifest.excluded
+            if item.get("reason") != "blacklist"
         )
         return str(paths.prepared_train(model))
 
@@ -102,12 +112,18 @@ def _train_command(
     """型番別モデルを学習する。"""
 
     def action(paths: ProjectPaths, recorder: RunRecorder) -> str:
+        recover_artifact_transaction(paths, model)
         config = load_config(paths.root, model)
         os.environ.setdefault("TORCH_HOME", str(paths.pretrained))
         if restart:
             restart_training(paths, model)
         prepared = paths.prepared_train(model)
         manifest = PreparationManifest.read_json(prepared / "manifest.json")
+        if manifest.model != config.model:
+            raise ValueError(
+                f"training manifest model mismatch: expected {config.model}, "
+                f"got {manifest.model}"
+            )
         normal = config.part.optuna_settings.normal_only
         split = split_by_source(
             manifest, prepared, train_ratio=normal.train_ratio, seed=normal.seed
@@ -136,7 +152,11 @@ def _test_pre_command(
     def action(paths: ProjectPaths, recorder: RunRecorder) -> str:
         manifest = prepare_testing(load_config(paths.root, model), paths)
         recorder.warnings.extend(
-            source.alignment.reason or "alignment_failed"
+            alignment_warning(
+                source.source_image,
+                source.alignment.reason or "alignment_failed",
+                testing=True,
+            )
             for source in manifest.sources
             if source.alignment.status != "aligned"
         )
@@ -152,28 +172,27 @@ def _test_command(
     """型番別モデルで試験画像を検査する。"""
 
     def action(paths: ProjectPaths, recorder: RunRecorder) -> str:
+        recover_artifact_transaction(paths, model)
         config = load_config(paths.root, model)
         if restart:
             restart_evaluation(paths, model)
-        best = json.loads(
-            (paths.study_dir(model) / "best_trial.json").read_text(encoding="utf-8")
-        )
-        params = best["parameters"]
-        layers = params["feature_layers"]
-        if isinstance(layers, str):
-            layers = json.loads(layers)
+        best = BestTrialResult.read_json(paths.study_dir(model) / "best_trial.json")
+        validate_best_trial_contract(config, paths, best)
+        params = best.parameters
         predictor = CheckpointPredictor(
             paths.checkpoint(model),
-            layers=layers,
-            image_size=int(params["image_size"]),
-            learning_rate_multiplier=float(params["learning_rate_multiplier"]),
+            layers=list(params.feature_layers),
+            image_size=params.image_size,
+            learning_rate_multiplier=params.learning_rate_multiplier,
             device=recorder.device.device,
         )
         results = evaluate_model(
             config,
             paths,
             predictor=predictor,
-            runtime=recorder.finish(ExitCode.SUCCESS),
+            finish_runtime=lambda: recorder.finish(ExitCode.SUCCESS),
+            record_warning=recorder.warnings.append,
+            record_error=recorder.errors.append,
         )
         return f"{len(results)} source images"
 

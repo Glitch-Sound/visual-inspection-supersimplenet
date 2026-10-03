@@ -8,17 +8,21 @@
 
 - [x] 1.4 `src/app/contracts.py` に準備manifest、最良試行結果、分割検査結果、元画像検査結果、run metadataの列挙値・必須項目・UTC日時・JSON読書きを実装する。対応: `REQ-012`、設計「データ契約と状態」「判断 9」「判断 10」、`TC-027`。完了条件: normal/anomaly/undetermined/error、null score、checkpoint・`supersimplenet.pred_score`・PostProcessor状態・threshold・alignment・runtimeを検証してUTF-8 JSONへ往復でき、欠落・不正値を拒否する。
 
+- [x] 1.5 `src/app/config.py`、`src/app/paths.py`、`config/part_XX.json` から未使用の `execution.storage` を削除し、Optuna studyを型番から決定した `optuna/<model>/study.db` へ固定する。あわせて基準画像`base`をディレクトリを含まないファイル名へ制限し、絶対パス、`.`、`..`、パス区切り文字および型番別学習元画像ルート外への解決を処理開始前に拒否する。対応: `REQ-001`、`REQ-005`、設計「データ契約と状態」「判断 2」「判断 5」「セキュリティ・性能・運用」、`TC-031`。完了条件: 有効なファイル名は型番別ルート内へ解決され、不正な`base`は既知ルート外を読書きせず具体的な項目名付きで拒否され、任意のstudy保存先を設定から指定できない。
+
+- [x] 1.6 `src/app/contracts.py` の `ScoreContract.source` を `supersimplenet.pred_score`、`anomalib_post_processor` を `false` のLiteralへ制限し、`InspectionResult.runtime` を必須の `RunMetadata` として検証する。対応: `REQ-012`、設計「データ契約と状態」「判断 10」、`TC-032`。完了条件: 正しい結果JSONを型付きで往復でき、スコア源、PostProcessor状態、判定列挙値、runtime必須項目またはタイムゾーン付き日時が不正なデータを項目名付きで拒否する。
+
 ## 2. 画像準備フロー
 
 - [x] 2.1 `src/app/imaging.py`、`src/app/preparation.py`、`src/app/cli.py` の `check` 経路に、基準画像の読込み、`[x,x+SIZE) × [y,y+SIZE)` の範囲検証、矩形と分割IDの描画、ステージング後の確認画像置換を実装する。対応: `REQ-001`、設計「処理フロー 1-2」「インターフェースと失敗時の結果」「判断 2」、`TC-001`、`TC-002`。完了条件: 有効設定で `data/03_check/<model>.png` が生成され、無効設定では終了コード2となり既存確認画像が変更されない。
 
 - [x] 2.2 `src/app/imaging.py`、`src/app/preparation.py`、`src/app/cli.py` の `train-pre` 経路に、設定可能な最低マッチ数、RANSAC再投影誤差、RANSAC信頼確率、および返却マスクから算出する最低インライア比率によるORB位置合わせ、ブラックリスト除外、2桁分割IDの命名、学習manifest、警告付き位置合わせ失敗除外、範囲外時の原子的失敗を実装する。初期値は順に20、3.0px、0.995、0.5とする。対応: `REQ-002`、設計「処理フロー 2」「判断 7」、`TC-003`〜`TC-006`。完了条件: `data/04_train/<model>/` が成功時だけ一式で置換され、元画像を変更せず、対応点不足・ホモグラフィ推定失敗・インライア比率不足を区別してmanifest・ログから追跡できる。
 
-- [x] 2.3 `src/app/preparation.py` と `src/app/cli.py` の `test-pre` 経路に、学習準備と同じORB成功条件、ブラックリストを適用しない位置合わせ・分割、2桁分割IDの命名、位置合わせ失敗のundetermined引き継ぎ、範囲外時の原子的失敗を実装する。対応: `REQ-003`、設計「処理フロー 3」「判断 7」、`TC-007`〜`TC-009`。完了条件: `data/05_test/<model>/` の画像とmanifestが整合し、位置合わせ不能画像は正常入力扱いされず、対応点不足・ホモグラフィ推定失敗・インライア比率不足の理由付きで後続検査へ引き継がれる。
+- [x] 2.3 `src/app/preparation.py` と `src/app/cli.py` の `test-pre` 経路に、学習準備と同じORB成功条件、ブラックリストを適用しない位置合わせ・分割、2桁分割IDの命名、位置合わせ失敗のundetermined引き継ぎ、範囲外時の原子的失敗を実装する。対応: `REQ-003`、設計「処理フロー 4」「判断 7」、`TC-007`〜`TC-009`。完了条件: `data/05_test/<model>/` の画像とmanifestが整合し、位置合わせ不能画像は正常入力扱いされず、対応点不足・ホモグラフィ推定失敗・インライア比率不足の理由付きで後続検査へ引き継がれる。
 
 ## 3. 学習・検査フロー
 
-- [x] 3.1 `src/app/training.py` に準備manifestの `source_image` をグループキーとするseed付きtrain/validation分離を実装し、同じ元画像の分割混在と空集合を禁止する。対応: `REQ-004`、設計「処理フロー 4」「判断 4」、`TC-010`、`TC-011`。完了条件: 80/20・seed 42で再現可能な非重複集合を返し、両集合を作れない場合は必要数と現在数を示して学習開始前に失敗する。
+- [x] 3.1 `src/app/training.py` に準備manifestの `source_image` をグループキーとするseed付きtrain/validation分離を実装し、同じ元画像の分割混在と空集合を禁止する。対応: `REQ-004`、設計「処理フロー 3」「判断 4」、`TC-010`、`TC-011`。完了条件: 80/20・seed 42で再現可能な非重複集合を返し、両集合を作れない場合は必要数と現在数を示して学習開始前に失敗する。
 
 - [x] 3.2 `src/app/modeling.py` と `src/app/training.py` に`post_processor=False`、`evaluator=False`、`visualizer=False`のAnomalib SuperSimpleNetアダプタとOptuna SQLite探索を実装する。adaptor/segmentation-detectionの既定学習率`0.0001`/`0.0002`へ共通倍率`0.25`〜`4.0`を対数適用し、batch `[4,8,16]`、epochs `[200,300,400]`、layers `[["layer2"],["layer2","layer3"],["layer3"]]`、前処理画像サイズ`[256,384,500]`を探索する。ImageNet正規化・bilinear・antialiasは固定し、seed 42のTPEとstartup 5試行・warmup 50 epoch・10 epoch間隔のMedianPrunerを使い、検証`pred_score`の99パーセンタイルを最小化する。対応: `REQ-005`、設計「判断 3」「判断 5」「判断 10」、`TC-012`、`TC-013`。完了条件: 枝刈り・失敗を含む合計50試行の条件・値・状態を保存し、正常完了試行の最小値を選び、CLIでは指標を「暫定探索指標」と表示して検出性能値や校正済み確率と称さない。
 
@@ -36,6 +40,12 @@
 
 - [x] 3.9 `src/app/evaluation.py`、`src/app/paths.py`、`src/app/cli.py` の `test --restart` 経路に、対象型番の `data/06_result/<model>/` だけを削除して現在の入力・model・thresholdから再生成する処理を実装する。対応: `REQ-013`、設計「インターフェースと失敗時の結果」「判断 7」、`TC-028`。完了条件: 旧結果だけが置換され、元画像・設定・pretrained・checkpoint・準備画像・他型番結果が保持される。
 
+- [x] 3.10 `src/app/runtime.py`、`src/app/cli.py`、`src/app/evaluation.py`、`src/app/results.py` の `test` 経路で、推論・集約後にコマンド単位の実行記録を一度だけ確定し、同じ型付き `RunMetadata` を標準出力と各元画像結果JSONへ保存する。対応: `REQ-012`、`NREQ-001`、設計「データ契約と状態」「判断 1」「判断 10」、`TC-027`、`TC-032`。完了条件: JSON内runtimeが推論・集約を含む開始・終了日時とdurationを持ち、標準出力と同じ終了状態・デバイス・依存版・警告・エラーを記録し、読戻し時に契約検証を通過する。
+
+- [x] 3.11 `src/app/modeling.py`、`src/app/training.py`、`src/app/evaluation.py`、`src/app/imaging.py`、`src/app/preparation.py`、`src/app/cli.py` に、モデルの同一PreProcessorによる探索・閾値算出・試験前処理、拡張子付き入力名を含む一意な結果名、元画像名と分割IDを含む範囲外エラー、画像I/Oのexit 3、対応方法付き位置合わせ警告、およびcheckpoint・設定・最良試行結果のトランザクション更新・中断復旧を実装する。対応: `REQ-002`、`REQ-003`、`REQ-007`、`REQ-010`、`REQ-012`、設計「処理フロー」「判断 7」「判断 10」、`TC-033`〜`TC-038`。完了条件: 独自の近似前処理を使用せず、同stem・異拡張子を上書きせず、失敗メッセージと終了コードが契約どおりで、成果物更新失敗・中断後も旧一式だけが利用される。
+
+- [x] 3.12 `src/app/contracts.py`、`src/app/training.py`、`src/app/evaluation.py`、`src/app/cli.py` に、manifestの安全な単一ファイル名・型番一致・元画像と分割画像の一意性・親子対応・分割ID一意性と、最良試行結果の型付き探索条件・型番・checkpoint参照・スコア契約・閾値整合を後続処理前に検証する契約を実装する。対応: `REQ-004`、`REQ-007`、`REQ-012`、設計「データ契約と状態」「判断 2」「判断 10」、`TC-040`、`TC-041`。完了条件: 不正manifestから既知ルート外を読み書きせず、不正best_trialからモデルを生成せず、項目名付き入力エラーとして拒否する。
+
 ## 4. 自動試験
 
 - [x] 4.1 `tests/test_config.py` と `tests/test_preparation.py` に `TC-001`〜`TC-002` を実装し、コメントなしの正の整数 `SIZE` を使う有効な確認画像、座標境界、範囲外、ID重複、非整数・非正サイズ、不正型番を検証する。対応: `REQ-001`、設計「試験設計」。完了条件: design記載のpytest関数が存在し、`uv run --locked pytest tests/test_config.py tests/test_preparation.py -k 'check'` が成功する。
@@ -46,12 +56,18 @@
 
 - [x] 4.4 `tests/test_runtime.py`、`tests/test_evaluation.py`、`tests/test_results.py` に `TC-020`、`TC-021`、`TC-022`、`TC-023`、`TC-024`、`TC-025`、`TC-026`、`TC-027`、`TC-028` を実装し、GPU/CPU選択、スコア契約一致・不一致、PostProcessor無効`pred_score`の閾値境界、PostProcessor適用前`anomaly_map`ヒートマップ、集約優先順位、JSON契約、再検査削除範囲を検証する。対応: `REQ-009`、`REQ-010`、`REQ-011`、`REQ-012`、`REQ-013`、設計「試験設計」。完了条件: design記載の9個のpytest関数が存在し、GPUなしの開発環境でもテストダブルにより成功する。
 
-- [x] 4.5 `tests/test_platform_smoke.py` と `scripts/run_visual_inspection_smoke.py` に小規模フィクスチャで全CLI、成果物読戻し、実行記録、CPUフォールバックを検証する `TC-029`〜`TC-030` を実装する。対応: `NREQ-001`、設計「セキュリティ・性能・運用」「試験設計」。完了条件: design記載の2つのpytest関数が成功し、スモークスクリプトがOS・依存版・device・終了状態・durationをJSONへ保存する。
+- [x] 4.5 `tests/test_platform_smoke.py` と `scripts/run_visual_inspection_smoke.py` に小規模フィクスチャで `check`、`train-pre`、`train`、`test-pre`、`test` の順に全CLIを実行し、生成したmodel・画像・manifest・結果JSONの実読戻し、実行記録、CPUフォールバックを検証する `TC-029`〜`TC-030` を実装する。対応: `NREQ-001`、設計「処理フロー」「セキュリティ・性能・運用」「試験設計」。完了条件: design記載の2つのpytest関数が成功し、スモークスクリプトが成果物を対応ライブラリまたは契約モデルで読み戻したうえで、OS・依存版・device・終了状態・コマンド単位durationをJSONへ保存する。
+
+- [x] 4.6 `tests/test_config.py` と `tests/test_results.py` に `TC-031`〜`TC-032` のpytestテストを実装し、基準画像の絶対パス・パストラバーサル・ルート外参照と、不正なスコア契約・判定列挙値・runtime・日時を拒否する。対応: `REQ-001`、`REQ-012`、設計「判断 2」「判断 10」「試験設計」。完了条件: `tests/test_config.py::test_base_rejects_paths_outside_model_root` と `tests/test_results.py::test_result_contract_rejects_invalid_score_and_runtime` が存在し、既知ルート外の不変と契約エラー項目を検証して成功する。
+
+- [x] 4.7 `tests/test_training.py`、`tests/test_evaluation.py`、`tests/test_preparation.py`、`tests/test_runtime.py` に `TC-033`、`TC-034`、`TC-035`、`TC-036`、`TC-037`、`TC-038`、`TC-039` のpytestテストを実装し、試験推論がモデルの同一PreProcessorを使うこと、同stem・異拡張子の結果が共存すること、範囲外エラーに元画像名と分割IDがあること、学習・試験準備の画像I/O失敗がexit 3で既存一式を維持すること、成果物更新失敗・中断時に旧一式へ復旧すること、および位置合わせ警告に元画像名・理由・対応方法があることを検証する。対応: `REQ-002`、`REQ-003`、`REQ-007`、`REQ-010`、`REQ-012`。完了条件: 7ケースがネットワーク・GPUなしで決定的に成功する。
+
+- [x] 4.8 `tests/test_results.py` と `tests/test_evaluation.py` に `TC-040`、`TC-041`、`TC-042` のpytestテストを実装し、manifestの型番不一致・パス要素・元画像と分割画像の重複・親子不一致・分割ID重複と、最良試行結果の型番・checkpoint・閾値不一致・探索条件不正を拒否する。対応: `REQ-004`、`REQ-007`、`REQ-012`。完了条件: 既知ルート外の不変とモデル未生成を確認し、3ケースが成功する。
 
 ## 5. 品質・運用受け入れ
 
 - [ ] 5.1 Ubuntu 24.04 LTS x86-64 と Windows 11 x86-64 の実機で、同じlockfileを使用して `scripts/run_visual_inspection_smoke.py` をGPU有効・GPU無効の両条件で実行し、採用NVIDIAドライバ版と結果を運用記録へ保存する。対応: `NREQ-001`、運用開始の受け入れ条件、設計「移行とロールバック」、`TC-029`、`TC-030`。完了条件: 両OSで学習・推論・結果保存・CPU切替が完了し、最低ドライバ要件以上の採用版を含む4経路の記録を評価者が確認できる。
 
-- [x] 5.2 `README.md` に設定配置、5コマンドの順序、通常再開と `--restart` の削除範囲、ORB成功条件、規定探索・拡張設定、PostProcessor無効`pred_score`と暫定閾値の関係、未判定時の再撮影、初期探索指標が本番性能値ではないこと、旧成果物の任意退避、ロールバック手順を記載する。対応: `REQ-002`、`REQ-005`、`REQ-006`、`REQ-007`、`REQ-008`、`REQ-010`、`REQ-011`、`REQ-013`、`NREQ-001`、設計「インターフェースと失敗時の結果」「判断 10」「移行とロールバック」。完了条件: 運用者が文書だけで初期評価フロー、設定値、スコア尺度、閾値算出、非対象範囲を判別でき、本番利用には別途数値基準と承認が必要と明記される。
+- [x] 5.2 `README.md` に設定配置、`check`、`train-pre`、`train`、`test-pre`、`test` の標準順序、通常再開と `--restart` の削除範囲、ORB成功条件、規定探索・拡張設定、PostProcessor無効`pred_score`と暫定閾値の関係、未判定時の再撮影、初期探索指標が本番性能値ではないこと、旧成果物の任意退避、ロールバック手順を記載する。対応: `REQ-002`、`REQ-005`、`REQ-006`、`REQ-007`、`REQ-008`、`REQ-010`、`REQ-011`、`REQ-013`、`NREQ-001`、設計「処理フロー」「インターフェースと失敗時の結果」「判断 10」「移行とロールバック」。完了条件: 運用者が文書だけでinput準拠の初期評価フロー、設定値、スコア尺度、閾値算出、非対象範囲を判別でき、本番利用には別途数値基準と承認が必要と明記される。
 
-- [x] 5.3 全実装後に `uv run --locked pre-commit run --all-files`、`npm run check`、`uv run --locked python scripts/check_openspec_traceability.py --change visual-inspection`、`npx --no-install openspec validate visual-inspection --strict` を実行し、失敗を解消する。対応: 全要件、全 `TC-001`〜`TC-030`、設計「網羅性確認」。完了条件: 4コマンドがすべて終了コード0となり、未対応Scenario・TC・テスト実装先・秘密情報・未完了の品質エラーがない。
+- [x] 5.3 全実装後に `uv run --locked pre-commit run --all-files`、`npm run check`、`uv run --locked python scripts/check_openspec_traceability.py --change visual-inspection`、`npx --no-install openspec validate visual-inspection --strict` を実行し、失敗を解消する。対応: 全要件、全 `TC-001`〜`TC-042`、設計「網羅性確認」。完了条件: 4コマンドがすべて終了コード0となり、未対応Scenario・TC・テスト実装先・秘密情報・未完了の品質エラーがない。

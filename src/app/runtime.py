@@ -76,10 +76,15 @@ class RunRecorder:
     started_monotonic: float = field(default_factory=time.monotonic)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    _finished: RunMetadata | None = field(default=None, init=False, repr=False)
 
-    def finish(self, exit_code: int) -> dict[str, object]:
+    def finish(self, exit_code: int) -> RunMetadata:
+        if self._finished is not None and (
+            self._finished.exit_code == exit_code or exit_code == 0
+        ):
+            return self._finished
         ended_at = datetime.now(UTC)
-        metadata = RunMetadata(
+        self._finished = RunMetadata(
             command=self.command,
             model=self.model,
             started_at=self.started_at,
@@ -102,4 +107,4 @@ class RunRecorder:
             warnings=list(self.warnings),
             errors=list(self.errors),
         )
-        return metadata.model_dump(mode="json")
+        return self._finished

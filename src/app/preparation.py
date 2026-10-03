@@ -8,6 +8,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app.atomic import recover_directory_swap
 from app.config import AppConfig, CropRange, validate_blacklist_images
 from app.contracts import (
     AlignmentResult,
@@ -35,11 +36,27 @@ class PreparationError(RuntimeError):
     """Raised when valid inputs fail during derived-image generation."""
 
 
-def _prepared_crop(image: ImageArray, crop: CropRange, size: int) -> ImageArray:
+def _prepared_crop(
+    image: ImageArray, crop: CropRange, size: int, *, source_image: str
+) -> ImageArray:
     try:
         return crop_image(image, crop, size)
     except ValueError as error:
-        raise PreparationError(str(error)) from error
+        raise PreparationError(f"{source_image}: {error}") from error
+
+
+def alignment_warning(source_image: str, reason: str, *, testing: bool) -> str:
+    """Return the complete operator action for an alignment failure."""
+
+    if testing:
+        return (
+            f"{source_image}: alignment failed ({reason}); result will be "
+            "undetermined and recapture is required"
+        )
+    return (
+        f"{source_image}: alignment failed ({reason}); excluded from training "
+        "and manual review is required"
+    )
 
 
 def list_images(directory: Path) -> list[Path]:
@@ -54,12 +71,10 @@ def list_images(directory: Path) -> list[Path]:
 
 def _atomic_replace_directory(target: Path, populate: Callable[[Path], None]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
+    backup = recover_directory_swap(target)
     stage = Path(tempfile.mkdtemp(prefix=f".{target.name}-", dir=target.parent))
-    backup = target.with_name(f".{target.name}.backup")
     try:
         populate(stage)
-        if backup.exists():
-            shutil.rmtree(backup)
         if target.exists():
             target.replace(backup)
         stage.replace(target)
@@ -141,10 +156,13 @@ def prepare_training(
                         }
                     )
                     continue
-                split = _prepared_crop(aligned.image, crop, config.image_size)
-                filename = (
-                    f"{source_path.stem}_{crop.id:02d}{source_path.suffix.lower()}"
+                split = _prepared_crop(
+                    aligned.image,
+                    crop,
+                    config.image_size,
+                    source_image=source_path.name,
                 )
+                filename = f"{source_path.stem}_{crop.id:02d}{source_path.suffix}"
                 write_image(stage / filename, split)
                 splits.append(
                     PreparedSplit(
@@ -211,10 +229,13 @@ def prepare_testing(
                 continue
             splits: list[PreparedSplit] = []
             for crop in config.part.ranges:
-                split = _prepared_crop(aligned.image, crop, config.image_size)
-                filename = (
-                    f"{source_path.stem}_{crop.id:02d}{source_path.suffix.lower()}"
+                split = _prepared_crop(
+                    aligned.image,
+                    crop,
+                    config.image_size,
+                    source_image=source_path.name,
                 )
+                filename = f"{source_path.stem}_{crop.id:02d}{source_path.suffix}"
                 write_image(stage / filename, split)
                 splits.append(
                     PreparedSplit(

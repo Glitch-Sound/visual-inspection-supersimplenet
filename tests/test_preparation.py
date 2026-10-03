@@ -7,9 +7,12 @@ import numpy as np
 import pytest
 from conftest import build_project, write_test_image
 
-from app.imaging import AlignedImage, AlignmentError
+from app.atomic import recover_directory_swap
+from app.config import AlignmentSettings
+from app.imaging import AlignedImage, AlignmentError, align_orb
 from app.preparation import (
     PreparationError,
+    alignment_warning,
     create_check_image,
     prepare_testing,
     prepare_training,
@@ -18,6 +21,61 @@ from app.preparation import (
 
 def identity_aligner(image: np.ndarray, *_args: object) -> AlignedImage:
     return AlignedImage(image.copy(), matches=42, inlier_ratio=0.9)
+
+
+def test_atomic_directory_recovers_interrupted_swap(tmp_path: Path) -> None:
+    target = tmp_path / "derived"
+    backup = tmp_path / ".derived.backup"
+    backup.mkdir()
+    (backup / "keep.txt").write_text("old", encoding="utf-8")
+
+    returned = recover_directory_swap(target)
+
+    assert returned == backup
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "old"
+    assert not backup.exists()
+
+    backup.mkdir()
+    (backup / "old.txt").write_text("old", encoding="utf-8")
+    recover_directory_swap(target)
+    assert target.is_dir()
+    assert not backup.exists()
+
+
+def test_align_orb_uses_configured_ransac_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(42)
+    reference = rng.integers(0, 256, size=(256, 256, 3), dtype=np.uint8)
+    captured: dict[str, float] = {}
+
+    def find_homography(
+        source: np.ndarray,
+        target: np.ndarray,
+        method: int,
+        threshold: float,
+        *,
+        confidence: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        assert source.shape == target.shape
+        assert method == cv2.RANSAC
+        captured["threshold"] = threshold
+        captured["confidence"] = confidence
+        return np.eye(3, dtype=np.float64), np.ones((len(source), 1), dtype=np.uint8)
+
+    monkeypatch.setattr(cv2, "findHomography", find_homography)
+    settings = AlignmentSettings(
+        minimum_matches=4,
+        ransac_reprojection_threshold_px=2.5,
+        ransac_confidence=0.9,
+        minimum_inlier_ratio=0.75,
+    )
+
+    result = align_orb(reference.copy(), reference, settings)
+
+    assert result.matches >= settings.minimum_matches
+    assert result.inlier_ratio == 1.0
+    assert captured == {"threshold": 2.5, "confidence": 0.9}
 
 
 def test_check_writes_labeled_ranges(tmp_path: Path) -> None:
@@ -121,3 +179,35 @@ def test_test_pre_rejects_out_of_bounds_crop(tmp_path: Path) -> None:
     with pytest.raises(PreparationError, match="outside image bounds"):
         prepare_testing(config, paths, aligner=identity_aligner)
     assert not paths.prepared_test("XX").exists()
+
+
+@pytest.mark.parametrize("testing", [False, True])
+def test_crop_error_identifies_source_and_split(tmp_path: Path, testing: bool) -> None:
+    config, paths = build_project(tmp_path, ranges=[{"id": 7, "x": 30, "y": 0}])
+    write_test_image(paths.original_train("XX") / "base.png")
+    prepare = prepare_testing if testing else prepare_training
+    if testing:
+        write_test_image(paths.original_test("XX") / "sample.png")
+        expected_source = "sample.png"
+    else:
+        expected_source = "base.png"
+
+    with pytest.raises(PreparationError) as captured:
+        prepare(config, paths, aligner=identity_aligner)
+
+    message = str(captured.value)
+    assert expected_source in message
+    assert "range id 7" in message
+
+
+def test_alignment_warning_identifies_source_reason_and_action() -> None:
+    training = alignment_warning("train.png", "insufficient_matches", testing=False)
+    testing = alignment_warning("test.png", "homography_failed", testing=True)
+
+    assert "train.png" in training
+    assert "insufficient_matches" in training
+    assert "manual review is required" in training
+    assert "test.png" in testing
+    assert "homography_failed" in testing
+    assert "undetermined" in testing
+    assert "recapture is required" in testing

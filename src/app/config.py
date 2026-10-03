@@ -5,10 +5,11 @@ from __future__ import annotations
 import configparser
 import json
 import math
-from pathlib import Path
+import warnings
+from pathlib import Path, PureWindowsPath
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.paths import ProjectPaths, validate_model_name
 
@@ -108,7 +109,6 @@ class NormalOnlySettings(StrictModel):
 class ExecutionSettings(StrictModel):
     trials: Annotated[int, Field(gt=0)] = 50
     seed: int = 42
-    storage: str
     resume: bool = True
 
 
@@ -241,6 +241,20 @@ class ModelConfig(StrictModel):
     augmentation: AugmentationSettings
     alignment: AlignmentSettings
 
+    @field_validator("base")
+    @classmethod
+    def validate_base_filename(cls, value: str) -> str:
+        if (
+            not value
+            or value in {".", ".."}
+            or "/" in value
+            or "\\" in value
+            or Path(value).is_absolute()
+            or PureWindowsPath(value).drive
+        ):
+            raise ValueError("base must be a filename without path components")
+        return value
+
     @model_validator(mode="after")
     def validate_cross_fields(self) -> ModelConfig:
         ids = [item.id for item in self.ranges]
@@ -271,6 +285,19 @@ def load_image_size(path: Path) -> int:
         raw = parser["IMAGE"]["SIZE"]
     except KeyError as error:
         raise ValueError("setting.ini requires IMAGE.SIZE") from error
+    unknown_sections = sorted(set(parser.sections()) - {"IMAGE"})
+    unknown_keys = sorted(set(parser["IMAGE"]) - {"size"})
+    if unknown_sections or unknown_keys:
+        details = []
+        if unknown_sections:
+            details.append(f"sections={unknown_sections}")
+        if unknown_keys:
+            details.append(f"IMAGE keys={unknown_keys}")
+        warnings.warn(
+            f"setting.ini contains unknown entries: {', '.join(details)}",
+            UserWarning,
+            stacklevel=2,
+        )
     try:
         size = int(raw.strip(), 10)
     except ValueError as error:
@@ -299,11 +326,13 @@ def load_model_config(path: Path) -> ModelConfig:
 def load_config(root: Path, model: str) -> AppConfig:
     validate_model_name(model)
     paths = ProjectPaths(root)
-    return AppConfig(
+    config = AppConfig(
         image_size=load_image_size(paths.global_config),
         model=model,
         part=load_model_config(paths.model_config(model)),
     )
+    paths.base_image(model, config.part.base)
+    return config
 
 
 def validate_blacklist_images(config: AppConfig, available_images: set[str]) -> None:
@@ -312,13 +341,20 @@ def validate_blacklist_images(config: AppConfig, available_images: set[str]) -> 
         raise ValueError(f"blacklist references unknown images: {sorted(unknown)}")
 
 
-def write_threshold(path: Path, value: float) -> None:
-    """Atomically update only ``threshold.value`` in a model configuration."""
+def write_threshold(
+    path: Path, value: float, *, destination: Path | None = None
+) -> None:
+    """Write a threshold-updated configuration without mutating other fields."""
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["optuna_settings"]["threshold"]["value"] = value
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=4) + "\n", encoding="utf-8"
-    )
-    temporary.replace(path)
+    target = destination or path
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=4) + "\n", encoding="utf-8"
+        )
+        temporary.replace(target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from app.contracts import (
     PreparedSource,
     PreparedSplit,
     ScoreContract,
+    TrialParametersContract,
 )
 from app.modeling import AugmentationPipeline, ensure_cached
 from app.training import (
@@ -30,6 +32,22 @@ from app.training import (
     run_search,
     split_by_source,
 )
+
+TRIAL_PARAMETERS = {
+    "learning_rate_multiplier": 1.0,
+    "batch_size": 4,
+    "epochs": 200,
+    "feature_layers": ["layer2"],
+    "image_size": 256,
+}
+
+
+def set_trial_parameters(trial: optuna.Trial) -> None:
+    trial.suggest_float("learning_rate_multiplier", 1.0, 1.0)
+    trial.suggest_categorical("batch_size", [4])
+    trial.suggest_categorical("epochs", [200])
+    trial.suggest_categorical("feature_layers", ['["layer2"]'])
+    trial.suggest_categorical("image_size", [256])
 
 
 def make_manifest(count: int) -> PreparationManifest:
@@ -103,7 +121,7 @@ def test_search_report_labels_objective_as_provisional() -> None:
     result = BestTrialResult(
         model="XX",
         trial_number=0,
-        parameters={},
+        parameters=TrialParametersContract.model_validate(TRIAL_PARAMETERS),
         objective=0.12,
         checkpoint="weights/XX.ckpt",
         score_contract=ScoreContract(),
@@ -146,6 +164,7 @@ def test_training_persists_best_model_and_threshold(tmp_path: Path) -> None:
     torch.save({"state_dict": {}}, checkpoint)
     study = optuna.create_study(direction="minimize")
     trial = study.ask()
+    set_trial_parameters(trial)
     study.tell(trial, 0.1)
     split = split_by_source(make_manifest(5), tmp_path)
     result = persist_best_trial(
@@ -161,6 +180,78 @@ def test_training_persists_best_model_and_threshold(tmp_path: Path) -> None:
     assert payload["visual_inspection"]["threshold"] == result.threshold
     assert saved_config["optuna_settings"]["threshold"]["value"] == result.threshold
     assert (paths.study_dir("XX") / "best_trial.json").is_file()
+
+
+def test_training_artifact_transaction_restores_previous_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, paths = build_project(tmp_path)
+    checkpoint = paths.checkpoint("XX")
+    checkpoint.parent.mkdir(parents=True)
+    torch.save({"state_dict": {"old": torch.tensor([1])}}, checkpoint)
+    best = paths.study_dir("XX") / "best_trial.json"
+    best.parent.mkdir(parents=True)
+    best.write_text('{"old": true}\n', encoding="utf-8")
+    config_path = paths.model_config("XX")
+    old_bytes = {
+        "checkpoint": checkpoint.read_bytes(),
+        "config": config_path.read_bytes(),
+        "best": best.read_bytes(),
+    }
+
+    candidate = tmp_path / "candidate.ckpt"
+    torch.save({"state_dict": {"new": torch.tensor([2])}}, candidate)
+    study = optuna.create_study(direction="minimize")
+    trial = study.ask()
+    set_trial_parameters(trial)
+    study.tell(trial, 0.1)
+    split = split_by_source(make_manifest(5), tmp_path)
+    from app import training
+
+    replace = training._replace_staged_artifact
+    calls = 0
+
+    def fail_second(source: Path, target: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated replacement failure")
+        replace(source, target)
+
+    monkeypatch.setattr(training, "_replace_staged_artifact", fail_second)
+
+    with pytest.raises(OSError, match="simulated replacement failure"):
+        persist_best_trial(
+            config=config,
+            paths=paths,
+            split=split,
+            study=study,
+            outcomes={0: TrialOutcome([0.1], [0.2, 0.3], candidate)},
+        )
+
+    assert checkpoint.read_bytes() == old_bytes["checkpoint"]
+    assert config_path.read_bytes() == old_bytes["config"]
+    assert best.read_bytes() == old_bytes["best"]
+    assert not (paths.study_dir("XX") / ".artifact-transaction.json").exists()
+
+    targets = {
+        "checkpoint": checkpoint,
+        "config": config_path,
+        "best_trial": best,
+    }
+    for target in targets.values():
+        shutil.copy2(target, training._transaction_path(target, "backup"))
+        target.write_bytes(b"incomplete-new-artifact")
+    training._write_transaction_journal(
+        paths.study_dir("XX") / ".artifact-transaction.json",
+        {name: True for name in targets},
+    )
+
+    training.recover_artifact_transaction(paths, "XX")
+
+    assert checkpoint.read_bytes() == old_bytes["checkpoint"]
+    assert config_path.read_bytes() == old_bytes["config"]
+    assert best.read_bytes() == old_bytes["best"]
 
 
 def test_pretrained_weights_are_cached(tmp_path: Path) -> None:

@@ -16,7 +16,7 @@
         "pruner": {"name": "MedianPruner", "startup_trials": 5, "warmup_epochs": 50, "interval_epochs": 10},
         "threshold": {"method": "training_percentile", "percentile": 99, "score_source": "supersimplenet.pred_score", "value": null},
         "normal_only": {"percentile": 99, "train_ratio": 0.8, "validation_ratio": 0.2, "seed": 42},
-        "execution": {"trials": 50, "seed": 42, "storage": "optuna/XX/study.db", "resume": true}
+        "execution": {"trials": 50, "seed": 42, "resume": true}
     },
     "score": {"source": "supersimplenet.pred_score", "anomalib_post_processor": false, "anomalib_evaluator": false, "anomalib_visualizer": false},
     "augmentation": {

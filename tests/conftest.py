@@ -30,7 +30,6 @@ def build_project(
     )
     payload["range"] = ranges or [{"id": 0, "x": 0, "y": 0}]
     payload["blacklist"] = blacklist or []
-    payload["optuna_settings"]["execution"]["storage"] = "optuna/XX/study.db"
     (config_dir / "part_XX.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )

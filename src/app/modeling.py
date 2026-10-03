@@ -24,19 +24,11 @@ class Prediction:
     anomaly_map: FloatImage
 
 
-def deterministic_preprocess(image: NDArray[np.uint8], image_size: int) -> FloatImage:
-    """Resize with bilinear interpolation and return RGB values in [0, 1]."""
+def rgb_image_tensor(image: NDArray[np.uint8], torch: Any) -> Any:
+    """Convert an OpenCV BGR image without duplicating model preprocessing."""
 
-    resized = cv2.resize(
-        image, (image_size, image_size), interpolation=cv2.INTER_LINEAR
-    )
-    return cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-
-
-def imagenet_normalize(image: FloatImage) -> FloatImage:
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-    return (image - mean) / std
+    rgb = np.ascontiguousarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    return torch.from_numpy(rgb).permute(2, 0, 1).float().div(255.0).unsqueeze(0)
 
 
 def _temperature_rgb(kelvin: float) -> NDArray[np.float32]:
@@ -279,12 +271,14 @@ class CheckpointPredictor:
         self.model.load_state_dict(payload["state_dict"])
         self.model.to(self.device)
         self.model.eval()
+        pre_processor = self.model.pre_processor
+        if pre_processor is None or pre_processor.transform is None:
+            raise ValueError("SuperSimpleNet requires deterministic preprocessing")
+        self.preprocess = cast(Any, pre_processor.transform)
 
     def __call__(self, image: NDArray[np.uint8]) -> Prediction:
-        rgb = deterministic_preprocess(image, self.image_size)
-        normalized = imagenet_normalize(rgb)
-        tensor = self.torch.from_numpy(normalized.transpose(2, 0, 1)).unsqueeze(0)
-        tensor = tensor.to(self.device)
+        tensor = rgb_image_tensor(image, self.torch)
+        tensor = self.preprocess(tensor).to(self.device)
         with self.torch.no_grad():
             output = self.model.model(tensor)
         score = float(output.pred_score.detach().cpu().reshape(-1)[0])

@@ -53,6 +53,11 @@ class ProjectPaths:
     def original_test(self, model: str) -> Path:
         return self._model_dir("data/02_original_test", model)
 
+    def base_image(self, model: str, filename: str) -> Path:
+        return ensure_within(
+            self.original_train(model), self.original_train(model) / filename
+        )
+
     def check_image(self, model: str) -> Path:
         validate_model_name(model)
         return ensure_within(self.root, self.root / "data/03_check" / f"{model}.png")

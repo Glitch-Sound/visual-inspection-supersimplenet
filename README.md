@@ -70,8 +70,8 @@ data/02_original_test/<model>/      # 検査対象画像
 ```bash
 uv run --locked check --model XX
 uv run --locked train-pre --model XX
-uv run --locked test-pre --model XX
 uv run --locked train --model XX
+uv run --locked test-pre --model XX
 uv run --locked test --model XX
 ```
 
@@ -92,6 +92,12 @@ uv run --locked test --model XX
 初期探索はseed 42で50試行を行い、学習率倍率`0.25`〜`4.0`、batch size `4/8/16`、epoch `200/300/400`、特徴層`layer2`・`layer2+layer3`・`layer3`、画像サイズ`256/384/500`を対象とします。学習入力だけに、平行移動、回転、明るさ、コントラスト、色温度、ガンマ、センサーノイズ、Gaussian blurを`config/part_<model>.json`の順序・確率・範囲で適用し、拡張画像は保存しません。検証・試験には適用しません。
 
 探索、暫定閾値、検査判定はすべてAnomalib PostProcessorを無効にした`supersimplenet.pred_score`を使用します。最良モデルで学習集合を再推論したスコアの99パーセンタイルを暫定閾値とし、checkpoint、`best_trial.json`、型番設定へ同じ値を保存します。この0〜1の値は校正済み確率ではなく、探索の目的値も本番の検出性能値ではありません。
+
+探索・暫定閾値算出・検査は、モデルに設定された同じbilinear・antialias・ImageNet正規化の前処理を使用します。checkpoint、`best_trial.json`、型番設定の閾値は一式として更新され、更新の中断を検出した次回の`train`または`test`では旧一式へ復旧してから処理します。
+
+検査結果JSONは`<拡張子付き元画像名>.json`、分割結果画像は`<拡張子付き分割画像名>_result.png`として保存します。例えば`sample.png`と`sample.jpg`が同じ型番に存在しても、互いの結果を上書きしません。画像読込み不能と準備中の分割範囲外は処理失敗`3`となり、既存の準備成果物は維持されます。位置合わせ失敗の警告には対象画像、理由、再確認または再撮影の案内が含まれます。
+
+準備manifestは要求型番、パス要素を含まない画像名、元画像と分割画像の一意性、元画像と分割の対応、一意な分割IDを読込み時に検証します。`best_trial.json`も型付きで読み戻し、型番、checkpoint参照、スコア契約、閾値が一致しない場合はモデル生成前に終了します。
 
 `--restart`は対象成果物を直ちに削除するため、旧成果物が必要な運用では実行前に任意の場所へ退避してください。ロールバック時はコードと依存関係を前版へ戻し、必要に応じて退避済み成果物を復元します。元画像、型番設定、`pretrained/`はロールバック時にも自動削除しません。
 

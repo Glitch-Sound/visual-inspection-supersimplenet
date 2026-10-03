@@ -1,13 +1,34 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
+import torch
 from conftest import build_project, write_test_image
 
-from app.evaluation import evaluate_split, restart_evaluation
-from app.modeling import Prediction
+from app.contracts import (
+    AlignmentResult,
+    BestTrialResult,
+    InspectionResult,
+    PreparationManifest,
+    PreparedSource,
+    PreparedSplit,
+    RunMetadata,
+    ScoreContract,
+    TrialParametersContract,
+)
+from app.evaluation import (
+    evaluate_model,
+    evaluate_split,
+    restart_evaluation,
+    validate_best_trial_contract,
+    validate_score_contract,
+)
+from app.modeling import CheckpointPredictor, Prediction
+from app.runtime import DeviceSelection, RunRecorder
 
 
 def test_evaluation_records_normal_split(tmp_path: Path) -> None:
@@ -28,7 +49,8 @@ def test_evaluation_records_normal_split(tmp_path: Path) -> None:
     assert np.array_equal(written, original)
 
 
-def test_evaluation_visualizes_anomalous_split(tmp_path: Path) -> None:
+@pytest.mark.parametrize("score", [0.5, 0.8])
+def test_evaluation_visualizes_anomalous_split(tmp_path: Path, score: float) -> None:
     image_path = tmp_path / "split.png"
     original = write_test_image(image_path)
     anomaly_map = np.linspace(
@@ -40,13 +62,112 @@ def test_evaluation_visualizes_anomalous_split(tmp_path: Path) -> None:
         image_path=image_path,
         split_id=0,
         threshold=0.5,
-        predictor=lambda _image: Prediction(0.8, anomaly_map),
+        predictor=lambda _image: Prediction(score, anomaly_map),
         result_path=result_path,
     )
     assert result.status == "anomaly"
     written = cv2.imread(str(result_path))
     assert written is not None
     assert not np.array_equal(written, original)
+
+
+@pytest.mark.parametrize(
+    ("metadata_update", "message"),
+    [
+        ({"model": "YY"}, "model mismatch"),
+        ({"score_source": "other.score"}, "score_source"),
+        ({"anomalib_post_processor": True}, "anomalib_post_processor"),
+        ({"threshold": 0.6}, "threshold"),
+    ],
+)
+def test_evaluation_rejects_mismatched_checkpoint_contract(
+    tmp_path: Path, metadata_update: dict[str, object], message: str
+) -> None:
+    config, _paths = build_project(tmp_path)
+    config = config.model_copy(
+        update={
+            "part": config.part.model_copy(
+                update={
+                    "optuna_settings": config.part.optuna_settings.model_copy(
+                        update={
+                            "threshold": config.part.optuna_settings.threshold.model_copy(
+                                update={"value": 0.5}
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+    metadata: dict[str, object] = {
+        "model": "XX",
+        "score_source": "supersimplenet.pred_score",
+        "anomalib_post_processor": False,
+        "threshold": 0.5,
+    }
+    metadata.update(metadata_update)
+
+    with pytest.raises(ValueError, match=message):
+        validate_score_contract(config, metadata)
+
+
+def test_evaluation_rejects_invalid_best_trial_contract(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    config = config.model_copy(
+        update={
+            "part": config.part.model_copy(
+                update={
+                    "optuna_settings": config.part.optuna_settings.model_copy(
+                        update={
+                            "threshold": config.part.optuna_settings.threshold.model_copy(
+                                update={"value": 0.5}
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+    best = BestTrialResult(
+        model="XX",
+        trial_number=0,
+        parameters=TrialParametersContract(
+            learning_rate_multiplier=1.0,
+            batch_size=4,
+            epochs=200,
+            feature_layers=["layer2"],
+            image_size=256,
+        ),
+        objective=0.1,
+        checkpoint="weights/XX.ckpt",
+        score_contract=ScoreContract(),
+        threshold=0.5,
+        train_sources=["train.png"],
+        validation_sources=["validation.png"],
+        seed=42,
+        dependencies={},
+    )
+    validate_best_trial_contract(config, paths, best)
+
+    for update, message in (
+        ({"model": "YY"}, "model mismatch"),
+        ({"checkpoint": "weights/YY.ckpt"}, "checkpoint mismatch"),
+        ({"threshold": 0.6}, "threshold"),
+        (
+            {"parameters": best.parameters.model_copy(update={"image_size": 999})},
+            "image_size",
+        ),
+    ):
+        with pytest.raises(ValueError, match=message):
+            validate_best_trial_contract(config, paths, best.model_copy(update=update))
+
+    with pytest.raises(ValueError, match="parameters"):
+        BestTrialResult.model_validate(
+            {
+                **best.model_dump(mode="json"),
+                "parameters": {"learning_rate_multiplier": "invalid"},
+            }
+        )
 
 
 def test_evaluation_restart_replaces_only_results(tmp_path: Path) -> None:
@@ -64,3 +185,212 @@ def test_evaluation_restart_replaces_only_results(tmp_path: Path) -> None:
     assert not results.exists()
     assert checkpoint.read_text(encoding="utf-8") == "keep"
     assert (prepared / "manifest.json").read_text(encoding="utf-8") == "keep"
+
+
+def test_predictor_uses_model_preprocessor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[torch.Tensor] = []
+
+    class Preprocess:
+        def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+            calls.append(tensor.clone())
+            return torch.nn.functional.interpolate(
+                tensor, size=(7, 7), mode="bilinear", antialias=True
+            )
+
+    class Core:
+        def __call__(self, tensor: torch.Tensor) -> SimpleNamespace:
+            assert tuple(tensor.shape) == (1, 3, 7, 7)
+            return SimpleNamespace(
+                pred_score=torch.tensor([0.2]),
+                anomaly_map=torch.zeros((1, 1, 7, 7)),
+            )
+
+    class Model:
+        pre_processor = SimpleNamespace(transform=Preprocess())
+        model = Core()
+
+        def load_state_dict(self, _state: dict[str, object]) -> None:
+            pass
+
+        def to(self, _device: torch.device) -> None:
+            pass
+
+        def eval(self) -> None:
+            pass
+
+    monkeypatch.setattr("app.modeling.create_supersimplenet", lambda **_kwargs: Model())
+    checkpoint = tmp_path / "model.ckpt"
+    torch.save({"state_dict": {}}, checkpoint)
+    predictor = CheckpointPredictor(
+        checkpoint,
+        layers=["layer2"],
+        image_size=7,
+        learning_rate_multiplier=1.0,
+        device="cpu",
+    )
+
+    image = np.zeros((9, 13, 3), dtype=np.uint8)
+    prediction = predictor(image)
+
+    assert prediction.score == pytest.approx(0.2)
+    assert len(calls) == 1
+    assert tuple(calls[0].shape) == (1, 3, 9, 13)
+
+
+def test_evaluation_keeps_same_stem_different_extensions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, paths = build_project(tmp_path)
+    config = config.model_copy(
+        update={
+            "part": config.part.model_copy(
+                update={
+                    "optuna_settings": config.part.optuna_settings.model_copy(
+                        update={
+                            "threshold": config.part.optuna_settings.threshold.model_copy(
+                                update={"value": 0.5}
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+    prepared = paths.prepared_test("XX")
+    sources: list[PreparedSource] = []
+    for suffix in ("png", "jpg"):
+        split_name = f"sample_00.{suffix}"
+        write_test_image(prepared / split_name)
+        sources.append(
+            PreparedSource(
+                source_image=f"sample.{suffix}",
+                alignment=AlignmentResult(status="aligned"),
+                splits=[
+                    PreparedSplit(
+                        source_image=f"sample.{suffix}",
+                        split_id=0,
+                        image=split_name,
+                    )
+                ],
+            )
+        )
+    PreparationManifest(
+        model="XX",
+        created_at=RunRecorder(
+            "test", "XX", DeviceSelection("cpu", "CPU", "test")
+        ).started_at,
+        sources=sources,
+    ).write_json(prepared / "manifest.json")
+    monkeypatch.setattr(
+        "app.evaluation.load_checkpoint_metadata",
+        lambda _path: {
+            "model": "XX",
+            "score_source": "supersimplenet.pred_score",
+            "anomalib_post_processor": False,
+            "threshold": 0.5,
+        },
+    )
+    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
+
+    evaluate_model(
+        config,
+        paths,
+        predictor=lambda image: Prediction(
+            0.2, np.zeros(image.shape[:2], dtype=np.float32)
+        ),
+        finish_runtime=lambda: recorder.finish(0),
+    )
+
+    result_names = {path.name for path in paths.results("XX").iterdir()}
+    assert result_names == {
+        "sample.png.json",
+        "sample.jpg.json",
+        "sample_00.png_result.png",
+        "sample_00.jpg_result.png",
+    }
+
+
+def test_evaluation_persists_final_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, paths = build_project(tmp_path)
+    config = config.model_copy(
+        update={
+            "part": config.part.model_copy(
+                update={
+                    "optuna_settings": config.part.optuna_settings.model_copy(
+                        update={
+                            "threshold": config.part.optuna_settings.threshold.model_copy(
+                                update={"value": 0.5}
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+    prepared = paths.prepared_test("XX")
+    image_path = prepared / "source_00.png"
+    write_test_image(image_path)
+    PreparationManifest(
+        model="XX",
+        created_at=RunRecorder(
+            "test", "XX", DeviceSelection("cpu", "CPU", "test")
+        ).started_at,
+        sources=[
+            PreparedSource(
+                source_image="source.png",
+                alignment=AlignmentResult(
+                    status="undetermined", reason="homography_failed"
+                ),
+                splits=[
+                    PreparedSplit(
+                        source_image="source.png",
+                        split_id=0,
+                        image=image_path.name,
+                    )
+                ],
+            )
+        ],
+    ).write_json(prepared / "manifest.json")
+    monkeypatch.setattr(
+        "app.evaluation.load_checkpoint_metadata",
+        lambda _path: {
+            "model": "XX",
+            "score_source": "supersimplenet.pred_score",
+            "anomalib_post_processor": False,
+            "threshold": 0.5,
+        },
+    )
+    recorder = RunRecorder(
+        "test", "XX", DeviceSelection("cpu", "CPU", "CUDA is unavailable")
+    )
+    prediction_completed = False
+
+    def predictor(image: np.ndarray) -> Prediction:
+        nonlocal prediction_completed
+        prediction_completed = True
+        raise RuntimeError("prediction failed")
+
+    def finish_runtime() -> RunMetadata:
+        assert prediction_completed
+        return recorder.finish(0)
+
+    results = evaluate_model(
+        config,
+        paths,
+        predictor=predictor,
+        finish_runtime=finish_runtime,
+        record_warning=recorder.warnings.append,
+        record_error=recorder.errors.append,
+    )
+    final_runtime = recorder.finish(0)
+    restored = InspectionResult.read_json(paths.results("XX") / "source.png.json")
+
+    assert results[0].runtime == final_runtime
+    assert restored.runtime == final_runtime
+    assert restored.runtime.duration_seconds >= 0
+    assert restored.runtime.warnings == ["source.png: homography_failed"]
+    assert restored.runtime.errors == ["source.png: split 0: prediction failed"]

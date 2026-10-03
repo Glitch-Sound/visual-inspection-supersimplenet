@@ -12,11 +12,14 @@ from typing import cast
 import cv2
 import numpy as np
 
+from app.atomic import recover_directory_swap
 from app.config import AppConfig
 from app.contracts import (
+    BestTrialResult,
     InspectionResult,
     PreparationManifest,
     ResultStatus,
+    RunMetadata,
     ScoreContract,
     SplitResult,
 )
@@ -26,6 +29,10 @@ from app.paths import ProjectPaths
 from app.results import aggregate_status, write_inspection_result
 
 Predictor = Callable[[ImageArray], Prediction]
+
+
+def _ignore_message(_message: str) -> None:
+    """Default sink for callers that do not need command-level messages."""
 
 
 def validate_score_contract(
@@ -47,11 +54,47 @@ def validate_score_contract(
     if checkpoint_metadata.get("anomalib_post_processor") is not False:
         raise ValueError("checkpoint must have anomalib_post_processor disabled")
     checkpoint_threshold = checkpoint_metadata.get("threshold")
-    if not isinstance(checkpoint_threshold, (int, float)) or not np.isclose(
-        checkpoint_threshold, threshold
+    if (
+        isinstance(checkpoint_threshold, bool)
+        or not isinstance(checkpoint_threshold, (int, float))
+        or not np.isclose(checkpoint_threshold, threshold)
     ):
         raise ValueError("checkpoint threshold does not match model config")
     return threshold
+
+
+def validate_best_trial_contract(
+    config: AppConfig, paths: ProjectPaths, best: BestTrialResult
+) -> None:
+    expected_checkpoint = str(paths.checkpoint(config.model).relative_to(paths.root))
+    threshold = config.part.optuna_settings.threshold.value
+    if best.model != config.model:
+        raise ValueError(
+            f"best_trial model mismatch: expected {config.model}, got {best.model}"
+        )
+    if best.checkpoint != expected_checkpoint:
+        raise ValueError(
+            "best_trial checkpoint mismatch: "
+            f"expected {expected_checkpoint}, got {best.checkpoint}"
+        )
+    if threshold is None or not np.isclose(best.threshold, threshold):
+        raise ValueError("best_trial threshold does not match model config")
+    parameters = best.parameters
+    search = config.part.optuna_settings.search
+    if not (
+        search.learning_rate_multiplier.low
+        <= parameters.learning_rate_multiplier
+        <= search.learning_rate_multiplier.high
+    ):
+        raise ValueError("best_trial learning_rate_multiplier is outside search space")
+    if parameters.batch_size not in search.batch_size.choices:
+        raise ValueError("best_trial batch_size is outside search space")
+    if parameters.epochs not in search.epochs.choices:
+        raise ValueError("best_trial epochs is outside search space")
+    if list(parameters.feature_layers) not in search.feature_layers.choices:
+        raise ValueError("best_trial feature_layers is outside search space")
+    if parameters.image_size not in search.preprocessing.image_size.choices:
+        raise ValueError("best_trial image_size is outside search space")
 
 
 def _heatmap(image: ImageArray, anomaly_map: np.ndarray) -> ImageArray:
@@ -100,18 +143,25 @@ def evaluate_model(
     paths: ProjectPaths,
     *,
     predictor: Predictor,
-    runtime: dict[str, object],
+    finish_runtime: Callable[[], RunMetadata],
+    record_warning: Callable[[str], None] = _ignore_message,
+    record_error: Callable[[str], None] = _ignore_message,
 ) -> list[InspectionResult]:
     checkpoint = paths.checkpoint(config.model)
     metadata = load_checkpoint_metadata(checkpoint)
     threshold = validate_score_contract(config, metadata)
     prepared_dir = paths.prepared_test(config.model)
     manifest = PreparationManifest.read_json(prepared_dir / "manifest.json")
+    if manifest.model != config.model:
+        raise ValueError(
+            f"test manifest model mismatch: expected {config.model}, "
+            f"got {manifest.model}"
+        )
     target = paths.results(config.model)
     target.parent.mkdir(parents=True, exist_ok=True)
+    backup = recover_directory_swap(target)
     stage = Path(tempfile.mkdtemp(prefix=f".{target.name}-", dir=target.parent))
-    backup = target.with_name(f".{target.name}.backup")
-    results: list[InspectionResult] = []
+    pending_results: list[dict[str, object]] = []
     required_ids = {item.id for item in config.part.ranges}
     try:
         for source in manifest.sources:
@@ -119,10 +169,12 @@ def evaluate_model(
             errors: list[str] = []
             warnings: list[str] = []
             if source.alignment.status != "aligned":
-                warnings.append(source.alignment.reason or "alignment_failed")
+                warning = source.alignment.reason or "alignment_failed"
+                warnings.append(warning)
+                record_warning(f"{source.source_image}: {warning}")
             for split in source.splits:
                 image_path = prepared_dir / split.image
-                result_name = f"{Path(split.image).stem}_result.png"
+                result_name = f"{split.image}_result.png"
                 try:
                     split_results.append(
                         evaluate_split(
@@ -136,6 +188,7 @@ def evaluate_model(
                 except Exception as error:  # keep remaining splits observable
                     message = f"split {split.split_id}: {error}"
                     errors.append(message)
+                    record_error(f"{source.source_image}: {message}")
                     split_results.append(
                         SplitResult(
                             split_id=split.split_id,
@@ -148,27 +201,29 @@ def evaluate_model(
             overall, next_action = aggregate_status(
                 split_results, required_split_ids=required_ids
             )
-            result = InspectionResult(
-                source_image=source.source_image,
-                model=config.model,
-                checkpoint=str(checkpoint.relative_to(paths.root)),
-                score_contract=ScoreContract(),
-                threshold=threshold,
-                splits=split_results,
-                overall_status=overall,
-                processed_at=datetime.now(UTC),
-                alignment=source.alignment,
-                errors=errors,
-                warnings=warnings,
-                runtime=runtime,
-                next_action=next_action,
+            pending_results.append(
+                {
+                    "source_image": source.source_image,
+                    "model": config.model,
+                    "checkpoint": str(checkpoint.relative_to(paths.root)),
+                    "score_contract": ScoreContract(),
+                    "threshold": threshold,
+                    "splits": split_results,
+                    "overall_status": overall,
+                    "processed_at": datetime.now(UTC),
+                    "alignment": source.alignment,
+                    "errors": errors,
+                    "warnings": warnings,
+                    "next_action": next_action,
+                }
             )
-            write_inspection_result(
-                result, stage / f"{Path(source.source_image).stem}.json"
-            )
-            results.append(result)
-        if backup.exists():
-            shutil.rmtree(backup)
+        runtime = finish_runtime()
+        results = [
+            InspectionResult.model_validate({**values, "runtime": runtime})
+            for values in pending_results
+        ]
+        for result in results:
+            write_inspection_result(result, stage / f"{result.source_image}.json")
         if target.exists():
             target.replace(backup)
         stage.replace(target)

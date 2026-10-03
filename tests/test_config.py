@@ -42,3 +42,46 @@ def test_check_rejects_invalid_ranges(tmp_path: Path, value: str) -> None:
     with pytest.raises(ValueError, match="outside image bounds"):
         create_check_image(invalid, paths)
     assert paths.check_image("XX").read_bytes() == existing
+
+
+def test_setting_ini_warns_about_unknown_entries(tmp_path: Path) -> None:
+    path = tmp_path / "setting.ini"
+    path.write_text(
+        "[IMAGE]\nSIZE = 500\nUNKNOWN = value\n[EXTRA]\nVALUE = 1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.warns(UserWarning, match="unknown entries") as captured:
+        assert load_image_size(path) == 500
+
+    message = str(captured[0].message)
+    assert "EXTRA" in message
+    assert "unknown" in message
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "<absolute>",
+        "../base.png",
+        "nested/base.png",
+        "nested\\base.png",
+        "C:\\base.png",
+        ".",
+        "..",
+    ],
+)
+def test_base_rejects_paths_outside_model_root(tmp_path: Path, base: str) -> None:
+    _config, paths = build_project(tmp_path)
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"unchanged")
+    if base == "<absolute>":
+        base = str(outside.resolve())
+    payload = json.loads(paths.model_config("XX").read_text(encoding="utf-8"))
+    payload["base"] = base
+    paths.model_config("XX").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="base"):
+        load_config(tmp_path, "XX")
+
+    assert outside.read_bytes() == b"unchanged"

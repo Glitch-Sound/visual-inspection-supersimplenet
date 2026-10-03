@@ -15,6 +15,10 @@ from app.config import AlignmentSettings, CropRange
 ImageArray = NDArray[np.uint8]
 
 
+class ImageReadError(RuntimeError):
+    """Raised when an expected image cannot be decoded."""
+
+
 class AlignmentError(RuntimeError):
     """Raised when an image cannot satisfy the alignment contract."""
 
@@ -35,7 +39,7 @@ class AlignedImage:
 def read_image(path: Path) -> ImageArray:
     image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None:
-        raise ValueError(f"image cannot be read: {path.name}")
+        raise ImageReadError(f"image cannot be read: {path.name}")
     return cast(ImageArray, image)
 
 
