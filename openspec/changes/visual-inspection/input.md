@@ -31,14 +31,14 @@
 - `Anomalib` を活用したい
 - `ハイパーパラメータ` など学習時の設定は `設定ファイル` 等で変更できるようにする
 - 初期段階では、正常として提供された画像からブラックリスト対象を除外し、以下の項目を `Optuna` で探索する
-    - 学習率
+    - 学習率倍率
     - バッチサイズ
     - エポック数
     - 特徴抽出層
-    - 前処理条件
+    - 前処理画像サイズ
 - 初期段階では、検証用に分けた学習対象画像の異常スコアの99パーセンタイル値を暫定的な探索指標とし、値を最小化する。この指標だけで異常の検出性能は判断しない
 - 異常画像が用意できた段階では、正常画像と異常画像を利用した検証へ拡張できる構成とする
-- 学習データが少ない場合、学習時に内部データ拡張を適用する
+- 学習データが少ないと運用者が判断した場合、型番設定で有効化して学習時に内部データ拡張を適用する。データ量からの自動判定は行わない
 - データ拡張の種類と強度は型番(`XX`)ごとの設定ファイルで変更可能にする
 - データ拡張は学習時だけ有効にし、検証時と試験時は無効にする
 
@@ -120,10 +120,10 @@ visual-inspection-supersimplenet
 全体に関する設定を規定する。
 
 - 学習・試験データの画像サイズ
-
+切り出しサイズとなり、縦・横のサイズとなる。
 ```ini
 [IMAGE]
-SIZE = 500      # 切り出しサイズ(縦・横)
+SIZE = 500
 ```
 
 
@@ -160,14 +160,56 @@ SIZE = 500      # 切り出しサイズ(縦・横)
     "_comment_optuna": "Optunaによる最適化パラメータの探索範囲などの設定",
     "optuna_settings": {
         "search": {
-            "learning_rate": {},
-            "batch_size": {},
-            "epochs": {},
-            "feature_layers": [],
-            "preprocessing": {},
-            "augmentation": {}
+            "learning_rate_multiplier": {
+                "type": "float",
+                "low": 0.25,
+                "high": 4.0,
+                "log": true,
+                "base_adaptor": 0.0001,
+                "base_segmentation_detection": 0.0002
+            },
+            "batch_size": {
+                "type": "categorical",
+                "choices": [4, 8, 16]
+            },
+            "epochs": {
+                "type": "categorical",
+                "choices": [200, 300, 400]
+            },
+            "feature_layers": {
+                "type": "categorical",
+                "choices": [
+                    ["layer2"],
+                    ["layer2", "layer3"],
+                    ["layer3"]
+                ]
+            },
+            "preprocessing": {
+                "image_size": {
+                    "type": "categorical",
+                    "choices": [256, 384, 500]
+                },
+                "normalization": "imagenet",
+                "interpolation": "bilinear",
+                "antialias": true
+            }
         },
-        "threshold": null,
+        "sampler": {
+            "name": "TPESampler",
+            "seed": 42
+        },
+        "pruner": {
+            "name": "MedianPruner",
+            "startup_trials": 5,
+            "warmup_epochs": 50,
+            "interval_epochs": 10
+        },
+        "threshold": {
+            "method": "training_percentile",
+            "percentile": 99,
+            "score_source": "supersimplenet.pred_score",
+            "value": null
+        },
         "normal_only": {
             "percentile": 99,
             "train_ratio": 0.8,
@@ -182,23 +224,84 @@ SIZE = 500      # 切り出しサイズ(縦・横)
         }
     },
 
+    "score": {
+        "source": "supersimplenet.pred_score",
+        "anomalib_post_processor": false,
+        "anomalib_evaluator": false,
+        "anomalib_visualizer": false
+    },
+
     "_comment_augmentation": "学習時だけ適用するデータ拡張の種類と強度",
     "augmentation": {
         "enabled": true,
-        "translation": {},
-        "rotation": {},
-        "brightness": {},
-        "contrast": {},
-        "color_temperature": {},
-        "gamma": {},
-        "sensor_noise": {},
-        "blur": {}
+        "seed": 42,
+        "order": [
+            "translation",
+            "rotation",
+            "brightness",
+            "contrast",
+            "color_temperature",
+            "gamma",
+            "sensor_noise",
+            "blur"
+        ],
+        "translation": {
+            "enabled": true,
+            "probability": 0.5,
+            "max_ratio": 0.02,
+            "padding_mode": "reflection"
+        },
+        "rotation": {
+            "enabled": true,
+            "probability": 0.5,
+            "max_degrees": 3.0,
+            "padding_mode": "reflection"
+        },
+        "brightness": {
+            "enabled": true,
+            "probability": 0.3,
+            "factor_min": 0.9,
+            "factor_max": 1.1
+        },
+        "contrast": {
+            "enabled": true,
+            "probability": 0.3,
+            "factor_min": 0.9,
+            "factor_max": 1.1
+        },
+        "color_temperature": {
+            "enabled": true,
+            "probability": 0.2,
+            "base_kelvin": 6500,
+            "max_delta_kelvin": 500
+        },
+        "gamma": {
+            "enabled": true,
+            "probability": 0.3,
+            "factor_min": 0.9,
+            "factor_max": 1.1
+        },
+        "sensor_noise": {
+            "enabled": true,
+            "probability": 0.3,
+            "stddev_min": 0.0,
+            "stddev_max": 0.01
+        },
+        "blur": {
+            "enabled": true,
+            "probability": 0.2,
+            "kernel_sizes": [3, 5],
+            "sigma_min": 0.1,
+            "sigma_max": 1.0
+        }
     },
 
     "alignment": {
         "method": "ORB",
         "minimum_matches": 20,
-        "confidence": 0.5
+        "ransac_reprojection_threshold_px": 3.0,
+        "ransac_confidence": 0.995,
+        "minimum_inlier_ratio": 0.5
     }
 }
 ```
@@ -207,8 +310,13 @@ SIZE = 500      # 切り出しサイズ(縦・横)
 座標単位はピクセルとし、切り出し範囲は左上を含み右端・下端を含まない範囲として扱う。
 `SIZE` は縦横が同じ正方形のピクセル数とする。<br />
 
-ORBの`minimum_matches`は20、`confidence`はホモグラフィ推定時のインライア比率0.5を初期値とする。
-実データに応じて型番(`XX`)ごとに変更可能にする。
+ORBの位置合わせでは、ホモグラフィ推定前の対応点数が`minimum_matches`以上であることを必須とする。
+`ransac_reprojection_threshold_px`は対応点をインライアとみなす再投影誤差の上限、`ransac_confidence`はOpenCVのRANSACが正しいモデルを得る信頼確率とする。
+ホモグラフィ推定後は返却されたマスクからインライア比率を計算し、`minimum_inlier_ratio`以上であることを必須とする。
+いずれかを満たさない場合、またはホモグラフィを推定できない場合は位置合わせ失敗とする。各値は実データに応じて型番(`XX`)ごとに変更可能にする。
+
+`normal_only.percentile`は検証集合に対するOptuna目的値、`threshold.percentile`は最良モデルの学習集合に対する暫定閾値の算出に使用し、初期値はいずれも99とする。
+`score.source`と`threshold.score_source`は一致しなければならず、`anomalib_post_processor`は`false`に固定する。不一致またはPostProcessor有効化を指定した設定は処理開始前に拒否する。
 
 ## 5. コマンド
 各コマンドは結果、処理時間、適切なログを見やすく出力すること。
@@ -249,7 +357,7 @@ xxx_nn.png      # xxx: 元ファイル名, nn: 切り出し範囲のID(2桁0埋�
 また、`part_XX.json` の `blacklist` にて指定された画像ファイル、切り出しIDに該当する場合はスキップすること。<br />
 
 ORBによる位置合わせに失敗した場合は、該当画像を学習対象から除外し、警告ログを出力すること。
-ORBの最低マッチ数と信頼度は、型番(`XX`)ごとの設定で変更可能にすること。<br />
+ORBの最低マッチ数、RANSAC再投影誤差、RANSAC信頼確率および最低インライア比率は、型番(`XX`)ごとの設定で変更可能にすること。<br />
 
 切り出し範囲が画像範囲外にはみ出した場合、エラーとすること。
 
@@ -269,17 +377,23 @@ uv run train --model XX
 学習用元画像からは全分割画像を学習に使用し、検証用元画像からは全分割画像を検証に使用すること。
 分割画像単位で学習用と検証用を分割してはならない。<br />
 
-    - 学習率
+    - 学習率倍率
     - バッチサイズ
     - エポック数
     - 特徴抽出層
-    - 前処理条件
+    - 前処理画像サイズ
+
+学習率倍率は、Anomalib 2.6.2のSuperSimpleNetが使用するadaptorの学習率`0.0001`とsegmentation/detectionの学習率`0.0002`の両方へ同じ倍率を掛け、両者の比率を維持すること。
+探索範囲は学習率倍率`0.25`〜`4.0`の対数分布、バッチサイズ`4`、`8`、`16`、エポック数`200`、`300`、`400`、特徴抽出層`["layer2"]`、`["layer2", "layer3"]`、`["layer3"]`、前処理画像サイズ`256`、`384`、`500`とする。
+前処理のImageNet正規化、bilinear補間およびantialiasは固定し、探索対象に含めないこと。
+Samplerはseed 42の`TPESampler`とし、Prunerは`MedianPruner`を利用する。最初の5試行は枝刈りせず、各試行の50 epochまでは枝刈りせず、以後10 epochごとに暫定指標を報告して枝刈りを判定すること。<br />
 
 初期段階では異常画像を必須とせず、正常として提供された画像の異常スコアが低く安定する設定を探索すること。
-検証用に分けた学習対象画像の異常スコアの99パーセンタイル値を暫定指標として評価し、値を最小化する設定を採用すること。この値を異常の検出性能とみなさないこと。
+異常スコアは、SuperSimpleNetがsigmoid適用後に返す`pred_score`をAnomalibのPostProcessorによる正規化・適応閾値処理を通さずに使用すること。このスコアは`0.0`〜`1.0`の範囲だが、校正済み確率とはみなさないこと。
+検証用に分けた学習対象画像の`pred_score`の99パーセンタイル値を暫定指標として評価し、値を最小化する設定を採用すること。この値を異常の検出性能とみなさないこと。
 型番(`XX`)ごとの暫定的な異常判定閾値も決定すること。<br />
 
-学習データが少ない場合は、以下のデータ拡張を学習処理の内部で適用できること。
+学習データが少ないと運用者が判断した場合は、型番設定の`augmentation.enabled`を`true`にして以下のデータ拡張を学習処理の内部で適用できること。システムは学習データ量から有効・無効を自動判定しないこと。
 
     - 微小な平行移動
     - 微小な回転
@@ -293,15 +407,21 @@ uv run train --model XX
 元画像と `data/04_train/XX/` 配下の前処理済み画像は変更せず、データ拡張した画像を永続化しないこと。
 データ拡張の種類と強度は、型番(`XX`)ごとの設定に従うこと。<br />
 
-データ拡張の設定値は、平行移動を画像サイズに対する比率、回転を度、明るさとコントラストを変化率、
-色温度をケルビン、ガンマを倍率、センサー由来ノイズを正規化画素値の標準偏差、ぼかしを奇数のカーネルサイズで指定する。
+各データ拡張は設定順に独立した適用確率で判定し、連続値は設定範囲から一様分布で選択する。
+平行移動は各軸で画像サイズの±2%以内、回転は±3度以内とし、生成された余白はreflectionで補う。
+明るさとコントラストは係数`0.9`〜`1.1`、色温度は6500K基準で±500K、ガンマは係数`0.9`〜`1.1`とする。
+色温度は1000K〜40000Kに制限した黒体色近似から6500Kに対するRGBチャネル倍率を求めて適用する。
+センサー由来ノイズは平均0、標準偏差`0.0`〜`0.01`のGaussianノイズ、ぼかしはカーネルサイズ`3`または`5`、sigma`0.1`〜`1.0`のGaussian blurとする。
+画素値は各変換後に正規化範囲`0.0`〜`1.0`へ制限し、seed 42から再現可能な乱数列を生成する。
 
 将来、異常画像と正解ラベルを利用できるようになった場合は、Optunaの評価処理を拡張し、モデルのハイパーパラメータと異常判定閾値を同時に探索できること。<br />
 最終的に確定した学習済みパラメータは `weights/` に保存すること。
 探索結果、探索条件、型番(`XX`)ごとの閾値は `optuna/XX/` に保存すること。
-Optunaの初期試行回数は50回、乱数seedは42とし、探索結果を `optuna/XX/study.db` に保存すること。
+Optunaの初期試行回数は枝刈りまたは失敗した試行を含む合計50回、乱数seedは42とし、探索結果を `optuna/XX/study.db` に保存すること。
 探索が中断した場合は既存の探索結果を保持して再開できること。明示的に最初から再学習する場合は、対象型番の旧探索結果と旧モデルを削除して再生成すること。
-最良試行の条件と評価値、学習済みパラメータへの対応を保存すること。<br />
+最良試行は正常完了した試行から選択すること。
+最良試行のモデルをevalモード、データ拡張なし、探索時と同じ決定的前処理で学習集合へ再推論し、得られた`pred_score`の99パーセンタイル値を暫定閾値とすること。
+最良試行の条件と評価値、学習済みパラメータ、スコア契約および暫定閾値の対応を保存すること。<br />
 
 
 ### 5.4. 試験準備
@@ -354,6 +474,7 @@ ORBによる位置合わせに失敗した場合は、エラーを明示し、�
     - 型番
     - 使用した学習済みパラメータ
     - 使用した閾値
+    - 使用したスコア種別とPostProcessorの有効状態
     - 分割ID
     - 分割画像名
     - 分割画像の異常スコア
@@ -368,6 +489,10 @@ ORB失敗などで判定できない分割画像のスコアは`null`とし、�
 未判定の元画像は原則として再撮影の対象とし、必要に応じて評価者が次の扱いを決める。<br />
 通常の判定では、分割画像に1つでも`anomaly`があれば元画像全体を`anomaly`とし、
 異常がなく全分割画像が`normal`の場合に限り元画像全体を`normal`とする。<br />
+
+試験時の異常スコアは、閾値算出時と同じ決定的前処理を適用し、AnomalibのPostProcessorを無効にしたSuperSimpleNetの`pred_score`とする。
+`pred_score`が暫定閾値以上の場合を`anomaly`、未満の場合を`normal`とする。
+ヒートマップには同じ推論で得たPostProcessor適用前の`anomaly_map`を使用し、分割画像サイズへリサイズして重ねること。
 
 データ拡張の種類と強度は、初期段階では型番(`XX`)ごとの設定ファイルで固定すること。
 初期段階のOptunaではデータ拡張の有効・無効や強度を探索対象とせず、異常画像と正解ラベルが用意できた段階で探索対象へ追加できる構成とすること。
