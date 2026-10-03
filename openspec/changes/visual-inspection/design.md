@@ -78,7 +78,7 @@
 
 | データ / 契約 | 変更 | フィールド・型・必須性 | 制約・既定値 | 生成・更新主体 | 互換性 / 移行 |
 | --- | --- | --- | --- | --- | --- |
-| `config/setting.ini` | 追加 | `IMAGE.SIZE: int` | 正数、正方形、一辺500pxを初期値 | 運用者 | 新規。未知キーは警告、必須欠落はエラー |
+| `config/setting.ini` | 追加 | `IMAGE.SIZE: int` | 正数、正方形、一辺500pxを初期値。初期テンプレートはインラインコメントを含まない `SIZE = 500` | 運用者 | 新規。未知キーは警告、必須欠落はエラー |
 | `config/part_<model>.json` | 追加 | `base: str`、`range[]: {id:int,x:int,y:int}`、`blacklist[]`、`optuna_settings`、`augmentation`、`alignment` | 型番は安全な識別子、IDは0〜99で一意、比率合計1、percentile=99、trials=50、seed=42、ORB初期値20/0.5 | 運用者。学習完了時は `threshold` だけ原子的更新 | 新規。Pydantic で全体検証し不明な破壊的形式を拒否 |
 | 準備 manifest | 追加 | `source_image`、`split_id`、`split_image`、`status`、`alignment`、`warning` | 学習は success/skipped、試験は success/undetermined/error。UTF-8 JSON | preparation | `data/04_train/<model>/manifest.json` と `data/05_test/<model>/manifest.json` |
 | 学習済みパラメータ | 追加 | checkpoint と型番・backbone・layers・環境メタデータ | `weights/<model>.ckpt`。全分割共通 | training/modeling | 新規。異なる型番の流用を拒否 |
@@ -114,10 +114,10 @@
 ### Decision 2: 設定検証と座標契約
 
 - **状態**: 確定
-- **採用内容**: INI を全体設定、JSON を型番設定として Pydantic モデルへ読み込み、処理前に相互検証する。型番は `^[A-Za-z0-9][A-Za-z0-9_-]*$` に制限する。
+- **採用内容**: INI を全体設定、JSON を型番設定として Pydantic モデルへ読み込み、処理前に相互検証する。`IMAGE.SIZE` はコメントを含まない値全体を10進整数へ変換する。型番は `^[A-Za-z0-9][A-Za-z0-9_-]*$` に制限する。
 - **根拠**: 型不正、範囲外、パストラバーサルを処理開始前に検出し、OS間で同じ契約にするため。
 - **代替案**: 辞書を都度参照する案はエラー箇所と既定値が不明確になるため不採用。
-- **実装規則 / 不変条件**: `[x,x+SIZE) × [y,y+SIZE)`、IDは0〜99で一意、比率合計1。設定書込みは一時ファイルから原子的置換する。
+- **実装規則 / 不変条件**: `setting.ini` の初期テンプレートは `[IMAGE]` の `SIZE = 500` とし、値と同じ行にコメントを置かない。`SIZE` は正の整数として検証する。切り出し範囲は `[x,x+SIZE) × [y,y+SIZE)`、IDは0〜99で一意、比率合計1。設定書込みは一時ファイルから原子的置換する。
 - **影響**: `config.py`、`paths.py`、設定フィクスチャ。
 
 ### Decision 3: SuperSimpleNet と依存関係
@@ -223,8 +223,8 @@
 
 | TC ID | 要件ID | Scenario ID | テスト層 | 前提・操作 | 期待値 | pytest 実装 | 自動化 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| TC-001 | REQ-001 | REQ-001-S01 | integration | 有効設定でcheck | ID付き矩形画像と処理情報 | `tests/test_preparation.py::test_check_writes_labeled_ranges` | はい |
-| TC-002 | REQ-001 | REQ-001-S02 | unit/integration | 範囲外・重複ID・非正サイズでcheck | exit 2、不完全出力なし | `tests/test_config.py::test_check_rejects_invalid_ranges` | はい |
+| TC-001 | REQ-001 | REQ-001-S01 | integration | コメントなしの正の整数 `SIZE` を含む有効設定でcheck | ID付き矩形画像と処理情報 | `tests/test_preparation.py::test_check_writes_labeled_ranges` | はい |
+| TC-002 | REQ-001 | REQ-001-S02 | unit/integration | 範囲外・重複ID・非整数または非正の `SIZE` でcheck | exit 2、不完全出力なし | `tests/test_config.py::test_check_rejects_invalid_ranges` | はい |
 | TC-003 | REQ-002 | REQ-002-S01 | integration | 位置合わせ可能な学習画像でtrain-pre | 命名契約どおり全分割保存、元画像不変 | `tests/test_preparation.py::test_train_pre_aligns_and_crops_images` | はい |
 | TC-004 | REQ-002 | REQ-002-S02 | integration | blacklist一致でtrain-pre | 対象分割なし、除外記録あり | `tests/test_preparation.py::test_train_pre_excludes_blacklist_entries` | はい |
 | TC-005 | REQ-002 | REQ-002-S03 | integration | ORB失敗画像でtrain-pre | 元画像全分割除外と警告 | `tests/test_preparation.py::test_train_pre_warns_and_skips_alignment_failure` | はい |

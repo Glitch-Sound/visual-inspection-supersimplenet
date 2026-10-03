@@ -2,7 +2,7 @@
 
 - [ ] 1.1 `pyproject.toml` と `uv.lock` に Python 3.13向けの Anomalib 2.6.2、PyTorch 2.13.0、torchvision 0.28.0、CUDA 13.0用プラットフォーム別source、Optuna、OpenCV headlessを追加し、`check`、`train-pre`、`train`、`test-pre`、`test` のconsole scriptを登録する。対応: `NREQ-001`、設計「Context」「Decision 1」「Decision 3」、`TC-029`、`TC-030`。完了条件: `uv lock --check` と `uv sync --locked` が成功し、5コマンドの `--help` がPython 3.13環境で終了コード0を返す。
 
-- [ ] 1.2 `src/app/config.py` と `src/app/paths.py` に `setting.ini`、`part_<model>.json`、安全な型番、座標、分割ID、比率、ブラックリスト、探索・拡張・位置合わせ設定のPydantic契約と既知ルート配下のパス解決を実装し、`config/setting.ini` と `config/part_XX.json` の初期テンプレートを追加する。対応: `REQ-001`、設計「Data Contracts and State」「Decision 2」、`TC-001`、`TC-002`。完了条件: 有効な入力が型付き設定へ変換され、範囲外・ID重複・不正型番・未知ブラックリスト参照が書込み前に具体的な項目名付きで拒否される。
+- [ ] 1.2 `src/app/config.py` と `src/app/paths.py` に `setting.ini`、`part_<model>.json`、安全な型番、座標、分割ID、比率、ブラックリスト、探索・拡張・位置合わせ設定のPydantic契約と既知ルート配下のパス解決を実装し、`config/setting.ini` と `config/part_XX.json` の初期テンプレートを追加する。`setting.ini` の初期テンプレートは `[IMAGE]` の `SIZE = 500` にインラインコメントを付けず、読込み時に値全体を正の整数へ変換する。対応: `REQ-001`、設計「Data Contracts and State」「Decision 2」、`TC-001`、`TC-002`。完了条件: 有効な入力が型付き設定へ変換され、非整数・非正の `SIZE`、範囲外・ID重複・不正型番・未知ブラックリスト参照が書込み前に具体的な項目名付きで拒否される。
 
 - [ ] 1.3 `src/app/runtime.py` と `src/app/cli.py` にCUDA優先・CPUフォールバック、依存版・OS・Python・デバイス情報、開始終了時刻、処理時間、警告・エラー、終了コードの共通実行記録を実装する。対応: `REQ-009`、設計「Decision 8」「Security, Performance, and Operations」、`TC-020`、`TC-021`。完了条件: GPU利用可否を差し替え可能な境界から選択結果と理由を取得でき、全CLIが同じ記録契約を使用する。
 
@@ -38,7 +38,7 @@
 
 ## 4. 自動試験
 
-- [ ] 4.1 `tests/test_config.py` と `tests/test_preparation.py` に `TC-001`〜`TC-002` を実装し、有効な確認画像、座標境界、範囲外、ID重複、非正サイズ、不正型番を検証する。対応: `REQ-001`、設計「Test Design」。完了条件: design記載のpytest関数が存在し、`uv run --locked pytest tests/test_config.py tests/test_preparation.py -k 'check'` が成功する。
+- [ ] 4.1 `tests/test_config.py` と `tests/test_preparation.py` に `TC-001`〜`TC-002` を実装し、コメントなしの正の整数 `SIZE` を使う有効な確認画像、座標境界、範囲外、ID重複、非整数・非正サイズ、不正型番を検証する。対応: `REQ-001`、設計「Test Design」。完了条件: design記載のpytest関数が存在し、`uv run --locked pytest tests/test_config.py tests/test_preparation.py -k 'check'` が成功する。
 
 - [ ] 4.2 `tests/test_preparation.py` に固定画像と一時領域を用いた `TC-003`、`TC-004`、`TC-005`、`TC-006`、`TC-007`、`TC-008`、`TC-009` を実装し、学習・試験の位置合わせ、命名、ブラックリスト差異、警告、未判定引き継ぎ、範囲外時の原子性を検証する。対応: `REQ-002`、`REQ-003`、設計「Test Design」。完了条件: design記載の7つのpytest関数が存在し、対象テストがネットワーク・GPUなしで成功する。
 
