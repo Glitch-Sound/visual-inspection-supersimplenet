@@ -2,10 +2,12 @@
 
 SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデルの学習、外観検査をローカルCLIで実行するプロジェクトである。
 
-大容量の元画像を基準画像へ位置合わせして分割し、正常画像中心のデータから評価用モデルと暫定閾値を生成する。検査では分割画像ごとの異常スコアと可視化画像を保存し、元画像単位の判定へ集約する。
+大容量の元画像を基準画像へ位置合わせして分割し、正常画像中心のデータから評価用モデルと暫定閾値を生成する。<br />
+検査では分割画像ごとの異常スコアと可視化画像を保存し、元画像単位の判定へ集約する。
 
 > [!IMPORTANT]
-> 現在のモデルと閾値は初期評価用である。異常スコアは校正済み確率ではなく、検出性能、誤検出率、処理時間の本番受け入れ基準も別途決定する必要がある。このリポジトリのワークフローが完了したことだけを、本番利用の承認として扱わない。
+> 現在のモデルと閾値は初期評価用である。異常スコアは校正済み確率ではなく、検出性能、誤検出率、処理時間の本番受け入れ基準も別途決定する必要がある。
+> このリポジトリのワークフローが完了したことだけを、本番利用の承認として扱わない。
 
 ## 動作環境
 
@@ -22,7 +24,8 @@ uv sync --locked
 npm ci
 ```
 
-Dev Containerを利用する場合は、Docker EngineとDev Containers対応エディターを用意し、このリポジトリをコンテナで開く。コンテナ作成時にPythonとNode.jsの依存関係が同期される。
+Dev Containerを利用する場合は、Docker EngineとDev Containers対応エディターを用意し、このリポジトリをコンテナで開く。<br />
+コンテナ作成時にPythonとNode.jsの依存関係が同期される。
 
 ## 外観検査ワークフロー
 
@@ -53,11 +56,14 @@ flowchart LR
 
 #### 全体設定：`config/setting.ini`
 
-[setting.ini](config/setting.ini)の`[IMAGE] SIZE`に、切り出す正方形の一辺をピクセル単位の正の整数で指定する。設定値は全型番に適用される。`SIZE = 500`なら各分割範囲は500×500ピクセルとなる。値と同じ行にコメントを記載しない。
+[setting.ini](config/setting.ini)の`[IMAGE] SIZE`に、切り出す正方形の一辺をピクセル単位の正の整数で指定する。<br />
+設定値は全型番に適用される。`SIZE = 500`なら各分割範囲は500×500ピクセルとなる。値と同じ行にコメントを記載しない。
 
 #### 型番別設定：`config/part_<model>.json`
 
-[part_XX.json](config/part_XX.json)をひな形として型番ごとに用意する。例えば型番`AB-01`には`config/part_AB-01.json`を配置し、`--model AB-01`で読み込む。主な項目は次のとおり。
+[part_XX.json](config/part_XX.json)をひな形として型番ごとに用意する。<br />
+例えば型番`AB-01`には`config/part_AB-01.json`を配置し、`--model AB-01`で読み込む。<br />
+主な項目は次のとおり。
 
 | 項目 | 設定内容 |
 | --- | --- |
@@ -75,7 +81,9 @@ flowchart LR
 
 `blacklist`の指定例は`{"image": "sample.png", "id": [0, 1]}`である。`image`には学習元画像の拡張子付きファイル名を指定する。`range`に存在しない分割IDや、学習元画像に存在しないファイル名は指定できない。
 
-`score.source`と`optuna_settings.threshold.score_source`は一致させ、PostProcessorを有効にしない。学習後の`threshold.value`はcheckpointと`best_trial.json`にも同じ値が保存されるため、設定ファイルだけを手動で変更しない。設定値の規範的な条件は[画像準備仕様](openspec/specs/visual-inspection/image-preparation/spec.md)と[モデル学習仕様](openspec/specs/visual-inspection/model-training/spec.md)を参照する。
+`score.source`と`optuna_settings.threshold.score_source`は一致させ、PostProcessorを有効にしない。<br />
+学習後の`threshold.value`はcheckpointと`best_trial.json`にも同じ値が保存されるため、設定ファイルだけを手動で変更しない。<br />
+設定値の規範的な条件は[画像準備仕様](openspec/specs/visual-inspection/image-preparation/spec.md)と[モデル学習仕様](openspec/specs/visual-inspection/model-training/spec.md)を参照する。
 
 ### 2. 分割範囲を確認する
 
@@ -91,7 +99,8 @@ uv run --locked check --model XX
 uv run --locked train-pre --model XX
 ```
 
-学習元画像を基準画像へ位置合わせし、ブラックリストを除外して分割画像とmanifestを`data/04_train/XX/`へ保存する。位置合わせに失敗した元画像は理由付きで学習対象から除外される。
+学習元画像を基準画像へ位置合わせし、ブラックリストを除外して分割画像とmanifestを`data/04_train/XX/`へ保存する。<br />
+位置合わせに失敗した元画像は理由付きで学習対象から除外される。
 
 ### 4. モデルを学習する
 
@@ -99,7 +108,8 @@ uv run --locked train-pre --model XX
 uv run --locked train --model XX
 ```
 
-元画像単位で学習用と検証用へ分離し、Optunaによる探索を実行する。通常の再実行では`optuna/XX/study.db`にある探索履歴を使用して未完了試行から再開する。
+元画像単位で学習用と検証用へ分離し、Optunaによる探索を実行する。<br />
+通常の再実行では`optuna/XX/study.db`にある探索履歴を使用して未完了試行から再開する。
 
 探索履歴とモデルを破棄して最初から実行する場合だけ、`--restart`を指定する。
 
@@ -113,7 +123,9 @@ uv run --locked train --model XX --restart
 uv run --locked test-pre --model XX
 ```
 
-試験元画像を位置合わせ・分割し、分割画像とmanifestを`data/05_test/XX/`へ保存する。試験画像には学習用ブラックリストを適用しない。位置合わせに失敗した画像は正常とせず、後続の検査へ`undetermined`として引き継ぐ。
+試験元画像を位置合わせ・分割し、分割画像とmanifestを`data/05_test/XX/`へ保存する。<br />
+試験画像には学習用ブラックリストを適用しない。<br />
+位置合わせに失敗した画像は正常とせず、後続の検査へ`undetermined`として引き継ぐ。
 
 ### 6. 検査する
 
@@ -139,7 +151,9 @@ uv run --locked test --model XX --restart
 | 必要な全分割が`normal` | `normal` |
 | 上記以外。位置合わせ失敗、分割不足、推論失敗などを含む | `undetermined` |
 
-`undetermined`は正常を意味しない。結果JSONの理由と案内を確認し、原則として再撮影する。異なる扱いが必要な場合は評価者が判断する。
+`undetermined`は正常を意味しない。<br />
+結果JSONの理由と案内を確認し、原則として再撮影する。<br />
+異なる扱いが必要な場合は評価者が判断する。
 
 全CLIは共通の終了コードを使用する。
 
@@ -163,11 +177,15 @@ uv run --locked test --model XX --restart
 | 分割結果画像と元画像単位のJSON | `data/06_result/<model>/` |
 | 事前学習重みキャッシュ | `pretrained/` |
 
-`--restart`は対象型番の派生成果物を削除してから再生成する。旧成果物が必要な場合は、実行前にリポジトリ外などの任意の場所へ退避する。元画像、型番設定、事前学習重みキャッシュは削除されない。
+`--restart`は対象型番の派生成果物を削除してから再生成する。<br />
+旧成果物が必要な場合は、実行前にリポジトリ外などの任意の場所へ退避する。<br />
+元画像、型番設定、事前学習重みキャッシュは削除されない。
 
 ## 実機スモーク試験
 
-運用受け入れ前に、Ubuntu 24.04 LTSとWindows 11の実機で、GPUを利用する経路とGPUを利用できない場合のCPU経路を確認する。少量の評価用データを配置し、各OSでGPU利用可能時とGPU無効化時にそれぞれ次を実行する。証跡が上書きされないよう、`--output`には実行ごとに異なるパスを指定する。
+運用受け入れ前に、Ubuntu 24.04 LTSとWindows 11の実機で、GPUを利用する経路とGPUを利用できない場合のCPU経路を確認する。<br />
+少量の評価用データを配置し、各OSでGPU利用可能時とGPU無効化時にそれぞれ次を実行する。<br />
+証跡が上書きされないよう、`--output`には実行ごとに異なるパスを指定する。
 
 ```bash
 uv run --locked python scripts/run_visual_inspection_smoke.py \
@@ -175,11 +193,13 @@ uv run --locked python scripts/run_visual_inspection_smoke.py \
   --output smoke/visual-inspection-XX.json
 ```
 
-生成したJSONは試験証跡として保存する。本番利用の性能・誤検出基準は、このスモーク試験とは別に評価する。
+生成したJSONは試験証跡として保存する。<br />
+本番利用の性能・誤検出基準は、このスモーク試験とは別に評価する。
 
 ## 仕様
 
-正式仕様は`openspec/specs/`で管理する。外観検査は、主な責務と成果物が異なる次の3能力に分割されている。
+正式仕様は`openspec/specs/`で管理する。<br />
+外観検査は、主な責務と成果物が異なる次の3能力に分割されている。
 
 | 能力 | 対象 |
 | --- | --- |
@@ -187,9 +207,11 @@ uv run --locked python scripts/run_visual_inspection_smoke.py \
 | [`visual-inspection/model-training`](openspec/specs/visual-inspection/model-training/spec.md) | 学習・検証分離、探索、データ拡張、モデル・閾値、再開 |
 | [`visual-inspection/model-evaluation`](openspec/specs/visual-inspection/model-evaluation/spec.md) | デバイス選択、推論、可視化、判定集約、結果契約、再検査 |
 
-`openspec/specs/visual-inspection/`は能力を整理する名前空間であり、親specではない。詳細は[外観検査仕様ガイド](openspec/specs/visual-inspection/README.md)を参照する。
+`openspec/specs/visual-inspection/`は能力を整理する名前空間であり、親specではない。<br />
+詳細は[外観検査仕様ガイド](openspec/specs/visual-inspection/README.md)を参照する。
 
-利用者や外部システムから観測できる振る舞いを変更する場合は、実装前にOpenSpec changeを作成する。共通方針は[AGENTS.md](AGENTS.md)、プロダクト・技術・配置の前提は[product.md](openspec/product.md)、[tech.md](openspec/tech.md)、[structure.md](openspec/structure.md)を参照する。
+利用者や外部システムから観測できる振る舞いを変更する場合は、実装前にOpenSpec changeを作成する。<br />
+共通方針は[AGENTS.md](AGENTS.md)、プロダクト・技術・配置の前提は[product.md](openspec/product.md)、[tech.md](openspec/tech.md)、[structure.md](openspec/structure.md)を参照する。
 
 ## 開発
 
