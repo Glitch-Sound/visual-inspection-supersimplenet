@@ -1,7 +1,7 @@
 [project]
 name = "python-template"
 version = "0.1.0"
-description = "uv と OpenSpec を利用したモダンな Python CLI 開発用テンプレート"
+description = "SuperSimpleNetによる画像準備・モデル学習・外観検査のCLI"
 readme = "README.md"
 authors = [
     { name = "Glitch", email = "glitch@example.com" }

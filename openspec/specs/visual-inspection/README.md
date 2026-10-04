@@ -14,11 +14,11 @@ OpenSpecでは、`openspec/specs/<capability-path>/spec.md`が1つのcapability�
 | `visual-inspection/model-training` | [モデル学習仕様](model-training/spec.md) | 正常画像中心のデータから、型番別モデル、探索結果、暫定閾値を再現可能に生成・再開する |
 | `visual-inspection/model-evaluation` | [モデル評価仕様](model-evaluation/spec.md) | モデルを使って分割画像と元画像を判定し、可視化、未判定、実行環境を含む結果を保存する |
 
-`visual-inspection/spec.md`を追加した場合、それは3仕様の目次ではなく、`visual-inspection`という第4のcapabilityとして扱われます。子仕様に属さない独自の横断要件を定義する必要が生じない限り、親specは設けません。
+`visual-inspection/spec.md`を追加した場合、それは3仕様の目次ではなく、`visual-inspection`という第4のcapabilityとして扱われます。現在の横断要件は既存のcapabilityに配置しており、独立した要件群が必要になった場合に新しいcapabilityを検討します。
 
 ## 3つに分割する理由
 
-3仕様は処理順だけでなく、利用者が得る結果、責務、変更理由、検証対象が異なります。
+3仕様は処理順だけでなく、主な責務、成果物、検証対象が異なります。導入時には、1つの`visual-inspection` changeで3つのcapabilityとして定義されました。
 
 | 観点 | 画像準備 | モデル学習 | モデル評価 |
 | --- | --- | --- | --- |
@@ -28,6 +28,8 @@ OpenSpecでは、`openspec/specs/<capability-path>/spec.md`が1つのcapability�
 | 対応CLI | `check`、`train-pre`、`test-pre` | `train` | `test` |
 
 この境界により、例えば位置合わせ・分割の変更を、探索方法や結果JSONの変更と分離して検討できます。また、学習と検査で同じ画像準備能力を共有しつつ、モデル生成と判定結果の責務を混在させずに要件とScenarioを管理できます。
+
+複数の処理に関わる要件もあります。例えば、GPUからCPUへの切り替えと実行環境の記録は学習・検査の両方に適用され、現在は[モデル評価仕様](model-evaluation/spec.md)の`REQ-009`と`NREQ-001`で管理しています。
 
 ## 仕様間の関係
 
@@ -67,7 +69,7 @@ OpenSpecでは、`openspec/specs/<capability-path>/spec.md`が1つのcapability�
 
 ## 要件の配置基準
 
-新しい要件は、主な観測結果と変更理由に基づいて配置します。
+新しい要件は、主な観測結果と責務に基づいて配置します。複数の処理に関わる場合は、既存の横断要件も確認します。
 
 - 元画像から学習・検査入力を作るまでの要件は、`image-preparation`へ配置する。
 - 学習データの構成、探索、データ拡張、モデル・閾値の生成と再開は、`model-training`へ配置する。

@@ -2,6 +2,8 @@
 
 SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデルの学習、外観検査をローカルCLIで実行するプロジェクトです。
 
+配布名と従来の`python-template`コマンドは既存環境との互換性のため維持しています。外観検査には後述の`check`、`train-pre`、`train`、`test-pre`、`test`を使用します。
+
 大容量の元画像を基準画像へ位置合わせして分割し、正常画像中心のデータから評価用モデルと暫定閾値を生成します。検査では分割画像ごとの異常スコアと可視化画像を保存し、元画像単位の判定へ集約します。
 
 > [!IMPORTANT]
@@ -143,7 +145,7 @@ uv run --locked test --model XX --restart
 
 ## 実機スモーク試験
 
-Ubuntu 24.04 LTSとWindows 11のGPU・CPU経路を確認する場合は、少量の評価用データを配置して次を実行します。
+運用受け入れ前に、Ubuntu 24.04 LTSとWindows 11の実機で、GPUを利用する経路とGPUを利用できない場合のCPU経路を確認します。少量の評価用データを配置し、各OSでGPU利用可能時とGPU無効化時にそれぞれ次を実行します。証跡が上書きされないよう、`--output`には実行ごとに異なるパスを指定します。
 
 ```bash
 uv run --locked python scripts/run_visual_inspection_smoke.py \
@@ -155,7 +157,7 @@ uv run --locked python scripts/run_visual_inspection_smoke.py \
 
 ## 仕様
 
-正式仕様は`openspec/specs/`で管理します。外観検査は、変更理由と検証単位が異なる次の3能力に分割されています。
+正式仕様は`openspec/specs/`で管理します。外観検査は、主な責務と成果物が異なる次の3能力に分割されています。
 
 | 能力 | 対象 |
 | --- | --- |
