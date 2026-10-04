@@ -238,6 +238,21 @@ uv run --locked pyright
 npx --no-install openspec validate --all --strict
 ```
 
+OpenSpec change の対応検査は工程に応じて実行する。既定の設計段階では要件・Scenario・試験ケース・タスクの対応と参照書式を確認し、未作成のテストと未完了タスクを許容する。
+
+```bash
+# 設計段階
+uv run --locked python scripts/check_openspec_traceability.py --change <change-name>
+
+# 実装後: 参照する pytest テストの収集可否も確認
+uv run --locked python scripts/check_openspec_traceability.py --change <change-name> --phase implementation
+
+# verify / archive 前: 全タスク、受け入れ条件と証跡も確認
+uv run --locked python scripts/check_openspec_traceability.py --change <change-name> --phase complete
+```
+
+proposal の受け入れ条件には `AC-001` 形式のIDを付け、design の「受け入れ検証」に検証範囲・方法・残る検証・状態・証跡を対応付ける。完了段階では全条件を検証済みとし、残る検証を「なし」にして、リポジトリ相対パスの空でない証跡ファイルを用意する。自動試験の収集と成功は、実機や対象OSでの確認を代替しない。未検証条件が残るchangeは進行中に保ち、仕様だけを先に反映する場合はsyncを使う。詳細は[技術基盤](openspec/tech.md)を参照する。
+
 OpenSpecを更新する場合は、プロジェクトローカルのCLIとロックファイルを先に更新し、生成済みのエージェント向けinstructionsを更新する。
 
 ```bash

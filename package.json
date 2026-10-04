@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "check": "npx --no-install openspec validate --all --strict && uv run --locked ruff format --check . && uv run --locked ruff check . && uv run --locked pyright && uv run --locked pytest && uv run --locked python scripts/check_repository.py && uv run --locked python scripts/check_openspec_traceability.py --all"
+    "check": "npx --no-install openspec validate --all --strict && uv run --locked ruff format --check . && uv run --locked ruff check . && uv run --locked pyright && uv run --locked pytest && uv run --locked python scripts/check_repository.py && uv run --locked python scripts/check_openspec_traceability.py --all --phase implementation"
   },
   "devDependencies": {
     "@fission-ai/openspec": "^1.13.1"
