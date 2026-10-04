@@ -51,7 +51,31 @@ flowchart LR
 | `data/01_original_train/<model>/` | 基準画像と正常中心の学習元画像 |
 | `data/02_original_test/<model>/` | 検査対象の試験元画像 |
 
-[config/part_XX.json](config/part_XX.json)を型番別設定のひな形として利用できる。`base`には`data/01_original_train/<model>/`直下の基準画像ファイル名を指定し、`range`には分割IDと左上座標を設定する。学習対象から除外する元画像と分割IDは`blacklist`で指定する。
+#### 全体設定：`config/setting.ini`
+
+[setting.ini](config/setting.ini)の`[IMAGE] SIZE`に、切り出す正方形の一辺をピクセル単位の正の整数で指定する。設定値は全型番に適用される。`SIZE = 500`なら各分割範囲は500×500ピクセルとなる。値と同じ行にコメントを記載しない。
+
+#### 型番別設定：`config/part_<model>.json`
+
+[part_XX.json](config/part_XX.json)をひな形として型番ごとに用意する。例えば型番`AB-01`には`config/part_AB-01.json`を配置し、`--model AB-01`で読み込む。主な項目は次のとおり。
+
+| 項目 | 設定内容 |
+| --- | --- |
+| `base` | `data/01_original_train/<model>/`直下にある基準画像のファイル名。ディレクトリを含むパスは指定できない |
+| `range` | 分割範囲の配列。各要素の`id`は0〜99の一意な分割ID、`x`・`y`は基準画像の左上を原点とする切り出し開始座標。範囲の一辺には`SIZE`を使用する |
+| `blacklist` | 学習準備から除外する元画像名`image`と分割IDの配列`id`。試験準備には適用しない |
+| `alignment` | ORB位置合わせの最低対応点数、RANSAC再投影誤差・信頼確率、最低インライア比率 |
+| `optuna_settings.search` | 学習率倍率、バッチサイズ、エポック数、特徴層、前処理画像サイズの探索候補。正規化・補間・antialiasの設定も含む |
+| `optuna_settings.sampler`・`pruner` | Optunaの乱数seedと枝刈り条件 |
+| `optuna_settings.normal_only` | 元画像単位の学習・検証比率、乱数seed、探索目的値に使用する検証スコアのパーセンタイル |
+| `optuna_settings.execution` | 探索試行回数、乱数seed、探索再開の設定 |
+| `optuna_settings.threshold` | 学習集合のスコアから暫定閾値を算出する方法・パーセンタイル・スコア源。`value`は初回学習前に`null`とし、学習完了時に更新される |
+| `score` | 異常スコア源。`supersimplenet.pred_score`を使用し、Anomalib PostProcessorを無効にする |
+| `augmentation` | 学習入力だけに適用するデータ拡張。`enabled`で全体を切り替え、`order`と各変換の`enabled`・`probability`・強度で内容を指定する |
+
+`blacklist`の指定例は`{"image": "sample.png", "id": [0, 1]}`である。`image`には学習元画像の拡張子付きファイル名を指定する。`range`に存在しない分割IDや、学習元画像に存在しないファイル名は指定できない。
+
+`score.source`と`optuna_settings.threshold.score_source`は一致させ、PostProcessorを有効にしない。学習後の`threshold.value`はcheckpointと`best_trial.json`にも同じ値が保存されるため、設定ファイルだけを手動で変更しない。設定値の規範的な条件は[画像準備仕様](openspec/specs/visual-inspection/image-preparation/spec.md)と[モデル学習仕様](openspec/specs/visual-inspection/model-training/spec.md)を参照する。
 
 ### 2. 分割範囲を確認する
 
