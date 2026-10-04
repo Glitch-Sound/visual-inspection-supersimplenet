@@ -1,11 +1,8 @@
 [project]
-name = "python-template"
+name = "visual-inspection-supersimplenet"
 version = "0.1.0"
 description = "SuperSimpleNetによる画像準備・モデル学習・外観検査のCLI"
 readme = "README.md"
-authors = [
-    { name = "Glitch", email = "glitch@example.com" }
-]
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "anomalib==2.6.2",
@@ -21,7 +18,6 @@ dependencies = [
 ]
 
 [project.scripts]
-python-template = "app:main"
 check = "app.cli:check_cli"
 train-pre = "app.cli:train_pre_cli"
 train = "app.cli:train_cli"

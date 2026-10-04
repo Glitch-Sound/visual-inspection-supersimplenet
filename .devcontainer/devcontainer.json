@@ -1,5 +1,5 @@
 {
-  "name": "Python Template",
+  "name": "Visual Inspection SuperSimpleNet",
   "build": {
     "dockerfile": "Dockerfile"
   },
@@ -8,8 +8,8 @@
     "UV_LINK_MODE": "copy"
   },
   "mounts": [
-    "source=${localWorkspaceFolderBasename}-python-template-venv,target=${containerWorkspaceFolder}/.venv,type=volume",
-    "source=${localWorkspaceFolderBasename}-python-template-node-modules,target=${containerWorkspaceFolder}/node_modules,type=volume",
+    "source=${localWorkspaceFolderBasename}-venv,target=${containerWorkspaceFolder}/.venv,type=volume",
+    "source=${localWorkspaceFolderBasename}-node-modules,target=${containerWorkspaceFolder}/node_modules,type=volume",
     "source=${localWorkspaceFolderBasename}-uv-cache,target=/home/vscode/.cache/uv,type=volume",
     "source=${localWorkspaceFolderBasename}-npm-cache,target=/home/vscode/.npm,type=volume"
   ],
