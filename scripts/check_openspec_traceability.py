@@ -673,7 +673,7 @@ def parse_arguments() -> argparse.Namespace:
         "--phase",
         choices=["design", "implementation", "complete", "limited-archive"],
         default="design",
-        help="設計・実装後・完了時の検査（既定: design）",
+        help="設計・実装後・完了時の検査 (既定: design)",
     )
     parser.add_argument(
         "--include-archived",
