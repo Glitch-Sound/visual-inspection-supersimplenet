@@ -9,6 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 REQUIREMENT_PATTERN = re.compile(r"^### Requirement: ((?:N?REQ)-\d{3})\b", re.MULTILINE)
 REQUIREMENT_ID_PATTERN = re.compile(r"\b(?:N?REQ)-\d{3}\b")
 SCENARIO_PATTERN = re.compile(
@@ -50,12 +52,195 @@ def markdown_table_rows(content: str, heading: str) -> list[list[str]]:
     return rows
 
 
+def skips_specs(change_dir: Path) -> bool:
+    """Recognize only an explicit boolean skip_specs setting."""
+    settings = change_dir / ".openspec.yaml"
+    if not settings.is_file():
+        return False
+    try:
+        content = yaml.safe_load(settings.read_text(encoding="utf-8"))
+    except yaml.YAMLError as error:
+        raise ValueError(f"{settings}: YAML を解析できません: {error}") from error
+    return isinstance(content, dict) and content.get("skip_specs") is True
+
+
+def check_skip_specs_change(
+    change_dir: Path, *, phase: str, repository_root: Path
+) -> list[str]:
+    """Trace proposal acceptance IDs when the change has no delta specs."""
+    errors: list[str] = []
+    design_file = change_dir / "design.md"
+    tasks_file = change_dir / "tasks.md"
+    proposal_file = change_dir / "proposal.md"
+    if not all(path.is_file() for path in (proposal_file, design_file, tasks_file)):
+        return [
+            f"{change_dir.name}: proposal.md、design.md、tasks.md をすべて作成してください"
+        ]
+    if list((change_dir / "specs").glob("**/spec.md")):
+        errors.append(f"{change_dir.name}: skip_specs change に差分 spec.md があります")
+
+    proposal = proposal_file.read_text(encoding="utf-8")
+    design = design_file.read_text(encoding="utf-8")
+    tasks = tasks_file.read_text(encoding="utf-8")
+    task_lines = tasks.splitlines()
+    acceptance_ids: set[str] = set()
+    for line in markdown_section(proposal, "## 運用開始の受け入れ条件").splitlines():
+        if not re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", line):
+            continue
+        match = re.fullmatch(r"- (AC-\d{3}):\s*\S.*", line)
+        if match is None:
+            errors.append(
+                f"{change_dir.name}: 受け入れ条件には AC-ID が必要です: {line}"
+            )
+            continue
+        if match[1] in acceptance_ids:
+            errors.append(f"{change_dir.name}: 受け入れID {match[1]} が重複しています")
+        acceptance_ids.add(match[1])
+    if not acceptance_ids:
+        errors.append(f"{change_dir.name}: AC-ID 付き受け入れ条件がありません")
+
+    task_requirements: dict[str, set[str]] = {}
+    for line in task_lines:
+        match = TASK_LINE_PATTERN.match(line)
+        if match is None:
+            continue
+        task_id = match.group("task_id")
+        if task_id in task_requirements:
+            errors.append(
+                f"{change_dir.name}: tasks.md のタスク番号 {task_id} が重複しています"
+            )
+        task_requirements[task_id] = set(
+            re.findall(r"\bAC-\d{3}\b", match.group("description"))
+        )
+
+    traced: set[str] = set()
+    trace_cases: dict[str, set[str]] = {}
+    for row in markdown_table_rows(design, "## 要件トレーサビリティ"):
+        if len(row) != 6 or not ACCEPTANCE_ID_PATTERN.fullmatch(row[0]):
+            errors.append(f"{change_dir.name}: 要件トレーサビリティの行が不正です")
+            continue
+        acceptance_id = row[0]
+        if acceptance_id in traced:
+            errors.append(
+                f"{change_dir.name}: 要件トレーサビリティの {acceptance_id} が重複しています"
+            )
+        traced.add(acceptance_id)
+        for task_id in TASK_REFERENCE_PATTERN.findall(row[3]):
+            if task_id not in task_requirements:
+                errors.append(
+                    f"{change_dir.name}: {acceptance_id} が参照する実装タスク {task_id} は tasks.md に存在しません"
+                )
+            elif acceptance_id not in task_requirements[task_id]:
+                errors.append(
+                    f"{change_dir.name}: {acceptance_id} が参照する実装タスク {task_id} はその要件を扱っていません"
+                )
+        if not TASK_REFERENCE_PATTERN.search(row[3]):
+            errors.append(
+                f"{change_dir.name}: {acceptance_id} に実装タスク参照がありません"
+            )
+        cases = set(TEST_CASE_ID_PATTERN.findall(row[4]))
+        if not cases:
+            errors.append(
+                f"{change_dir.name}: {acceptance_id} に試験ケース参照がありません"
+            )
+        trace_cases[acceptance_id] = cases
+    for acceptance_id in sorted(acceptance_ids - traced):
+        errors.append(
+            f"{change_dir.name}: 要件トレーサビリティに {acceptance_id} がありません"
+        )
+    for acceptance_id in sorted(traced - acceptance_ids):
+        errors.append(
+            f"{change_dir.name}: 要件トレーサビリティの {acceptance_id} は proposal に存在しません"
+        )
+
+    test_cases: dict[str, str] = {}
+    pytest_references: set[str] = set()
+    for row in markdown_table_rows(design, "## 試験設計"):
+        if len(row) < 8 or not TEST_CASE_ID_PATTERN.fullmatch(row[0]):
+            errors.append(f"{change_dir.name}: 試験設計の試験ケース行が不正です")
+            continue
+        tc_id, acceptance_id, scenario_id = row[:3]
+        pytest_reference = row[6].strip("`")
+        if tc_id in test_cases:
+            errors.append(f"{change_dir.name}: 試験ケースID {tc_id} が重複しています")
+        test_cases[tc_id] = acceptance_id
+        if acceptance_id not in acceptance_ids:
+            errors.append(
+                f"{change_dir.name}: {tc_id} の要件 {acceptance_id} は proposal に存在しません"
+            )
+        if scenario_id != "該当なし":
+            errors.append(
+                f"{change_dir.name}: {tc_id} の Scenario は該当なしにしてください"
+            )
+        if not PYTEST_REFERENCE_PATTERN.fullmatch(pytest_reference):
+            errors.append(
+                f"{change_dir.name}: {tc_id} の pytest 実装先が不正です: {pytest_reference}"
+            )
+        elif (
+            not (repository_root / pytest_reference.split("::")[0])
+            .resolve()
+            .is_relative_to(repository_root)
+        ):
+            errors.append(
+                f"{change_dir.name}: {tc_id} の pytest 実装先がリポジトリ外です"
+            )
+        else:
+            pytest_references.add(pytest_reference)
+        has_test_task = any(
+            line.lstrip().startswith("- [")
+            and tc_id in TEST_CASE_ID_PATTERN.findall(line)
+            and "pytest" in line
+            and "tests/" in line
+            for line in task_lines
+        )
+        if not has_test_task:
+            errors.append(
+                f"{change_dir.name}: {tc_id} に対応する pytest テスト作成・実行タスクがありません"
+            )
+    for acceptance_id, cases in trace_cases.items():
+        for tc_id in cases:
+            if tc_id not in test_cases:
+                errors.append(
+                    f"{change_dir.name}: {acceptance_id} が参照する {tc_id} は試験設計に存在しません"
+                )
+            elif test_cases[tc_id] != acceptance_id:
+                errors.append(
+                    f"{change_dir.name}: {tc_id} の所属要件が {acceptance_id} と一致しません"
+                )
+    for tc_id, acceptance_id in test_cases.items():
+        if tc_id not in trace_cases.get(acceptance_id, set()):
+            errors.append(
+                f"{change_dir.name}: {tc_id} が要件トレーサビリティにありません"
+            )
+
+    if phase in {"implementation", "complete"}:
+        errors.extend(
+            check_test_collection(repository_root, pytest_references, change_dir.name)
+        )
+    if phase == "complete":
+        if not task_requirements:
+            errors.append(f"{change_dir.name}: 完了検査に必要なタスクがありません")
+        for line in task_lines:
+            checkbox = re.match(r"^\s*-\s*\[([^\]]*)]\s*(.*)$", line)
+            if checkbox and checkbox[1].strip().lower() != "x":
+                errors.append(f"{change_dir.name}: 未完了タスク: {checkbox[2]}")
+        errors.extend(check_acceptance(change_dir, design, repository_root))
+    return errors
+
+
 def check_change(
     change_dir: Path, *, phase: str = "design", repository_root: Path | None = None
 ) -> list[str]:
     """Return traceability errors for a single change directory."""
     errors: list[str] = []
     repository_root = (repository_root or Path.cwd()).resolve()
+    try:
+        if skips_specs(change_dir):
+            return check_skip_specs_change(
+                change_dir, phase=phase, repository_root=repository_root
+            )
+    except ValueError as error:
+        return [f"{change_dir.name}: {error}"]
     spec_files = sorted((change_dir / "specs").glob("**/spec.md"))
     design_file = change_dir / "design.md"
     tasks_file = change_dir / "tasks.md"

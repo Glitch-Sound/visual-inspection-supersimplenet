@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
 
-from app.contracts import DeviceMetadata, PlatformMetadata, RunMetadata
+from app.common.contracts import DeviceMetadata, PlatformMetadata, RunMetadata
 
 
 @dataclass(frozen=True)

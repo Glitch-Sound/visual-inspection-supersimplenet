@@ -15,7 +15,7 @@ from typing import Any
 import cv2
 import torch
 
-from app.contracts import (
+from app.common.contracts import (
     BestTrialResult,
     InspectionResult,
     PreparationManifest,

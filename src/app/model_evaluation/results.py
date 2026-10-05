@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path
 
-from app.contracts import InspectionResult, ResultStatus, SplitResult
+from app.common.contracts import InspectionResult, ResultStatus, SplitResult
 
 
 def aggregate_status(

@@ -11,7 +11,11 @@ import pytest
 import torch
 from conftest import build_project
 
-from app.contracts import (
+from app.common.artifact_transaction import (
+    _transaction_path,
+    recover_artifact_transaction,
+)
+from app.common.contracts import (
     AlignmentResult,
     BestTrialResult,
     PreparationManifest,
@@ -20,18 +24,19 @@ from app.contracts import (
     ScoreContract,
     TrialParametersContract,
 )
-from app.modeling import AugmentationPipeline, ensure_cached
-from app.training import (
+from app.model_training import artifacts
+from app.model_training.artifacts import persist_best_trial, restart_training
+from app.model_training.augmentation import AugmentationPipeline
+from app.model_training.cli import format_training_summary
+from app.model_training.search import (
     DatasetSplit,
     TrialOutcome,
     TrialParameters,
     create_study,
-    format_training_summary,
-    persist_best_trial,
-    restart_training,
     run_search,
     split_by_source,
 )
+from app.model_training.trainer import ensure_cached
 
 TRIAL_PARAMETERS = {
     "learning_rate_multiplier": 1.0,
@@ -206,9 +211,7 @@ def test_training_artifact_transaction_restores_previous_set(
     set_trial_parameters(trial)
     study.tell(trial, 0.1)
     split = split_by_source(make_manifest(5), tmp_path)
-    from app import training
-
-    replace = training._replace_staged_artifact
+    replace = artifacts._replace_staged_artifact
     calls = 0
 
     def fail_second(source: Path, target: Path) -> None:
@@ -218,7 +221,7 @@ def test_training_artifact_transaction_restores_previous_set(
             raise OSError("simulated replacement failure")
         replace(source, target)
 
-    monkeypatch.setattr(training, "_replace_staged_artifact", fail_second)
+    monkeypatch.setattr(artifacts, "_replace_staged_artifact", fail_second)
 
     with pytest.raises(OSError, match="simulated replacement failure"):
         persist_best_trial(
@@ -240,14 +243,14 @@ def test_training_artifact_transaction_restores_previous_set(
         "best_trial": best,
     }
     for target in targets.values():
-        shutil.copy2(target, training._transaction_path(target, "backup"))
+        shutil.copy2(target, _transaction_path(target, "backup"))
         target.write_bytes(b"incomplete-new-artifact")
-    training._write_transaction_journal(
+    artifacts._write_transaction_journal(
         paths.study_dir("XX") / ".artifact-transaction.json",
         {name: True for name in targets},
     )
 
-    training.recover_artifact_transaction(paths, "XX")
+    recover_artifact_transaction(paths, "XX")
 
     assert checkpoint.read_bytes() == old_bytes["checkpoint"]
     assert config_path.read_bytes() == old_bytes["config"]

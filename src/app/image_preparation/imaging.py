@@ -1,22 +1,15 @@
-"""Image alignment, crop validation, and visualization primitives."""
+"""Image alignment, crop validation, and range visualization."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, cast
 
 import cv2
 import numpy as np
-from numpy.typing import NDArray
 
-from app.config import AlignmentSettings, CropRange
-
-ImageArray = NDArray[np.uint8]
-
-
-class ImageReadError(RuntimeError):
-    """Raised when an expected image cannot be decoded."""
+from app.common.config import AlignmentSettings, CropRange
+from app.common.image_io import ImageArray
 
 
 class AlignmentError(RuntimeError):
@@ -34,13 +27,6 @@ class AlignedImage:
     image: ImageArray
     matches: int
     inlier_ratio: float
-
-
-def read_image(path: Path) -> ImageArray:
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
-    if image is None:
-        raise ImageReadError(f"image cannot be read: {path.name}")
-    return cast(ImageArray, image)
 
 
 def align_orb(
@@ -125,9 +111,3 @@ def draw_ranges(image: ImageArray, ranges: list[CropRange], size: int) -> ImageA
             cv2.LINE_AA,
         )
     return output
-
-
-def write_image(path: Path, image: ImageArray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(path), image):
-        raise OSError(f"image write failed: {path.name}")

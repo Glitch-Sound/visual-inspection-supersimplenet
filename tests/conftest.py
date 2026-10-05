@@ -7,8 +7,8 @@ from typing import Any
 import cv2
 import numpy as np
 
-from app.config import AppConfig, load_config
-from app.paths import ProjectPaths
+from app.common.config import AppConfig, load_config
+from app.common.paths import ProjectPaths
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
 

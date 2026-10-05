@@ -8,25 +8,23 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app.atomic import recover_directory_swap
-from app.config import AppConfig, CropRange, validate_blacklist_images
-from app.contracts import (
+from app.common.atomic import recover_directory_swap
+from app.common.config import AppConfig, CropRange, validate_blacklist_images
+from app.common.contracts import (
     AlignmentResult,
     PreparationManifest,
     PreparedSource,
     PreparedSplit,
 )
-from app.imaging import (
+from app.common.image_io import ImageArray, read_image, write_image
+from app.common.paths import ProjectPaths
+from app.image_preparation.imaging import (
     AlignedImage,
     AlignmentError,
-    ImageArray,
     align_orb,
     crop_image,
     draw_ranges,
-    read_image,
-    write_image,
 )
-from app.paths import ProjectPaths
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 Aligner = Callable[[ImageArray, ImageArray, object], AlignedImage]

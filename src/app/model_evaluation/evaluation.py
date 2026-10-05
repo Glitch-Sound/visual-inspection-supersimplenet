@@ -12,9 +12,9 @@ from typing import cast
 import cv2
 import numpy as np
 
-from app.atomic import recover_directory_swap
-from app.config import AppConfig
-from app.contracts import (
+from app.common.atomic import recover_directory_swap
+from app.common.config import AppConfig
+from app.common.contracts import (
     BestTrialResult,
     InspectionResult,
     PreparationManifest,
@@ -23,10 +23,10 @@ from app.contracts import (
     ScoreContract,
     SplitResult,
 )
-from app.imaging import ImageArray, read_image, write_image
-from app.modeling import Prediction, load_checkpoint_metadata
-from app.paths import ProjectPaths
-from app.results import aggregate_status, write_inspection_result
+from app.common.image_io import ImageArray, read_image, write_image
+from app.common.paths import ProjectPaths
+from app.model_evaluation.predictor import Prediction, load_checkpoint_metadata
+from app.model_evaluation.results import aggregate_status, write_inspection_result
 
 Predictor = Callable[[ImageArray], Prediction]
 

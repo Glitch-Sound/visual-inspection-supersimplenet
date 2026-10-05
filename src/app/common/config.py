@@ -11,7 +11,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.paths import ProjectPaths, validate_model_name
+from app.common.paths import ProjectPaths, validate_model_name
 
 Probability = Annotated[float, Field(ge=0.0, le=1.0)]
 PositiveFloat = Annotated[float, Field(gt=0.0)]

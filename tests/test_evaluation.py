@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,7 +11,8 @@ import pytest
 import torch
 from conftest import build_project, write_test_image
 
-from app.contracts import (
+from app.common.artifact_transaction import _transaction_path
+from app.common.contracts import (
     AlignmentResult,
     BestTrialResult,
     InspectionResult,
@@ -20,15 +23,83 @@ from app.contracts import (
     ScoreContract,
     TrialParametersContract,
 )
-from app.evaluation import (
+from app.common.runtime import DeviceSelection, RunRecorder
+from app.model_evaluation.evaluation import (
     evaluate_model,
     evaluate_split,
     restart_evaluation,
     validate_best_trial_contract,
     validate_score_contract,
 )
-from app.modeling import CheckpointPredictor, Prediction
-from app.runtime import DeviceSelection, RunRecorder
+from app.model_evaluation.predictor import CheckpointPredictor, Prediction
+from app.model_training.artifacts import _write_transaction_journal
+
+
+def test_test_cli_recovers_interrupted_training_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _config, paths = build_project(tmp_path)
+    config_path = paths.model_config("XX")
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["optuna_settings"]["threshold"]["value"] = 0.5
+    config_path.write_text(json.dumps(config_payload) + "\n", encoding="utf-8")
+
+    checkpoint = paths.checkpoint("XX")
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"previous checkpoint")
+    best_path = paths.study_dir("XX") / "best_trial.json"
+    best_path.parent.mkdir(parents=True)
+    BestTrialResult(
+        model="XX",
+        trial_number=0,
+        parameters=TrialParametersContract(
+            learning_rate_multiplier=1.0,
+            batch_size=4,
+            epochs=200,
+            feature_layers=["layer2"],
+            image_size=256,
+        ),
+        objective=0.1,
+        checkpoint="weights/XX.ckpt",
+        score_contract=ScoreContract(),
+        threshold=0.5,
+        train_sources=["train.png"],
+        validation_sources=["validation.png"],
+        seed=42,
+        dependencies={},
+    ).write_json(best_path)
+    targets = {"checkpoint": checkpoint, "config": config_path, "best_trial": best_path}
+    previous = {name: path.read_bytes() for name, path in targets.items()}
+    for path in targets.values():
+        shutil.copy2(path, _transaction_path(path, "backup"))
+        path.write_bytes(b"interrupted replacement")
+    journal = paths.study_dir("XX") / ".artifact-transaction.json"
+    _write_transaction_journal(journal, dict.fromkeys(targets, True))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "app.common.cli.select_device",
+        lambda: DeviceSelection("cpu", "CPU", "test"),
+    )
+
+    def make_predictor(path: Path, **_kwargs: object) -> object:
+        assert path == checkpoint
+        assert {name: item.read_bytes() for name, item in targets.items()} == previous
+        assert not journal.exists()
+        return object()
+
+    monkeypatch.setattr("app.model_evaluation.cli.CheckpointPredictor", make_predictor)
+    monkeypatch.setattr("app.model_evaluation.cli.evaluate_model", lambda *_a, **_k: [])
+
+    from app.model_evaluation.cli import _test_command
+
+    _test_command("XX", restart=False)
+    output = json.loads(capsys.readouterr().out)
+    assert output["exit_code"] == 0
+    assert output["result"] == "0 source images"
+    assert {name: path.read_bytes() for name, path in targets.items()} == previous
 
 
 def test_evaluation_records_normal_split(tmp_path: Path) -> None:
@@ -220,7 +291,10 @@ def test_predictor_uses_model_preprocessor(
         def eval(self) -> None:
             pass
 
-    monkeypatch.setattr("app.modeling.create_supersimplenet", lambda **_kwargs: Model())
+    monkeypatch.setattr(
+        "app.model_evaluation.predictor.create_supersimplenet",
+        lambda **_kwargs: Model(),
+    )
     checkpoint = tmp_path / "model.ckpt"
     torch.save({"state_dict": {}}, checkpoint)
     predictor = CheckpointPredictor(
@@ -284,7 +358,7 @@ def test_evaluation_keeps_same_stem_different_extensions(
         sources=sources,
     ).write_json(prepared / "manifest.json")
     monkeypatch.setattr(
-        "app.evaluation.load_checkpoint_metadata",
+        "app.model_evaluation.evaluation.load_checkpoint_metadata",
         lambda _path: {
             "model": "XX",
             "score_source": "supersimplenet.pred_score",
@@ -356,7 +430,7 @@ def test_evaluation_persists_final_runtime(
         ],
     ).write_json(prepared / "manifest.json")
     monkeypatch.setattr(
-        "app.evaluation.load_checkpoint_metadata",
+        "app.model_evaluation.evaluation.load_checkpoint_metadata",
         lambda _path: {
             "model": "XX",
             "score_source": "supersimplenet.pred_score",

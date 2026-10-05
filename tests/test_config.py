@@ -7,9 +7,9 @@ import pytest
 from conftest import build_project, write_test_image
 from pydantic import ValidationError
 
-from app.config import load_config, load_image_size
-from app.paths import ProjectPaths
-from app.preparation import create_check_image
+from app.common.config import load_config, load_image_size
+from app.common.paths import ProjectPaths
+from app.image_preparation.preparation import create_check_image
 
 
 @pytest.mark.parametrize("value", ["10.5", "0", "-1", "500 # comment"])

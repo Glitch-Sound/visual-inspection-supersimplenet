@@ -7,10 +7,10 @@ import numpy as np
 import pytest
 from conftest import build_project, write_test_image
 
-from app.atomic import recover_directory_swap
-from app.config import AlignmentSettings
-from app.imaging import AlignedImage, AlignmentError, align_orb
-from app.preparation import (
+from app.common.atomic import recover_directory_swap
+from app.common.config import AlignmentSettings
+from app.image_preparation.imaging import AlignedImage, AlignmentError, align_orb
+from app.image_preparation.preparation import (
     PreparationError,
     alignment_warning,
     create_check_image,

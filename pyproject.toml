@@ -18,11 +18,11 @@ dependencies = [
 ]
 
 [project.scripts]
-check = "app.cli:check_cli"
-train-pre = "app.cli:train_pre_cli"
-train = "app.cli:train_cli"
-test-pre = "app.cli:test_pre_cli"
-test = "app.cli:test_cli"
+check = "app.image_preparation.cli:check_cli"
+train-pre = "app.image_preparation.cli:train_pre_cli"
+train = "app.model_training.cli:train_cli"
+test-pre = "app.image_preparation.cli:test_pre_cli"
+test = "app.model_evaluation.cli:test_cli"
 
 [[tool.uv.index]]
 name = "pytorch-cu130"

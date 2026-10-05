@@ -7,7 +7,7 @@ from typing import Any, cast
 import torch
 from conftest import build_project, write_test_image
 
-from app.contracts import (
+from app.common.contracts import (
     AlignmentResult,
     BestTrialResult,
     InspectionResult,
@@ -19,7 +19,7 @@ from app.contracts import (
     SplitResult,
     TrialParametersContract,
 )
-from app.runtime import DeviceSelection, RunRecorder
+from app.common.runtime import DeviceSelection, RunRecorder
 
 SCRIPT = runpy.run_path(
     str(Path(__file__).parents[1] / "scripts" / "run_visual_inspection_smoke.py")

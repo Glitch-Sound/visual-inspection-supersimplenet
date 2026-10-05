@@ -24,6 +24,19 @@ project/
 - OpenSpecの仕様は「何を満たすか」、設計は「どのように満たすか」、タスクは「どの順で実装・検証するか」を扱う。
 - 進行中の変更は `openspec/changes/<change-id>/`、正式仕様は `openspec/specs/<capability-path>/spec.md` に置く。
 
+## 外観検査アプリの実装
+
+`openspec/specs/visual-inspection/` の3つの正式仕様と実行時コードは次のように対応する。
+
+| 正式仕様 | 実装パッケージ | 主な責務 |
+| --- | --- | --- |
+| `image-preparation/spec.md` | `src/app/image_preparation/` | `check`・`train-pre`・`test-pre`、位置合わせ、分割、準備 manifest |
+| `model-training/spec.md` | `src/app/model_training/` | `train`、探索、学習、checkpoint と最良試行の保存 |
+| `model-evaluation/spec.md` | `src/app/model_evaluation/` | `test`、checkpoint 推論、可視化、判定集約 |
+| 3能力に共通する契約・実行基盤 | `src/app/common/` | 設定、保存先、manifest・結果の型、CLI 実行記録、画像入出力、学習成果物の復旧 |
+
+各能力の CLI は自身の処理と `common/` を参照する。能力パッケージ間の直接 import と `common/` から能力への import は置かない。画像準備から学習へは `PreparationManifest`、学習から評価へは `BestTrialResult`、checkpoint、設定を既存の保存先で引き渡す。共有する型と検証規則は `common/contracts.py`、パスは `common/paths.py`、中断した学習成果物一式の復旧は `common/artifact_transaction.py` に置く。学習成果物の書込み処理は `model_training/artifacts.py` が担う。
+
 ## 複数 capability の構成
 
 change は一回の変更計画、capability は継続管理する規範的な能力であり、一つのchangeで複数capabilityを追加・変更できる。分割は主な観測結果、責務、入出力、独立した変更・検証の境界を基準にする。実装ファイルや処理順だけを理由に分割しない。

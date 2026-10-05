@@ -6,10 +6,53 @@ import pytest
 import typer
 from conftest import build_project, write_test_image
 
-from app.cli import _run
-from app.imaging import AlignedImage
-from app.preparation import prepare_testing, prepare_training
-from app.runtime import RunRecorder, select_device
+from app.common.cli import _run
+from app.common.runtime import RunRecorder, select_device
+from app.image_preparation.imaging import AlignedImage
+from app.image_preparation.preparation import prepare_testing, prepare_training
+
+
+def test_run_preserves_exit_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def success(_paths: object, recorder: RunRecorder) -> str:
+        recorder.warnings.append("warning")
+        return "done"
+
+    _run("check", "XX", success)
+    output = json.loads(capsys.readouterr().out)
+    assert output["exit_code"] == 0
+    assert output["command"] == "check"
+    assert output["model"] == "XX"
+    assert output["result"] == "done"
+    assert output["warnings"] == ["warning"]
+    assert output["errors"] == []
+
+    def invalid(_paths: object, _recorder: RunRecorder) -> None:
+        raise ValueError("invalid input")
+
+    with pytest.raises(typer.Exit) as input_error:
+        _run("check", "XX", invalid)
+    output = json.loads(capsys.readouterr().out)
+    assert input_error.value.exit_code == 2
+    assert output["exit_code"] == 2
+    assert output["errors"] == ["invalid input"]
+    assert "result" not in output
+
+    def broken(_paths: object, _recorder: RunRecorder) -> None:
+        raise RuntimeError("processing failed")
+
+    with pytest.raises(typer.Exit) as processing_error:
+        _run("check", "XX", broken)
+    output = json.loads(capsys.readouterr().out)
+    assert processing_error.value.exit_code == 3
+    assert output["exit_code"] == 3
+    assert output["errors"] == ["processing failed"]
+    assert "result" not in output
 
 
 def test_select_device_prefers_available_cuda() -> None:

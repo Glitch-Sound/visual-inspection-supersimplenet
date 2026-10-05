@@ -534,3 +534,90 @@ def test_check_does_not_match_partial_test_case_id(tmp_path: Path) -> None:
     result = run_check(tmp_path, "--change", "example")
     assert result.returncode == 1
     assert "TC-001 に対応する pytest" in result.stderr
+
+
+def test_skip_specs_change_checks_design_tasks_and_acceptance(tmp_path: Path) -> None:
+    change = tmp_path / "openspec/changes/example"
+    change.mkdir(parents=True)
+    (change / ".openspec.yaml").write_text("skip_specs: true\n", encoding="utf-8")
+    (change / "proposal.md").write_text(
+        "## 運用開始の受け入れ条件\n\n- AC-001: 既存の結果を維持する。\n",
+        encoding="utf-8",
+    )
+    design = change / "design.md"
+    original_design = (
+        "## 要件トレーサビリティ\n\n"
+        "| 要件ID | 対応する設計節 | 責務・境界 | 実装タスク | 試験ケース | 検証方法 |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| AC-001 | 責務 | 結果 | 1.1 | TC-001 | pytest |\n\n"
+        "## 試験設計\n\n"
+        "| TC ID | 要件ID | Scenario ID | テスト層 | 前提・操作 | 期待値 | pytest 実装 | 自動化 |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| TC-001 | AC-001 | 該当なし | unit | 実行 | 同じ結果 | `tests/test_example.py::test_result` | はい |\n\n"
+        "## 受け入れ検証\n\n"
+        "| 受け入れID | 検証範囲・条件 | 検証方法 | 残る検証 | 状態 | 証跡 |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| AC-001 | CLI契約 | pytest | なし | 検証済み | `report.md` |\n"
+    )
+    design.write_text(original_design, encoding="utf-8")
+    tasks = change / "tasks.md"
+    tasks.write_text(
+        "- [ ] 1.1 `tests/test_example.py` に pytest を実装する。"
+        "対応: AC-001、TC-001。\n",
+        encoding="utf-8",
+    )
+
+    assert run_check(tmp_path, "--change", "example").returncode == 0
+    for old, new, expected in (
+        ("| AC-001 | 責務", "| AC-999 | 責務", "proposal に存在しません"),
+        ("| 1.1 | TC-001 |", "| 9.9 | TC-001 |", "tasks.md に存在しません"),
+        ("| TC-001 | AC-001 |", "| TC-001 | AC-999 |", "proposal に存在しません"),
+        (
+            "| TC-001 | AC-001 | 該当なし |",
+            "| TC-001 | AC-001 | REQ-001-S01 |",
+            "Scenario",
+        ),
+        ("test_result`", "missing`", "pytest 実装先が不正"),
+    ):
+        design.write_text(original_design.replace(old, new), encoding="utf-8")
+        result = run_check(tmp_path, "--change", "example")
+        assert result.returncode == 1
+        assert expected in result.stderr
+    design.write_text(original_design, encoding="utf-8")
+    tasks.write_text(tasks.read_text().replace("TC-001", "TC-999"), encoding="utf-8")
+    assert (
+        "TC-001 に対応する pytest" in run_check(tmp_path, "--change", "example").stderr
+    )
+    tasks.write_text(tasks.read_text().replace("TC-999", "TC-001"), encoding="utf-8")
+
+    collection = run_check(tmp_path, "--change", "example", "--phase", "implementation")
+    assert collection.returncode == 1
+    assert "pytest 実装ファイルが存在しません" in collection.stderr
+    test_file = tmp_path / "tests/test_example.py"
+    test_file.parent.mkdir()
+    test_file.write_text("def test_result():\n    assert True\n", encoding="utf-8")
+    assert (
+        run_check(
+            tmp_path, "--change", "example", "--phase", "implementation"
+        ).returncode
+        == 0
+    )
+
+    incomplete = run_check(tmp_path, "--change", "example", "--phase", "complete")
+    assert incomplete.returncode == 1
+    assert "未完了タスク" in incomplete.stderr
+    assert "証跡が存在しない" in incomplete.stderr
+    tasks.write_text(tasks.read_text().replace("[ ]", "[x]"), encoding="utf-8")
+    (tmp_path / "report.md").write_text("試験成功\n", encoding="utf-8")
+    assert (
+        run_check(tmp_path, "--change", "example", "--phase", "complete").returncode
+        == 0
+    )
+
+    normal = tmp_path / "openspec/changes/normal"
+    normal.mkdir()
+    (normal / "design.md").write_text(original_design, encoding="utf-8")
+    (normal / "tasks.md").write_text(tasks.read_text(), encoding="utf-8")
+    conventional = run_check(tmp_path, "--change", "normal")
+    assert conventional.returncode == 1
+    assert "spec.md、design.md、tasks.md" in conventional.stderr

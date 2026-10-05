@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.contracts import (
+from app.common.contracts import (
     AlignmentResult,
     InspectionResult,
     PreparationManifest,
@@ -15,8 +15,8 @@ from app.contracts import (
     ScoreContract,
     SplitResult,
 )
-from app.results import aggregate_status
-from app.runtime import DeviceSelection, RunRecorder
+from app.common.runtime import DeviceSelection, RunRecorder
+from app.model_evaluation.results import aggregate_status
 
 
 def split(
