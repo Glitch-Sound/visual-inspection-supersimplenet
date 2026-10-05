@@ -247,11 +247,16 @@ uv run --locked python scripts/check_openspec_traceability.py --change <change-n
 # 実装後: 参照する pytest テストの収集可否も確認
 uv run --locked python scripts/check_openspec_traceability.py --change <change-name> --phase implementation
 
-# verify / archive 前: 全タスク、受け入れ条件と証跡も確認
+# 通常の完了時: 全タスク、受け入れ条件と証跡も確認
 uv run --locked python scripts/check_openspec_traceability.py --change <change-name> --phase complete
+
+# 実機確認だけを延期して制限付きでアーカイブする場合
+uv run --locked python scripts/check_openspec_traceability.py --change <change-name> --phase limited-archive
 ```
 
-proposal の受け入れ条件には `AC-001` 形式のIDを付け、design の「受け入れ検証」に検証範囲・方法・残る検証・状態・証跡を対応付ける。完了段階では全条件を検証済みとし、残る検証を「なし」にして、リポジトリ相対パスの空でない証跡ファイルを用意する。自動試験の収集と成功は、実機や対象OSでの確認を代替しない。未検証条件が残るchangeは進行中に保ち、仕様だけを先に反映する場合はsyncを使う。詳細は[技術基盤](openspec/tech.md)を参照する。
+proposal の受け入れ条件には `AC-001` 形式のIDを付け、design の「受け入れ検証」に検証範囲・方法・残る検証・状態・証跡を対応付ける。通常の完了段階では全条件を検証済みとし、残る検証を「なし」にして、リポジトリ相対パスの空でない証跡ファイルを用意する。自動試験の収集と成功は、実機や対象OSでの確認を代替しない。
+
+実機など利用できない環境での受け入れ確認だけが残る場合は、`archive-deferred.md` に未完了タスクと受け入れ条件、延期理由、実施責任者、再開条件、追跡先を記録し、明示的な了承を得て制限付きでアーカイブできる。延期した条件は未検証のままにし、運用開始の承認とは扱わない。実装・自動試験・品質確認の未完了や重要な未解決事項があれば change を進行中に残す。詳細は[技術基盤](openspec/tech.md)を参照する。
 
 OpenSpecを更新する場合は、プロジェクトローカルのCLIとロックファイルを先に更新し、生成済みのエージェント向けinstructionsを更新する。
 

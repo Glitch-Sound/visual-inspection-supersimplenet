@@ -483,6 +483,60 @@ def test_complete_accepts_verified_change(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def write_limited_change(root: Path) -> Path:
+    write_complete_change(root)
+    change = root / "openspec/changes/example"
+    tasks = change / "tasks.md"
+    tasks.write_text(
+        tasks.read_text(encoding="utf-8")
+        + "\n- [ ] 3.3 AC-001 を対象OSの実機で検証する。\n",
+        encoding="utf-8",
+    )
+    design = change / "design.md"
+    design.write_text(
+        design.read_text(encoding="utf-8").replace(
+            "| なし | 検証済み | `report.md` |",
+            "| 対象OSの実機試験 | 未検証 | 未作成 |",
+        ),
+        encoding="utf-8",
+    )
+    (change / "archive-deferred.md").write_text(
+        "## 延期する検証\n\n"
+        "| 受け入れID | タスクID | 延期理由 | 実施責任者 | 再開条件 | 追跡先 |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| AC-001 | 3.3 | 実機なし | 開発チーム | 実機入手後 | issue-123 |\n",
+        encoding="utf-8",
+    )
+    return change
+
+
+def test_limited_archive_accepts_deferred_acceptance(tmp_path: Path) -> None:
+    write_limited_change(tmp_path)
+    result = run_check(tmp_path, "--change", "example", "--phase", "limited-archive")
+    assert result.returncode == 0, result.stderr
+    strict = run_check(tmp_path, "--change", "example", "--phase", "complete")
+    assert strict.returncode == 1
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing-record", "extra-task", "wrong-ac", "checked-task"]
+)
+def test_limited_archive_rejects_invalid_handoff(tmp_path: Path, fault: str) -> None:
+    change = write_limited_change(tmp_path)
+    record = change / "archive-deferred.md"
+    tasks = change / "tasks.md"
+    if fault == "missing-record":
+        record.unlink()
+    elif fault == "extra-task":
+        tasks.write_text(tasks.read_text() + "- [ ] 4.1 実装を終える。\n")
+    elif fault == "wrong-ac":
+        record.write_text(record.read_text().replace("AC-001 | 3.3", "AC-999 | 3.3"))
+    else:
+        tasks.write_text(tasks.read_text().replace("[ ] 3.3", "[x] 3.3"))
+    result = run_check(tmp_path, "--change", "example", "--phase", "limited-archive")
+    assert result.returncode == 1
+
+
 @pytest.mark.parametrize("selection", ["individual", "all"])
 def test_check_includes_archived_changes_when_requested(
     tmp_path: Path, selection: str
@@ -612,6 +666,32 @@ def test_skip_specs_change_checks_design_tasks_and_acceptance(tmp_path: Path) ->
     assert (
         run_check(tmp_path, "--change", "example", "--phase", "complete").returncode
         == 0
+    )
+
+    tasks.write_text(
+        tasks.read_text(encoding="utf-8")
+        + "\n- [ ] 2.1 AC-001 を対象OSの実機で検証する。\n",
+        encoding="utf-8",
+    )
+    design.write_text(
+        original_design.replace(
+            "| なし | 検証済み | `report.md` |",
+            "| 対象OSの実機試験 | 未検証 | 未作成 |",
+        ),
+        encoding="utf-8",
+    )
+    (change / "archive-deferred.md").write_text(
+        "## 延期する検証\n\n"
+        "| 受け入れID | タスクID | 延期理由 | 実施責任者 | 再開条件 | 追跡先 |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| AC-001 | 2.1 | 実機なし | 開発チーム | 実機入手後 | issue-123 |\n",
+        encoding="utf-8",
+    )
+    limited = run_check(tmp_path, "--change", "example", "--phase", "limited-archive")
+    assert limited.returncode == 0, limited.stderr
+    assert (
+        run_check(tmp_path, "--change", "example", "--phase", "complete").returncode
+        == 1
     )
 
     normal = tmp_path / "openspec/changes/normal"

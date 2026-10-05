@@ -213,18 +213,38 @@ def check_skip_specs_change(
                 f"{change_dir.name}: {tc_id} が要件トレーサビリティにありません"
             )
 
-    if phase in {"implementation", "complete"}:
+    if phase in {"implementation", "complete", "limited-archive"}:
         errors.extend(
             check_test_collection(repository_root, pytest_references, change_dir.name)
         )
-    if phase == "complete":
+    if phase in {"complete", "limited-archive"}:
         if not task_requirements:
             errors.append(f"{change_dir.name}: 完了検査に必要なタスクがありません")
+        deferred: dict[str, str] = {}
+        if phase == "limited-archive":
+            deferred, deferred_errors = check_deferred_record(change_dir, tasks)
+            errors.extend(deferred_errors)
         for line in task_lines:
             checkbox = re.match(r"^\s*-\s*\[([^\]]*)]\s*(.*)$", line)
             if checkbox and checkbox[1].strip().lower() != "x":
-                errors.append(f"{change_dir.name}: 未完了タスク: {checkbox[2]}")
-        errors.extend(check_acceptance(change_dir, design, repository_root))
+                task = TASK_LINE_PATTERN.match(line)
+                if (
+                    phase != "limited-archive"
+                    or task is None
+                    or task["task_id"] not in deferred
+                    or deferred[task["task_id"]] not in task["description"]
+                ):
+                    errors.append(f"{change_dir.name}: 未完了タスク: {checkbox[2]}")
+        errors.extend(
+            check_acceptance(
+                change_dir,
+                design,
+                repository_root,
+                deferred_ids=set(deferred.values())
+                if phase == "limited-archive"
+                else set(),
+            )
+        )
     return errors
 
 
@@ -428,18 +448,38 @@ def check_change(
                 errors.append(
                     f"{change_dir.name}: {tc_id} に対応する pytest テスト作成・実行タスクがありません"
                 )
-    if phase in {"implementation", "complete"}:
+    if phase in {"implementation", "complete", "limited-archive"}:
         errors.extend(
             check_test_collection(repository_root, pytest_references, change_dir.name)
         )
-    if phase == "complete":
+    if phase in {"complete", "limited-archive"}:
         if not task_matches:
             errors.append(f"{change_dir.name}: 完了検査に必要なタスクがありません")
+        deferred: dict[str, str] = {}
+        if phase == "limited-archive":
+            deferred, deferred_errors = check_deferred_record(change_dir, tasks)
+            errors.extend(deferred_errors)
         for line in task_lines:
             checkbox = re.match(r"^\s*-\s*\[([^\]]*)]\s*(.*)$", line)
             if checkbox and checkbox[1].strip().lower() != "x":
-                errors.append(f"{change_dir.name}: 未完了タスク: {checkbox[2]}")
-        errors.extend(check_acceptance(change_dir, design, repository_root))
+                task = TASK_LINE_PATTERN.match(line)
+                if (
+                    phase != "limited-archive"
+                    or task is None
+                    or task["task_id"] not in deferred
+                    or deferred[task["task_id"]] not in task["description"]
+                ):
+                    errors.append(f"{change_dir.name}: 未完了タスク: {checkbox[2]}")
+        errors.extend(
+            check_acceptance(
+                change_dir,
+                design,
+                repository_root,
+                deferred_ids=set(deferred.values())
+                if phase == "limited-archive"
+                else set(),
+            )
+        )
     return errors
 
 
@@ -492,9 +532,41 @@ def check_test_collection(
     ]
 
 
-def check_acceptance(change_dir: Path, design: str, root: Path) -> list[str]:
+def check_deferred_record(
+    change_dir: Path, tasks: str
+) -> tuple[dict[str, str], list[str]]:
+    """Read the explicit handoff for deferred acceptance checks."""
+    path = change_dir / "archive-deferred.md"
+    if not path.is_file():
+        return {}, [f"{change_dir.name}: archive-deferred.md がありません"]
+    rows = markdown_table_rows(path.read_text(encoding="utf-8"), "## 延期する検証")
+    deferred: dict[str, str] = {}
+    errors: list[str] = []
+    for row in rows:
+        if (
+            len(row) != 6
+            or not ACCEPTANCE_ID_PATTERN.fullmatch(row[0])
+            or not TASK_REFERENCE_PATTERN.fullmatch(row[1])
+            or not all(cell and cell != "未定" for cell in row)
+            or row[1] in deferred
+            or not re.search(
+                rf"^\s*-\s*\[[^xX\]]*]\s+{re.escape(row[1])}\b", tasks, re.MULTILINE
+            )
+        ):
+            errors.append(f"{change_dir.name}: 延期する検証の行が不正です: {row}")
+            continue
+        deferred[row[1]] = row[0]
+    if not deferred:
+        errors.append(f"{change_dir.name}: 延期する検証の記録がありません")
+    return deferred, errors
+
+
+def check_acceptance(
+    change_dir: Path, design: str, root: Path, *, deferred_ids: set[str] | None = None
+) -> list[str]:
     """Require one verified record and nonempty local evidence per acceptance ID."""
     errors: list[str] = []
+    deferred_ids = deferred_ids or set()
     proposal = change_dir / "proposal.md"
     if not proposal.is_file():
         return [f"{change_dir.name}: 完了検査には proposal.md が必要です"]
@@ -532,6 +604,12 @@ def check_acceptance(change_dir: Path, design: str, root: Path) -> list[str]:
         recorded.add(acceptance_id)
         if acceptance_id not in acceptance_ids:
             errors.append(f"{change_dir.name}: 未知の受け入れID {acceptance_id}")
+        if acceptance_id in deferred_ids:
+            if status != "未検証" or remaining in {"なし", "未作成"}:
+                errors.append(
+                    f"{change_dir.name}: {acceptance_id} の延期状態が不正です"
+                )
+            continue
         if status != "検証済み" or remaining != "なし":
             errors.append(
                 f"{change_dir.name}: {acceptance_id} は未検証または残る検証があります"
@@ -548,6 +626,10 @@ def check_acceptance(change_dir: Path, design: str, root: Path) -> list[str]:
             )
     for acceptance_id in sorted(acceptance_ids - recorded):
         errors.append(f"{change_dir.name}: {acceptance_id} の受け入れ検証がありません")
+    for acceptance_id in sorted(deferred_ids - acceptance_ids):
+        errors.append(
+            f"{change_dir.name}: 延期した {acceptance_id} が proposal.md にありません"
+        )
     return errors
 
 
@@ -561,7 +643,7 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--phase",
-        choices=["design", "implementation", "complete"],
+        choices=["design", "implementation", "complete", "limited-archive"],
         default="design",
         help="設計・実装後・完了時の検査（既定: design）",
     )
