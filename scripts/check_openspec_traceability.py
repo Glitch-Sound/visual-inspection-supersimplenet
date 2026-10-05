@@ -539,55 +539,53 @@ def check_test_collection(
 def check_deferred_record(
     change_dir: Path, tasks: str, root: Path
 ) -> tuple[dict[str, str], list[str]]:
-    """Read the explicit handoff for deferred acceptance checks."""
-    path = change_dir / "archive-deferred.md"
+    """Read deferred acceptance checks from the repository README."""
+    path = root / "README.md"
     if not path.is_file():
-        return {}, [f"{change_dir.name}: archive-deferred.md がありません"]
-    rows = markdown_table_rows(path.read_text(encoding="utf-8"), "## 延期する検証")
+        return {}, [f"{change_dir.name}: README.md がありません"]
+    rows = markdown_table_rows(
+        path.read_text(encoding="utf-8"), "## 延期中の受け入れ確認"
+    )
+    original_name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", change_dir.name)
     deferred: dict[str, str] = {}
     errors: list[str] = []
     for row in rows:
-        if (
-            len(row) != 6
-            or not ACCEPTANCE_ID_PATTERN.fullmatch(row[0])
-            or not TASK_REFERENCE_PATTERN.fullmatch(row[1])
-            or not all(cell and cell != "未定" for cell in row)
-            or row[1] in deferred
-            or not re.search(
-                rf"^\s*-\s*\[[^xX\]]*]\s+{re.escape(row[1])}\b", tasks, re.MULTILINE
-            )
-        ):
-            errors.append(f"{change_dir.name}: 延期する検証の行が不正です: {row}")
+        if row[0] == "change" or row[0] != original_name:
             continue
-        tracking_path = Path(row[5].strip("`"))
-        resolved = (root / tracking_path).resolve()
-        if (
-            tracking_path.is_absolute()
-            or tracking_path.suffix.lower() != ".md"
-            or not resolved.is_relative_to(root)
-            or not resolved.is_file()
-        ):
-            errors.append(
-                f"{change_dir.name}: {row[0]} の追跡先は実在するリポジトリ内の Markdown ファイルにしてください: {row[5]}"
-            )
-            continue
-        original_name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", change_dir.name)
-        tracking = markdown_section(
-            resolved.read_text(encoding="utf-8"), "## 延期中の受け入れ確認"
+        task = (
+            re.fullmatch(r"タスク(\d+\.\d+):\s*\S.*", row[3]) if len(row) == 4 else None
         )
-        if not any(
-            line.startswith("|")
-            and original_name in [cell.strip() for cell in line.strip("|").split("|")]
-            and row[0] in [cell.strip() for cell in line.strip("|").split("|")]
-            for line in tracking.splitlines()
+        if (
+            len(row) != 4
+            or not ACCEPTANCE_ID_PATTERN.fullmatch(row[1])
+            or row[2] != "未検証"
+            or task is None
         ):
-            errors.append(
-                f"{change_dir.name}: {row[5]} の「延期中の受け入れ確認」に {original_name} / {row[0]} がありません"
-            )
+            errors.append(f"{change_dir.name}: README の延期行が不正です: {row}")
             continue
-        deferred[row[1]] = row[0]
+        task_id = task[1]
+        if task_id in deferred or row[1] in deferred.values():
+            errors.append(f"{change_dir.name}: README の延期行が重複しています: {row}")
+            continue
+        task_line = next(
+            (
+                match
+                for line in tasks.splitlines()
+                if (match := TASK_LINE_PATTERN.match(line))
+                and match["task_id"] == task_id
+            ),
+            None,
+        )
+        if (
+            task_line is None
+            or task_line["status"].strip().lower() == "x"
+            or row[1] not in task_line["description"]
+        ):
+            errors.append(f"{change_dir.name}: README の延期タスクが不正です: {row}")
+            continue
+        deferred[task_id] = row[1]
     if not deferred:
-        errors.append(f"{change_dir.name}: 延期する検証の記録がありません")
+        errors.append(f"{change_dir.name}: README に延期する検証の記録がありません")
     return deferred, errors
 
 

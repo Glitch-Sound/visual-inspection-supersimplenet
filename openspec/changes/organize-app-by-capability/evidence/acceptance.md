@@ -11,6 +11,22 @@
 - `uv run --locked python scripts/check_openspec_traceability.py --change organize-app-by-capability --phase implementation`: 成功。TC-001〜TC-007 の単一 pytest 参照を収集可能。
 - `npx --no-install openspec validate organize-app-by-capability --strict`: 成功。
 
+## 2026-10-05 テンプレート更新後の再確認
+
+- 環境: macOS 26.6.2 arm64、Python 3.13.15。実機受け入れの対象 OS ではない。
+- `npm run check`: OpenSpec 全件 strict validate、Ruff、pyright、pytest 129件、repository check、進行中 change の実装段階トレーサビリティ検査が成功。
+- `npx --no-install openspec validate organize-app-by-capability --strict`: 成功。
+- `uv run --locked python scripts/check_openspec_traceability.py --change organize-app-by-capability --phase implementation`: `npm run check` 内で成功。
+- 実機条件に対する実行結果はない。AC-002〜AC-004 の受け入れ状態は未検証のままとする。
+
+## 2026-10-05 README 引き継ぎ方針の検証
+
+- 環境: macOS 26.6.2 arm64、Python 3.13.15。対象 OS の実機試験は未実施。
+- `npm run check`: OpenSpec 全件 strict validate、Ruff、pyright、pytest 130件、repository check、実装段階トレーサビリティ検査が成功。
+- `npx --no-install openspec validate organize-app-by-capability --strict`: 成功。
+- README の「延期中の受け入れ確認」に `organize-app-by-capability` の AC-002〜AC-004、状態「未検証」、タスク4.3〜4.5、残る確認内容が記録されていることを照合した。
+- `uv run --locked python scripts/check_openspec_traceability.py --change organize-app-by-capability --phase limited-archive`: 成功。実機タスク4.3〜4.5のみ未完了として許容し、AC-002〜AC-004の未検証状態とREADMEの追跡行を照合した。
+
 ## レビュー結果
 
 | 条件 | 開発環境で確認した範囲 | 残る検証 |
@@ -22,4 +38,4 @@
 
 ## 未実施の実機受け入れ
 
-タスク4.3の対象環境はこの作業環境にないため未実施。4条件それぞれで `scripts/run_visual_inspection_smoke.py` を異なる出力先に実行し、5 CLI の終了コード、`metadata_valid`、全成果物の `readable`、`train`・`test` の実測 `metadata.device.type`、GPU 無効化方法、OS・Python・依存版・処理時間を記録する。期待デバイスとの不一致は成功扱いしない。タスク4.3・4.4を未完了とし、change を進行中に保つ。
+タスク4.3〜4.5の対象環境はこの作業環境にないため未実施。4条件それぞれで `scripts/run_visual_inspection_smoke.py` を異なる出力先に実行し、5 CLI の終了コード、`metadata_valid`、全成果物の `readable`、`train`・`test` の実測 `metadata.device.type`、GPU 無効化方法、OS・Python・依存版・処理時間を記録する。期待デバイスとの不一致は成功扱いしない。実機タスク4.3〜4.5は未完了のまま README の追跡表に引き継ぎ、運用受け入れは未完了とする。

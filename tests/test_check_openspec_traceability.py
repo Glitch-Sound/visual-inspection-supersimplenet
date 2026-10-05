@@ -500,18 +500,11 @@ def write_limited_change(root: Path) -> Path:
         ),
         encoding="utf-8",
     )
-    (change / "archive-deferred.md").write_text(
-        "## 延期する検証\n\n"
-        "| 受け入れID | タスクID | 延期理由 | 実施責任者 | 再開条件 | 追跡先 |\n"
-        "| --- | --- | --- | --- | --- | --- |\n"
-        "| AC-001 | 3.3 | 実機なし | 開発チーム | 実機入手後 | README.md |\n",
-        encoding="utf-8",
-    )
     (root / "README.md").write_text(
         "## 延期中の受け入れ確認\n\n"
-        "| change | 受け入れID | 状態 |\n"
-        "| --- | --- | --- |\n"
-        "| example | AC-001 | 未検証 |\n",
+        "| change | 受け入れID | 状態 | 記録 |\n"
+        "| --- | --- | --- | --- |\n"
+        "| example | AC-001 | 未検証 | タスク3.3: 対象OSの実機確認 |\n",
         encoding="utf-8",
     )
     return change
@@ -547,26 +540,29 @@ def test_limited_archive_accepts_archived_change(tmp_path: Path) -> None:
         "extra-task",
         "wrong-ac",
         "checked-task",
-        "missing-index",
-        "external-index",
+        "missing-readme",
+        "wrong-task",
+        "wrong-state",
     ],
 )
 def test_limited_archive_rejects_invalid_handoff(tmp_path: Path, fault: str) -> None:
     change = write_limited_change(tmp_path)
-    record = change / "archive-deferred.md"
+    record = tmp_path / "README.md"
     tasks = change / "tasks.md"
     if fault == "missing-record":
+        record.write_text("## 延期中の受け入れ確認\n", encoding="utf-8")
+    elif fault == "missing-readme":
         record.unlink()
     elif fault == "extra-task":
         tasks.write_text(tasks.read_text() + "- [ ] 4.1 実装を終える。\n")
     elif fault == "wrong-ac":
-        record.write_text(record.read_text().replace("AC-001 | 3.3", "AC-999 | 3.3"))
-    elif fault == "missing-index":
-        (tmp_path / "README.md").write_text("## 延期中の受け入れ確認\n")
-    elif fault == "external-index":
         record.write_text(
-            record.read_text().replace("README.md", "https://example.com/issue")
+            record.read_text().replace("AC-001 | 未検証", "AC-999 | 未検証")
         )
+    elif fault == "wrong-task":
+        record.write_text(record.read_text().replace("タスク3.3", "タスク9.9"))
+    elif fault == "wrong-state":
+        record.write_text(record.read_text().replace("未検証", "検証済み"))
     else:
         tasks.write_text(tasks.read_text().replace("[ ] 3.3", "[x] 3.3"))
     result = run_check(tmp_path, "--change", "example", "--phase", "limited-archive")
@@ -716,18 +712,11 @@ def test_skip_specs_change_checks_design_tasks_and_acceptance(tmp_path: Path) ->
         ),
         encoding="utf-8",
     )
-    (change / "archive-deferred.md").write_text(
-        "## 延期する検証\n\n"
-        "| 受け入れID | タスクID | 延期理由 | 実施責任者 | 再開条件 | 追跡先 |\n"
-        "| --- | --- | --- | --- | --- | --- |\n"
-        "| AC-001 | 2.1 | 実機なし | 開発チーム | 実機入手後 | README.md |\n",
-        encoding="utf-8",
-    )
     (tmp_path / "README.md").write_text(
         "## 延期中の受け入れ確認\n\n"
-        "| change | 受け入れID | 状態 |\n"
-        "| --- | --- | --- |\n"
-        "| example | AC-001 | 未検証 |\n",
+        "| change | 受け入れID | 状態 | 記録 |\n"
+        "| --- | --- | --- | --- |\n"
+        "| example | AC-001 | 未検証 | タスク2.1: 対象OSの実機確認 |\n",
         encoding="utf-8",
     )
     limited = run_check(tmp_path, "--change", "example", "--phase", "limited-archive")

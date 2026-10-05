@@ -256,14 +256,7 @@ uv run --locked python scripts/check_openspec_traceability.py --change <change-n
 
 proposal の受け入れ条件には `AC-001` 形式のIDを付け、design の「受け入れ検証」に検証範囲・方法・残る検証・状態・証跡を対応付ける。通常の完了段階では全条件を検証済みとし、残る検証を「なし」にして、リポジトリ相対パスの空でない証跡ファイルを用意する。自動試験の収集と成功は、実機や対象OSでの確認を代替しない。
 
-実機など利用できない環境での受け入れ確認だけが残る場合は、`archive-deferred.md` に未完了タスクと受け入れ条件、延期理由、実施責任者、再開条件、追跡先を記録し、明示的な了承を得て制限付きでアーカイブできる。追跡先はこの README などリポジトリ内の Markdown ファイルとし、`## 延期中の受け入れ確認` に change 名と AC-ID を記録する。GitHub Issue や別の spec の作成は必須ではない。延期した条件は未検証のままにし、運用開始の承認とは扱わない。実装・自動試験・品質確認の未完了や重要な未解決事項があれば change を進行中に残す。詳細は[技術基盤](openspec/tech.md)を参照する。
-
-## 延期中の受け入れ確認
-
-制限付きアーカイブ時に change 名と AC-ID を追記する。検証後は状態と証跡を更新し、アーカイブ内の受け入れ検証記録にも結果を反映する。
-
-| change | 受け入れID | 状態 | 記録 |
-| --- | --- | --- | --- |
+実機など利用できない環境での受け入れ確認だけが残る場合は、この README の「延期中の受け入れ確認」に change 名、AC-ID、状態「未検証」、未完了タスク番号と確認内容を記録し、明示的な了承を得て制限付きでアーカイブできる。`archive-deferred.md`、実施責任者・再開条件、GitHub Issue や別の spec の作成は必須ではない。延期した条件は未検証のままにし、運用開始の承認とは扱わない。実装・自動試験・品質確認の未完了や重要な未解決事項があれば change を進行中に残す。詳細は[技術基盤](openspec/tech.md)を参照する。
 
 OpenSpecを更新する場合は、プロジェクトローカルのCLIとロックファイルを先に更新し、生成済みのエージェント向けinstructionsを更新する。
 
@@ -271,3 +264,19 @@ OpenSpecを更新する場合は、プロジェクトローカルのCLIとロッ
 npm install --save-dev @fission-ai/openspec@latest
 npx --no-install openspec update
 ```
+
+## 配置と依存境界の検証記録
+
+`organize-app-by-capability` の AC-001 は、[配置案内](openspec/structure.md)で3能力と `src/app/common/` の対応を確認した。2026-10-05、macOS 26.6.2 arm64・Python 3.13.15 で `uv run --locked pytest tests/test_package_structure.py::test_capability_import_boundaries -q` を実行し、1件成功した。検査は能力間の直接 import と `common/` から能力への import を禁止する。
+
+## 延期中の受け入れ確認
+
+実機確認を延期している change と AC-ID を記録する。検証後は状態と証跡を更新し、change の受け入れ検証記録にも結果を反映する。
+
+| change | 受け入れID | 状態 | 記録 |
+| --- | --- | --- | --- |
+| organize-app-by-capability | AC-002 | 未検証 | タスク4.3: Ubuntu 24.04 LTS・Windows 11 の実機で5 CLIの名前・引数・終了コード・出力を確認する。 |
+| organize-app-by-capability | AC-003 | 未検証 | タスク4.4: 両OSの実機でmanifest・checkpoint・検査結果の形式、保存先、読戻しを確認する。 |
+| organize-app-by-capability | AC-004 | 未検証 | タスク4.5: 両OSでGPU有効・無効の計4条件を実行し、学習・推論で実際に使用したデバイスを確認する。 |
+
+タスク4.3〜4.5の実行時は各条件で別の出力先を使い、OS・Python・依存版、GPU無効化方法、5 CLIの結果、成果物の読戻し、実測デバイスを change 内の `evidence/acceptance.md` へ記録する。現時点では実機確認と運用受け入れは完了していない。
