@@ -18,7 +18,7 @@
 
 ### 目標
 
-- 5つの型番指定 CLI（`check`、`train-pre`、`train`、`test-pre`、`test`）を同一の設定・ログ・終了状態契約で提供する。
+- 5つの型番指定 CLI(`check`、`train-pre`、`train`、`test-pre`、`test`)を同一の設定・ログ・終了状態契約で提供する。
 - ORB 位置合わせ、範囲検証、ブラックリスト、元画像と分割画像の追跡を純粋な契約と責務境界に分け、固定画像で自動試験できるようにする。
 - SuperSimpleNet の学習・推論をアダプタ境界へ隔離し、Optuna の探索、元画像単位分離、学習時限定データ拡張、再開をテストダブルで検証可能にする。
 - 型番別の単一モデル、暫定閾値、探索履歴、分割結果、元画像集約結果を機械可読かつ再現可能に保存する。
@@ -210,7 +210,7 @@
 | pretrained取得失敗 | modeling | 学習中止、既存キャッシュ不変 | 依存先失敗、exit 3 | error log | 通信確認またはキャッシュ配置 |
 | checkpointと型番不一致 | evaluation | 推論開始なし | 期待/実際の型番、exit 2 | error log | 正しいモデルを指定 |
 | スコア契約またはthresholdの欠落・不一致 | evaluation | 推論開始なし | 期待値と実値、不足項目、exit 2 | error log | 学習完了または設定同期 |
-| 分割推論失敗 | evaluation/results | 分割error、元画像undetermined（他分割anomalyならanomaly） | JSONを保存し継続 | JSON、warning/error | 原因修正後再検査 |
+| 分割推論失敗 | evaluation/results | 分割error、元画像undetermined(他分割anomalyならanomaly) | JSONを保存し継続 | JSON、warning/error | 原因修正後再検査 |
 | 結果JSON書込み失敗 | results | ステージング破棄、現行結果維持 | exit 3 | error log | 容量・権限確認後再実行 |
 | 同じstem・異拡張子の試験元画像 | evaluation/results | 拡張子付き入力名を含む一意名で両方保存 | 各元画像のJSON・結果画像 | manifest、結果JSON | 不要 |
 
@@ -264,8 +264,8 @@
 | TC-026 | REQ-011 | REQ-011-S03 | unit | anomalyなし、undetermined/errorあり | overall undetermined、再撮影案内 | `tests/test_results.py::test_aggregate_marks_incomplete_result_undetermined` | はい |
 | TC-027 | REQ-012 | REQ-012-S01 | integration | 各終了状態の元画像結果確定 | スコア源・PostProcessor状態を含む必須JSON、enum、null score、UTC日時 | `tests/test_results.py::test_result_json_contains_traceable_contract` | はい |
 | TC-028 | REQ-013 | REQ-013-S01 | integration | 旧結果ありでtest --restart | 結果のみ置換し他データ保持 | `tests/test_evaluation.py::test_evaluation_restart_replaces_only_results` | はい |
-| TC-029 | NREQ-001 | NREQ-001-S01 | integration/e2e | 対象OSの固定環境で全CLIスモーク | 終了状態・時間・版・device記録、成果物読戻し | `tests/test_platform_smoke.py::test_workflow_records_runtime_contract` | はい（実機実行併用） |
-| TC-030 | NREQ-001 | NREQ-001-S02 | integration/e2e | GPU無効でtrain/testスモーク | CPU完了、理由・時間記録 | `tests/test_platform_smoke.py::test_workflow_completes_with_cpu_fallback` | はい（実機実行併用） |
+| TC-029 | NREQ-001 | NREQ-001-S01 | integration/e2e | 対象OSの固定環境で全CLIスモーク | 終了状態・時間・版・device記録、成果物読戻し | `tests/test_platform_smoke.py::test_workflow_records_runtime_contract` | はい(実機実行併用) |
+| TC-030 | NREQ-001 | NREQ-001-S02 | integration/e2e | GPU無効でtrain/testスモーク | CPU完了、理由・時間記録 | `tests/test_platform_smoke.py::test_workflow_completes_with_cpu_fallback` | はい(実機実行併用) |
 | TC-031 | REQ-001 | REQ-001-S03 | unit/integration | `base`へ絶対パス、`.`、`..`、パス区切り文字またはルート外参照を指定して設定読込み・check | 処理開始前にexit 2、既知ルート外を読書きしない | `tests/test_config.py::test_base_rejects_paths_outside_model_root` | はい |
 | TC-032 | REQ-012 | REQ-012-S02 | unit/integration | スコア源、PostProcessor、判定enum、runtime必須項目または日時を不正にして結果生成・読戻し | 項目を特定して契約拒否、不正結果を正常扱いしない | `tests/test_results.py::test_result_contract_rejects_invalid_score_and_runtime` | はい |
 | TC-033 | REQ-010 | REQ-010-S03 | unit/integration | モデル生成時のPreProcessorを保持した試験predictorへ非正方形画像を入力 | モデルと同一transformが1回適用され、独自resize・正規化を併用しない | `tests/test_evaluation.py::test_predictor_uses_model_preprocessor` | はい |

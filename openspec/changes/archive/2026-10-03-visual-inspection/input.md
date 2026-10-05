@@ -11,7 +11,7 @@
 
 ### 2.1. 環境
 - `GPU` は `NVIDIA` の `GeForce RTX 50シリーズ` を利用する
-- `Ubuntu 24.04 LTS` と `Windows 11`（いずれも x86-64）で動作させたい
+- `Ubuntu 24.04 LTS` と `Windows 11`(いずれも x86-64)で動作させたい
 - `Python 3.13` を利用する
 - 初期検証では `PyTorch 2.13.0`、`torchvision 0.28.0` の `CUDA 13.0` 対応版、および `Anomalib 2.6.2` を候補とする
 - 各OSでGPUに対応する安定版の`NVIDIA`ドライバを使用する。`CUDA 13.0`対応版`PyTorch`の最低要件は`Ubuntu`で`580.65.06`、`Windows`で`580.88`とし、実際に採用するドライバ版は実機検証後に固定する
