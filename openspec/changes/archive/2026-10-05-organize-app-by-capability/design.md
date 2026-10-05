@@ -180,13 +180,13 @@ src/app/
 
 | TC ID | 要件ID | Scenario ID | テスト層 | 前提・操作 | 期待値 | pytest 実装 | 自動化 | 検証範囲 | 残る検証 | 証跡 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| TC-001 | AC-001 | 該当なし | unit | `app` 内の import を列挙する | 能力間と `common` から能力への import がなく、4領域を特定できる | `tests/test_package_structure.py::test_capability_import_boundaries` | はい | Python import の静的境界 | なし | `openspec/changes/organize-app-by-capability/evidence/acceptance.md` |
-| TC-002 | AC-002 | 該当なし | integration | 5 entry point の import と `--help` を実行する | 5つとも従来名・引数で起動する | `tests/test_package_structure.py::test_console_script_entry_points` | はい | 現行開発環境の CLI 登録 | 対象 OS・4.3 | `openspec/changes/organize-app-by-capability/evidence/acceptance.md` |
-| TC-003 | AC-003 | 該当なし | integration | テスト内で確認画像・manifest・checkpoint・最良試行・検査結果を作成し、成果物読戻し処理を呼ぶ | 既存の成果物形式を読み戻せる | `tests/test_platform_smoke.py::test_workflow_records_runtime_contract` | はい | 開発環境での成果物契約の読戻し。CLI の連続実行は含まない | 5 CLI の実行・対象 OS・GPU/CPU・4.4 | `openspec/changes/organize-app-by-capability/evidence/acceptance.md` |
-| TC-004 | AC-004 | 該当なし | unit | `skip_specs: true` と通常の change を検査する | 省略経路の AC・TC・タスク・証跡を工程別に確認し、通常経路の厳格さを維持する | `tests/test_check_openspec_traceability.py::test_skip_specs_change_checks_design_tasks_and_acceptance` | はい | 開発基盤の両経路 | なし | `openspec/changes/organize-app-by-capability/evidence/acceptance.md` |
-| TC-005 | AC-004 | 該当なし | unit | GPU 利用不可とデバイス初期化失敗を選択処理へ渡す | どちらも理由付きで CPU を選択する | `tests/test_runtime.py::test_select_device_falls_back_to_cpu` | はい | 開発環境でのデバイス選択。学習・推論の実行は含まない | 両 OS の実機4経路・4.5 | `openspec/changes/organize-app-by-capability/evidence/acceptance.md` |
-| TC-006 | AC-002 | 該当なし | integration | 共通 CLI 実行処理へ成功・入力不備・処理失敗の action を渡す | 標準出力 JSON の項目、結果・警告・エラー、exit 0・2・3 が従来どおりである | `tests/test_runtime.py::test_run_preserves_exit_contract` | はい | 共通実行処理の3分岐。5 CLI の正常経路はタスク4.3 | 対象 OS・4.3 | `openspec/changes/organize-app-by-capability/evidence/acceptance.md` |
-| TC-007 | AC-003 | 該当なし | integration | 学習成果物の backup と中断 journal を作り、壊れた現行一式がある状態で `test` CLI を実行する | 設定・checkpoint・最良試行を復旧してから読み、従来の成功結果を返す | `tests/test_evaluation.py::test_test_cli_recovers_interrupted_training_artifacts` | はい | 評価 CLI の復旧順序と成果物一式。predictor・推論処理はテストダブル | 実ライブラリでの5 CLI 実行・対象 OS・4.4 | `openspec/changes/organize-app-by-capability/evidence/acceptance.md` |
+| TC-001 | AC-001 | 該当なし | unit | `app` 内の import を列挙する | 能力間と `common` から能力への import がなく、4領域を特定できる | `tests/test_package_structure.py::test_capability_import_boundaries` | はい | Python import の静的境界 | なし | `openspec/changes/archive/2026-10-05-organize-app-by-capability/evidence/acceptance.md` |
+| TC-002 | AC-002 | 該当なし | integration | 5 entry point の import と `--help` を実行する | 5つとも従来名・引数で起動する | `tests/test_package_structure.py::test_console_script_entry_points` | はい | 現行開発環境の CLI 登録 | 対象 OS・4.3 | `openspec/changes/archive/2026-10-05-organize-app-by-capability/evidence/acceptance.md` |
+| TC-003 | AC-003 | 該当なし | integration | テスト内で確認画像・manifest・checkpoint・最良試行・検査結果を作成し、成果物読戻し処理を呼ぶ | 既存の成果物形式を読み戻せる | `tests/test_platform_smoke.py::test_workflow_records_runtime_contract` | はい | 開発環境での成果物契約の読戻し。CLI の連続実行は含まない | 5 CLI の実行・対象 OS・GPU/CPU・4.4 | `openspec/changes/archive/2026-10-05-organize-app-by-capability/evidence/acceptance.md` |
+| TC-004 | AC-004 | 該当なし | unit | `skip_specs: true` と通常の change を検査する | 省略経路の AC・TC・タスク・証跡を工程別に確認し、通常経路の厳格さを維持する | `tests/test_check_openspec_traceability.py::test_skip_specs_change_checks_design_tasks_and_acceptance` | はい | 開発基盤の両経路 | なし | `openspec/changes/archive/2026-10-05-organize-app-by-capability/evidence/acceptance.md` |
+| TC-005 | AC-004 | 該当なし | unit | GPU 利用不可とデバイス初期化失敗を選択処理へ渡す | どちらも理由付きで CPU を選択する | `tests/test_runtime.py::test_select_device_falls_back_to_cpu` | はい | 開発環境でのデバイス選択。学習・推論の実行は含まない | 両 OS の実機4経路・4.5 | `openspec/changes/archive/2026-10-05-organize-app-by-capability/evidence/acceptance.md` |
+| TC-006 | AC-002 | 該当なし | integration | 共通 CLI 実行処理へ成功・入力不備・処理失敗の action を渡す | 標準出力 JSON の項目、結果・警告・エラー、exit 0・2・3 が従来どおりである | `tests/test_runtime.py::test_run_preserves_exit_contract` | はい | 共通実行処理の3分岐。5 CLI の正常経路はタスク4.3 | 対象 OS・4.3 | `openspec/changes/archive/2026-10-05-organize-app-by-capability/evidence/acceptance.md` |
+| TC-007 | AC-003 | 該当なし | integration | 学習成果物の backup と中断 journal を作り、壊れた現行一式がある状態で `test` CLI を実行する | 設定・checkpoint・最良試行を復旧してから読み、従来の成功結果を返す | `tests/test_evaluation.py::test_test_cli_recovers_interrupted_training_artifacts` | はい | 評価 CLI の復旧順序と成果物一式。predictor・推論処理はテストダブル | 実ライブラリでの5 CLI 実行・対象 OS・4.4 | `openspec/changes/archive/2026-10-05-organize-app-by-capability/evidence/acceptance.md` |
 
 ## 網羅性確認
 
@@ -197,8 +197,8 @@ src/app/
 | 受け入れID | 検証範囲・条件 | 検証方法 | 残る検証 | 状態 | 証跡 |
 | --- | --- | --- | --- | --- | --- |
 | AC-001 | 仕様3能力と共通領域の配置・依存方向 | TC-001、配置案内のレビュー | なし | 検証済み | `README.md` |
-| AC-002 | 5 CLI、引数、出力、終了コード | TC-002、TC-006、タスク4.3の5 CLI 実行記録 | Ubuntu / Windows の実機5 CLI・4.3 | 未検証 | `openspec/changes/organize-app-by-capability/evidence/acceptance.md` |
-| AC-003 | manifest、checkpoint、結果、異常・再実行 | TC-003、TC-007、既存契約・復旧試験、タスク4.4の成果物読戻し | Ubuntu / Windows の実機成果物・4.4 | 未検証 | `openspec/changes/organize-app-by-capability/evidence/acceptance.md` |
-| AC-004 | 自動試験・品質検査、Ubuntu / Windows の GPU / CPU | TC-004、TC-005、`npm run check`、タスク4.5で `train`・`test` の実際のデバイスを照合 | 実機4条件・4.5 | 未検証 | `openspec/changes/organize-app-by-capability/evidence/acceptance.md` |
+| AC-002 | 5 CLI、引数、出力、終了コード | TC-002、TC-006、タスク4.3の5 CLI 実行記録 | Ubuntu / Windows の実機5 CLI・4.3 | 未検証 | `openspec/changes/archive/2026-10-05-organize-app-by-capability/evidence/acceptance.md` |
+| AC-003 | manifest、checkpoint、結果、異常・再実行 | TC-003、TC-007、既存契約・復旧試験、タスク4.4の成果物読戻し | Ubuntu / Windows の実機成果物・4.4 | 未検証 | `openspec/changes/archive/2026-10-05-organize-app-by-capability/evidence/acceptance.md` |
+| AC-004 | 自動試験・品質検査、Ubuntu / Windows の GPU / CPU | TC-004、TC-005、`npm run check`、タスク4.5で `train`・`test` の実際のデバイスを照合 | 実機4条件・4.5 | 未検証 | `openspec/changes/archive/2026-10-05-organize-app-by-capability/evidence/acceptance.md` |
 
 AC-002〜AC-004 の「未検証」は、対象 OS の実機受け入れが未完了であることを示す。開発環境で成功した自動試験とレビューの範囲は証跡に残し、実機結果として扱わない。延期するAC-IDと未完了タスク番号、確認内容はリポジトリの `README.md` に記録する。制限付きアーカイブは運用開始の承認ではない。

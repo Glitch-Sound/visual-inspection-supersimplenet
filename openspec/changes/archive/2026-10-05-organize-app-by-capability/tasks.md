@@ -24,9 +24,9 @@
 
 ## 4. 配置案内・受け入れ
 
-- [x] 4.1 `openspec/structure.md` に3仕様と実装パッケージ・`common/` の対応、能力間の依存方向、共有契約の置き方を記載する。`tests/test_package_structure.py::test_capability_import_boundaries` の pytest で禁じた import を検出し、文書とコードを照合する。対応: `AC-001`、設計「確定した配置」「判断1」「受け入れ検証」、`TC-001`。完了条件: 3仕様から実装を特定でき、依存境界テストが成功し、レビュー結果を `openspec/changes/organize-app-by-capability/evidence/acceptance.md` に記録できる。
+- [x] 4.1 `openspec/structure.md` に3仕様と実装パッケージ・`common/` の対応、能力間の依存方向、共有契約の置き方を記載する。`tests/test_package_structure.py::test_capability_import_boundaries` の pytest で禁じた import を検出し、文書とコードを照合する。対応: `AC-001`、設計「確定した配置」「判断1」「受け入れ検証」、`TC-001`。完了条件: 3仕様から実装を特定でき、依存境界テストが成功し、レビュー結果を `openspec/changes/archive/2026-10-05-organize-app-by-capability/evidence/acceptance.md` に記録できる。
 
-- [x] 4.2 `uv run --locked pre-commit run --all-files`、`npm run check`、`uv run --locked python scripts/check_openspec_traceability.py --change organize-app-by-capability --phase implementation`、`npx --no-install openspec validate organize-app-by-capability --strict` を実行して失敗を解消し、CLI・成果物・失敗経路をレビューする。対応: `AC-002`、`AC-003`、`AC-004`、設計「試験設計」「受け入れ検証」、`TC-002`〜`TC-004`、`TC-006`、`TC-007`。完了条件: 各コマンドが成功し、実行環境・日付・結果を `openspec/changes/organize-app-by-capability/evidence/acceptance.md` に記録する。
+- [x] 4.2 `uv run --locked pre-commit run --all-files`、`npm run check`、`uv run --locked python scripts/check_openspec_traceability.py --change organize-app-by-capability --phase implementation`、`npx --no-install openspec validate organize-app-by-capability --strict` を実行して失敗を解消し、CLI・成果物・失敗経路をレビューする。対応: `AC-002`、`AC-003`、`AC-004`、設計「試験設計」「受け入れ検証」、`TC-002`〜`TC-004`、`TC-006`、`TC-007`。完了条件: 各コマンドが成功し、実行環境・日付・結果を `openspec/changes/archive/2026-10-05-organize-app-by-capability/evidence/acceptance.md` に記録する。
 
 - [ ] 4.3 Ubuntu 24.04 LTS と Windows 11 の実機で、GPU 有効・無効の4条件に対し `scripts/run_visual_inspection_smoke.py` をそれぞれ異なる出力先で実行し、5 CLI の起動、引数、終了コード、標準出力の契約を確認する。失敗時の終了コードはタスク3.3の自動試験の確認範囲として区別する。対応: `AC-002`、設計「インターフェースと失敗時の結果」「受け入れ検証」、`TC-002`、`TC-006`。完了条件: 4条件の実機記録と OS・Python・依存版・コマンド・出力を `evidence/acceptance.md` に残し、未実施の間は未完了のままにする。
 
