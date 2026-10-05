@@ -222,7 +222,9 @@ def check_skip_specs_change(
             errors.append(f"{change_dir.name}: 完了検査に必要なタスクがありません")
         deferred: dict[str, str] = {}
         if phase == "limited-archive":
-            deferred, deferred_errors = check_deferred_record(change_dir, tasks)
+            deferred, deferred_errors = check_deferred_record(
+                change_dir, tasks, repository_root
+            )
             errors.extend(deferred_errors)
         for line in task_lines:
             checkbox = re.match(r"^\s*-\s*\[([^\]]*)]\s*(.*)$", line)
@@ -457,7 +459,9 @@ def check_change(
             errors.append(f"{change_dir.name}: 完了検査に必要なタスクがありません")
         deferred: dict[str, str] = {}
         if phase == "limited-archive":
-            deferred, deferred_errors = check_deferred_record(change_dir, tasks)
+            deferred, deferred_errors = check_deferred_record(
+                change_dir, tasks, repository_root
+            )
             errors.extend(deferred_errors)
         for line in task_lines:
             checkbox = re.match(r"^\s*-\s*\[([^\]]*)]\s*(.*)$", line)
@@ -533,7 +537,7 @@ def check_test_collection(
 
 
 def check_deferred_record(
-    change_dir: Path, tasks: str
+    change_dir: Path, tasks: str, root: Path
 ) -> tuple[dict[str, str], list[str]]:
     """Read the explicit handoff for deferred acceptance checks."""
     path = change_dir / "archive-deferred.md"
@@ -554,6 +558,32 @@ def check_deferred_record(
             )
         ):
             errors.append(f"{change_dir.name}: 延期する検証の行が不正です: {row}")
+            continue
+        tracking_path = Path(row[5].strip("`"))
+        resolved = (root / tracking_path).resolve()
+        if (
+            tracking_path.is_absolute()
+            or tracking_path.suffix.lower() != ".md"
+            or not resolved.is_relative_to(root)
+            or not resolved.is_file()
+        ):
+            errors.append(
+                f"{change_dir.name}: {row[0]} の追跡先は実在するリポジトリ内の Markdown ファイルにしてください: {row[5]}"
+            )
+            continue
+        original_name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", change_dir.name)
+        tracking = markdown_section(
+            resolved.read_text(encoding="utf-8"), "## 延期中の受け入れ確認"
+        )
+        if not any(
+            line.startswith("|")
+            and original_name in [cell.strip() for cell in line.strip("|").split("|")]
+            and row[0] in [cell.strip() for cell in line.strip("|").split("|")]
+            for line in tracking.splitlines()
+        ):
+            errors.append(
+                f"{change_dir.name}: {row[5]} の「延期中の受け入れ確認」に {original_name} / {row[0]} がありません"
+            )
             continue
         deferred[row[1]] = row[0]
     if not deferred:
