@@ -210,6 +210,8 @@ uv run --locked python scripts/run_visual_inspection_smoke.py \
 `openspec/specs/visual-inspection/`は能力を整理する名前空間であり、親specではない。<br />
 詳細は[外観検査仕様ガイド](openspec/specs/visual-inspection/README.md)を参照する。
 
+`src/app/` は3能力の処理と共通契約を分けている。責務の境界、依存方向、配置を決める際の確認項目と、このプロジェクトでの仕様・パッケージの対応は[アプリケーションの責務と配置](openspec/structure.md#アプリケーションの責務と配置)を参照する。
+
 利用者や外部システムから観測できる振る舞いを変更する場合は、実装前にOpenSpec changeを作成する。<br />
 共通方針は[AGENTS.md](AGENTS.md)、プロダクト・技術・配置の前提は[product.md](openspec/product.md)、[tech.md](openspec/tech.md)、[structure.md](openspec/structure.md)を参照する。
 
