@@ -9,7 +9,11 @@ from conftest import build_project, write_test_image
 from app.common.cli import _run
 from app.common.runtime import RunRecorder, select_device
 from app.image_preparation.imaging import AlignedImage
-from app.image_preparation.preparation import prepare_testing, prepare_training
+from app.image_preparation.preparation import (
+    create_check_image,
+    prepare_testing,
+    prepare_training,
+)
 
 
 def test_run_preserves_exit_contract(
@@ -53,6 +57,33 @@ def test_run_preserves_exit_contract(
     assert output["exit_code"] == 3
     assert output["errors"] == ["processing failed"]
     assert "result" not in output
+
+
+def test_resize_zero_dimension_is_processing_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config, paths = build_project(tmp_path, image_size=1)
+    config = config.model_copy(update={"image_resize": 0.1})
+    write_test_image(paths.original_train("XX") / "base.png", size=1)
+    target = paths.check_image("XX")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"previous check image")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(typer.Exit) as error:
+        _run(
+            "check",
+            "XX",
+            lambda _paths, _recorder: create_check_image(config, paths),
+        )
+
+    output = json.loads(capsys.readouterr().out)
+    assert error.value.exit_code == 3
+    assert output["exit_code"] == 3
+    assert "IMAGE.RESIZE makes the image dimension zero" in output["errors"]
+    assert target.read_bytes() == b"previous check image"
 
 
 def test_select_device_prefers_available_cuda() -> None:

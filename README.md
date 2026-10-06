@@ -71,7 +71,7 @@ flowchart LR
 
 | 入力 | 内容 |
 | --- | --- |
-| `config/setting.ini` | 全型番共通の分割画像サイズ |
+| `config/setting.ini` | 全型番共通の元画像縮小倍率と分割画像サイズ |
 | `config/part_<model>.json` | 型番別の分割、位置合わせ、探索、拡張、閾値設定 |
 | `data/01_original_train/<model>/` | 基準画像と正常中心の学習元画像 |
 | `data/02_original_test/<model>/` | 検査対象の試験元画像 |
@@ -83,8 +83,12 @@ flowchart LR
 #### 全体設定：`config/setting.ini`
 
 [setting.ini](config/setting.ini)の`[IMAGE] SIZE`に、切り出す正方形の一辺をピクセル単位の正の整数で指定する。<br />
+`[IMAGE] RESIZE`には、位置合わせ前に基準画像と元画像の縦横へ適用する倍率を0より大きく1以下で指定する。<br />
+`RESIZE = 0.5`なら縦横の画素数は半分になり、縮小には画質劣化を抑える面積補間を使用する。<br />
+`RESIZE`を省略した既存設定は倍率1として扱う。<br />
 設定値は全型番に適用される。<br />
 `SIZE = 500`なら各分割範囲は500×500ピクセルとなる。<br />
+`SIZE`は縮小後も変わらず、`range`の座標は縮小後の基準画像を基準とする。<br />
 値と同じ行にコメントを記載しない。
 
 #### 型番別設定：`config/part_<model>.json`
@@ -96,9 +100,9 @@ flowchart LR
 | 項目 | 設定内容 |
 | --- | --- |
 | `base` | `data/01_original_train/<model>/`直下にある基準画像のファイル名。<br />ディレクトリを含むパスは指定できない |
-| `range` | 分割範囲の配列。<br />各要素の`id`は0〜99の一意な分割ID、`x`・`y`は基準画像の左上を原点とする切り出し開始座標。<br />範囲の一辺には`SIZE`を使用する |
+| `range` | 分割範囲の配列。<br />各要素の`id`は0〜99の一意な分割ID、`x`・`y`は縮小後の基準画像の左上を原点とする切り出し開始座標。<br />範囲の一辺には縮小後も`SIZE`を使用する |
 | `blacklist` | 学習準備から除外する元画像名`image`と分割IDの配列`id`。試験準備には適用しない |
-| `alignment` | ORB位置合わせの最低対応点数、RANSAC再投影誤差・信頼確率、最低インライア比率 |
+| `alignment` | ORB位置合わせのKNN近傍候補数`knn_k` (2)、比率判定閾値`ratio_threshold` (0.75)、最低対応点数 (10)、RANSAC再投影誤差 (8.0px)・信頼確率 (0.95)、最低インライア比率 (0.2) |
 | `optuna_settings.search` | 学習率倍率、バッチサイズ、エポック数、特徴層、前処理画像サイズの探索候補。正規化・補間・antialiasの設定も含む |
 | `optuna_settings.sampler`・`pruner` | Optunaの乱数seedと枝刈り条件 |
 | `optuna_settings.normal_only` | 元画像単位の学習・検証比率、乱数seed、探索目的値に使用する検証スコアのパーセンタイル |
@@ -122,6 +126,7 @@ uv run --locked check --model XX
 ```
 
 基準画像へ分割範囲と分割IDを重ねた`data/03_check/XX.png`を確認し、全ての範囲が意図した検査対象を覆っていることを目視で確認する。
+`RESIZE`を変更した場合は縮小後の確認画像で`range`座標を見直し、学習・試験の分割画像を再生成する。
 
 ### 3. 学習画像を準備する
 
@@ -329,6 +334,9 @@ npx --no-install openspec update
 | organize-app-by-capability | AC-002 | 未検証 | タスク4.3: Ubuntu 24.04 LTS・Windows 11 の実機で5 CLIの名前・引数・終了コード・出力を確認する。 |
 | organize-app-by-capability | AC-003 | 未検証 | タスク4.4: 両OSの実機でmanifest・checkpoint・検査結果の形式、保存先、読戻しを確認する。 |
 | organize-app-by-capability | AC-004 | 未検証 | タスク4.5: 両OSでGPU有効・無効の計4条件を実行し、学習・推論で実際に使用したデバイスを確認する。 |
+| resize-and-knn-image-alignment | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTS・Windows 11の実機で倍率0.5の確認・学習・試験を実行し、縮小後の寸法、座標、切り出しSIZE、元画像の不変を確認する。 |
+| resize-and-knn-image-alignment | AC-002 | 未検証 | タスク4.2: 両OSの実機で運用画像によるKNN比率判定と位置合わせの成功・失敗、処理時間、縮小・分割画像の画質を確認する。 |
+| resize-and-knn-image-alignment | AC-003 | 未検証 | タスク4.3: 両OSの実機で不正設定、範囲外・0寸法、位置合わせ失敗を確認し、終了コード、旧成果物維持、学習除外と試験未判定を確認する。 |
 
 タスク4.3〜4.5の実行時は各条件で別の出力先を使い、OS・Python・依存版、GPU無効化方法、5 CLIの結果、成果物の読戻し、実測デバイスを change 内の `evidence/acceptance.md` へ記録する。<br />
 現時点では実機確認と運用受け入れは完了していない。

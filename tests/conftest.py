@@ -26,7 +26,9 @@ def build_project(
         f"[IMAGE]\nSIZE = {image_size}\n", encoding="utf-8"
     )
     payload = json.loads(
-        (REPOSITORY_ROOT / "config" / "part_XX.json").read_text(encoding="utf-8")
+        (REPOSITORY_ROOT / "tests" / "fixtures" / "model_config.json").read_text(
+            encoding="utf-8"
+        )
     )
     payload["range"] = ranges or [{"id": 0, "x": 0, "y": 0}]
     payload["blacklist"] = blacklist or []

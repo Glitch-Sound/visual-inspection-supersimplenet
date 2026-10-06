@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+from configparser import ConfigParser
 from pathlib import Path
 
 import pytest
 from conftest import build_project, write_test_image
 from pydantic import ValidationError
 
-from app.common.config import load_config, load_image_size
+from app.common.config import (
+    load_config,
+    load_image_settings,
+    load_image_size,
+    load_model_config,
+)
 from app.common.paths import ProjectPaths
 from app.image_preparation.preparation import create_check_image
 
@@ -57,6 +63,48 @@ def test_setting_ini_warns_about_unknown_entries(tmp_path: Path) -> None:
     message = str(captured[0].message)
     assert "EXTRA" in message
     assert "unknown" in message
+
+
+@pytest.mark.parametrize("value", ["0", "-0.1", "1.01", "nan", "inf", "text"])
+def test_resize_rejects_invalid_values(tmp_path: Path, value: str) -> None:
+    config, paths = build_project(tmp_path)
+    paths.global_config.write_text(
+        f"[IMAGE]\nSIZE = {config.image_size}\nRESIZE = {value}\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="IMAGE.RESIZE"):
+        load_config(tmp_path, "XX")
+
+
+def test_distributed_image_and_alignment_settings_are_present() -> None:
+    root = Path(__file__).parents[1]
+    parser = ConfigParser()
+    assert parser.read(root / "config" / "setting.ini", encoding="utf-8")
+    assert {"size", "resize"} <= set(parser["IMAGE"])
+    load_image_settings(root / "config" / "setting.ini")
+
+    path = root / "config" / "part_XX.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert {
+        "method",
+        "knn_k",
+        "ratio_threshold",
+        "minimum_matches",
+        "ransac_reprojection_threshold_px",
+        "ransac_confidence",
+        "minimum_inlier_ratio",
+    } <= set(payload["alignment"])
+    load_model_config(path)
+
+
+def test_alignment_knn_settings_validation(tmp_path: Path) -> None:
+    _, paths = build_project(tmp_path)
+    payload = json.loads(paths.model_config("XX").read_text(encoding="utf-8"))
+    for key, value in [("knn_k", 3), ("ratio_threshold", 0), ("ratio_threshold", 1)]:
+        payload["alignment"][key] = value
+        paths.model_config("XX").write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValidationError, match=key):
+            load_config(tmp_path, "XX")
+        payload["alignment"].pop(key)
 
 
 @pytest.mark.parametrize(

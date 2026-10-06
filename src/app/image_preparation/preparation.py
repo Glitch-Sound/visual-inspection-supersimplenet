@@ -24,6 +24,7 @@ from app.image_preparation.imaging import (
     align_orb,
     crop_image,
     draw_ranges,
+    resize_image,
 )
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
@@ -88,7 +89,7 @@ def _atomic_replace_directory(target: Path, populate: Callable[[Path], None]) ->
 
 def create_check_image(config: AppConfig, paths: ProjectPaths) -> Path:
     base_path = paths.original_train(config.model) / config.part.base
-    reference = read_image(base_path)
+    reference = resize_image(read_image(base_path), config.image_resize)
     output = draw_ranges(reference, config.part.ranges, config.image_size)
     target = paths.check_image(config.model)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -111,7 +112,9 @@ def prepare_training(
     source_dir = paths.original_train(config.model)
     images = list_images(source_dir)
     validate_blacklist_images(config, {path.name for path in images})
-    reference = read_image(source_dir / config.part.base)
+    reference = resize_image(
+        read_image(source_dir / config.part.base), config.image_resize
+    )
     blacklist = {
         (entry.image, split_id)
         for entry in config.part.blacklist
@@ -124,7 +127,7 @@ def prepare_training(
         sources: list[PreparedSource] = []
         excluded: list[dict[str, object]] = []
         for source_path in images:
-            source = read_image(source_path)
+            source = resize_image(read_image(source_path), config.image_resize)
             try:
                 aligned = aligner(source, reference, config.part.alignment)
             except AlignmentError as error:
@@ -202,14 +205,17 @@ def prepare_testing(
 ) -> PreparationManifest:
     source_dir = paths.original_test(config.model)
     images = list_images(source_dir)
-    reference = read_image(paths.original_train(config.model) / config.part.base)
+    reference = resize_image(
+        read_image(paths.original_train(config.model) / config.part.base),
+        config.image_resize,
+    )
     manifest: PreparationManifest | None = None
 
     def populate(stage: Path) -> None:
         nonlocal manifest
         sources: list[PreparedSource] = []
         for source_path in images:
-            source = read_image(source_path)
+            source = resize_image(read_image(source_path), config.image_resize)
             try:
                 aligned = aligner(source, reference, config.part.alignment)
             except AlignmentError as error:

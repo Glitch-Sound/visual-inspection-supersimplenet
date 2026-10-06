@@ -226,10 +226,12 @@ class AugmentationSettings(StrictModel):
 
 class AlignmentSettings(StrictModel):
     method: Literal["ORB"] = "ORB"
-    minimum_matches: Annotated[int, Field(ge=4)] = 20
-    ransac_reprojection_threshold_px: PositiveFloat = 3.0
-    ransac_confidence: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.995
-    minimum_inlier_ratio: Probability = 0.5
+    knn_k: Literal[2] = 2
+    ratio_threshold: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.75
+    minimum_matches: Annotated[int, Field(ge=4)] = 10
+    ransac_reprojection_threshold_px: PositiveFloat = 8.0
+    ransac_confidence: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.95
+    minimum_inlier_ratio: Probability = 0.2
 
 
 class ModelConfig(StrictModel):
@@ -273,11 +275,12 @@ class ModelConfig(StrictModel):
 
 class AppConfig(StrictModel):
     image_size: Annotated[int, Field(gt=0)]
+    image_resize: Annotated[float, Field(gt=0.0, le=1.0)] = 1.0
     model: str
     part: ModelConfig
 
 
-def load_image_size(path: Path) -> int:
+def load_image_settings(path: Path) -> tuple[int, float]:
     parser = configparser.ConfigParser(inline_comment_prefixes=None)
     if not parser.read(path, encoding="utf-8"):
         raise ValueError(f"setting.ini not found: {path}")
@@ -286,7 +289,7 @@ def load_image_size(path: Path) -> int:
     except KeyError as error:
         raise ValueError("setting.ini requires IMAGE.SIZE") from error
     unknown_sections = sorted(set(parser.sections()) - {"IMAGE"})
-    unknown_keys = sorted(set(parser["IMAGE"]) - {"size"})
+    unknown_keys = sorted(set(parser["IMAGE"]) - {"size", "resize"})
     if unknown_sections or unknown_keys:
         details = []
         if unknown_sections:
@@ -304,7 +307,18 @@ def load_image_size(path: Path) -> int:
         raise ValueError("IMAGE.SIZE must be a positive decimal integer") from error
     if size <= 0:
         raise ValueError("IMAGE.SIZE must be a positive decimal integer")
-    return size
+    raw_resize = parser["IMAGE"].get("RESIZE", "1")
+    try:
+        resize = float(raw_resize.strip())
+    except ValueError as error:
+        raise ValueError("IMAGE.RESIZE must be greater than 0 and at most 1") from error
+    if not math.isfinite(resize) or not 0 < resize <= 1:
+        raise ValueError("IMAGE.RESIZE must be greater than 0 and at most 1")
+    return size, resize
+
+
+def load_image_size(path: Path) -> int:
+    return load_image_settings(path)[0]
 
 
 def load_model_config(path: Path) -> ModelConfig:
@@ -326,8 +340,10 @@ def load_model_config(path: Path) -> ModelConfig:
 def load_config(root: Path, model: str) -> AppConfig:
     validate_model_name(model)
     paths = ProjectPaths(root)
+    image_size, image_resize = load_image_settings(paths.global_config)
     config = AppConfig(
-        image_size=load_image_size(paths.global_config),
+        image_size=image_size,
+        image_resize=image_resize,
         model=model,
         part=load_model_config(paths.model_config(model)),
     )

@@ -22,11 +22,29 @@ class AlignmentError(RuntimeError):
         self.inlier_ratio = inlier_ratio
 
 
+class ImageResizeError(RuntimeError):
+    """Raised when a valid scale makes an image too small to process."""
+
+
 @dataclass(frozen=True)
 class AlignedImage:
     image: ImageArray
     matches: int
     inlier_ratio: float
+
+
+def resize_image(image: ImageArray, scale: float) -> ImageArray:
+    """Downsample before alignment while retaining the source image."""
+
+    if scale == 1.0:
+        return image
+    height, width = image.shape[:2]
+    if round(width * scale) < 1 or round(height * scale) < 1:
+        raise ImageResizeError("IMAGE.RESIZE makes the image dimension zero")
+    return cast(
+        ImageArray,
+        cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA),
+    )
 
 
 def align_orb(
@@ -45,9 +63,17 @@ def align_orb(
     )
     if source_descriptors is None or reference_descriptors is None:
         raise AlignmentError("insufficient_matches")
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
     matches = sorted(
-        matcher.match(source_descriptors, reference_descriptors),
+        (
+            candidates[0]
+            for candidates in matcher.knnMatch(
+                source_descriptors, reference_descriptors, k=settings.knn_k
+            )
+            if len(candidates) == settings.knn_k
+            and candidates[0].distance
+            < settings.ratio_threshold * candidates[1].distance
+        ),
         key=lambda match: match.distance,
     )
     count = len(matches)
