@@ -42,6 +42,22 @@ def test_training_template_matches_defaults() -> None:
     assert ExecutionSettings(trials=50).trials == 50
 
 
+def test_heatmap_range_accepts_finite_bounds_outside_score_range(
+    tmp_path: Path,
+) -> None:
+    _config, paths = build_project(tmp_path)
+    payload = json.loads(paths.model_config("XX").read_text(encoding="utf-8"))
+    payload["heatmap_range"] = {"min": -2.5, "max": 3.25}
+    paths.model_config("XX").write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_config(tmp_path, "XX")
+    assert loaded.part.heatmap_range is not None
+    assert loaded.part.heatmap_range.min == -2.5
+    assert loaded.part.heatmap_range.max == 3.25
+    assert loaded.part.inspection_threshold is None
+    assert loaded.part.optuna_settings.threshold.value is None
+
+
 @pytest.mark.parametrize("value", ["10.5", "0", "-1", "500 # comment"])
 def test_check_rejects_invalid_ranges(tmp_path: Path, value: str) -> None:
     config, paths = build_project(tmp_path)

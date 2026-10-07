@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
+from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +11,7 @@ import cv2
 import numpy as np
 import pytest
 import torch
+import typer
 from conftest import build_project, write_test_image
 
 from app.common.artifact_transaction import _transaction_path
@@ -16,6 +19,7 @@ from app.common.config import load_config
 from app.common.contracts import (
     AlignmentResult,
     BestTrialResult,
+    HeatmapRange,
     InspectionResult,
     PreparationManifest,
     PreparedSource,
@@ -26,6 +30,7 @@ from app.common.contracts import (
 )
 from app.common.runtime import DeviceSelection, RunRecorder
 from app.model_evaluation.evaluation import (
+    _heatmap,
     effective_threshold,
     evaluate_model,
     evaluate_split,
@@ -215,6 +220,53 @@ def test_test_cli_recovers_interrupted_training_artifacts(
     assert {name: path.read_bytes() for name, path in targets.items()} == previous
 
 
+@pytest.mark.parametrize(
+    "range_value",
+    [
+        None,
+        {"min": 0},
+        {"max": 1},
+        {"min": "0", "max": 1},
+        {"min": False, "max": 1},
+        {"min": 0, "max": float("inf")},
+        {"min": float("nan"), "max": 1},
+        {"min": 1, "max": 1},
+        {"min": 2, "max": 1},
+    ],
+)
+def test_evaluation_rejects_invalid_heatmap_range_before_prediction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    range_value: object,
+) -> None:
+    _config, paths = build_project(tmp_path)
+    path = paths.model_config("XX")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if range_value is None:
+        payload.pop("heatmap_range")
+    else:
+        payload["heatmap_range"] = range_value
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "app.common.cli.select_device",
+        lambda: DeviceSelection("cpu", "CPU", "test"),
+    )
+    monkeypatch.setattr(
+        "app.model_evaluation.cli.CheckpointPredictor",
+        lambda *_args, **_kwargs: pytest.fail("prediction must not start"),
+    )
+    from app.model_evaluation.cli import _test_command
+
+    with pytest.raises(typer.Exit) as caught:
+        _test_command("XX", restart=False)
+    assert caught.value.exit_code == 2
+    output = json.loads(capsys.readouterr().out)
+    assert "heatmap_range" in output["errors"][0]
+    assert not paths.results("XX").exists()
+
+
 def test_evaluation_records_normal_split(tmp_path: Path) -> None:
     image_path = tmp_path / "split.png"
     original = write_test_image(image_path)
@@ -223,6 +275,7 @@ def test_evaluation_records_normal_split(tmp_path: Path) -> None:
         image_path=image_path,
         split_id=0,
         threshold=0.5,
+        heatmap_range=HeatmapRange(min=0.0, max=1.0),
         predictor=lambda image: Prediction(0.2, np.zeros(image.shape[:2], np.float32)),
         result_path=result_path,
     )
@@ -246,6 +299,7 @@ def test_evaluation_visualizes_anomalous_split(tmp_path: Path, score: float) -> 
         image_path=image_path,
         split_id=0,
         threshold=0.5,
+        heatmap_range=HeatmapRange(min=0.0, max=1.0),
         predictor=lambda _image: Prediction(score, anomaly_map),
         result_path=result_path,
     )
@@ -253,6 +307,219 @@ def test_evaluation_visualizes_anomalous_split(tmp_path: Path, score: float) -> 
     written = cv2.imread(str(result_path))
     assert written is not None
     assert not np.array_equal(written, original)
+
+
+def test_heatmap_uses_shared_range_across_images(tmp_path: Path) -> None:
+    image = np.full((2, 2, 3), 80, dtype=np.uint8)
+    display_range = HeatmapRange(min=-2.0, max=2.0)
+    first = np.array([[-3.0, 0.0], [3.0, 1.0]], dtype=np.float32)
+    second = np.array([[0.0, -20.0], [20.0, 1.0]], dtype=np.float32)
+    first_overlay = _heatmap(image, first, display_range)
+    second_overlay = _heatmap(image, second, display_range)
+    assert np.array_equal(first_overlay[0, 1], second_overlay[0, 0])
+    assert np.array_equal(first_overlay[1, 1], second_overlay[1, 1])
+    expected_indices = np.array([[0, 127], [255, 191]], dtype=np.uint8)
+    expected_layer = cv2.applyColorMap(expected_indices, cv2.COLORMAP_JET)
+    assert np.array_equal(
+        first_overlay, cv2.addWeighted(image, 0.55, expected_layer, 0.45, 0)
+    )
+    assert np.array_equal(first_overlay[0, 0], second_overlay[0, 1])
+    assert np.array_equal(first_overlay[1, 0], second_overlay[1, 0])
+
+    image_path = tmp_path / "source.png"
+    assert cv2.imwrite(str(image_path), image)
+    statuses = []
+    for bounds in (display_range, HeatmapRange(min=-10.0, max=10.0)):
+        result = evaluate_split(
+            image_path=image_path,
+            split_id=0,
+            threshold=0.5,
+            heatmap_range=bounds,
+            predictor=lambda _image: Prediction(0.7, first),
+            result_path=tmp_path / f"result-{bounds.max}.png",
+        )
+        statuses.append((result.score, result.status))
+    assert statuses == [(0.7, "anomaly"), (0.7, "anomaly")]
+    wide_range = HeatmapRange(min=-1e308, max=1e308)
+    wide_output = _heatmap(image, np.zeros((2, 2), dtype=np.float32), wide_range)
+    middle = cv2.applyColorMap(np.full((2, 2), 127, dtype=np.uint8), cv2.COLORMAP_JET)
+    assert np.array_equal(wide_output, cv2.addWeighted(image, 0.55, middle, 0.45, 0))
+
+
+def test_evaluation_records_heatmap_range_in_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, paths = build_project(tmp_path)
+    display_range = HeatmapRange(min=-2.5, max=3.25)
+    config = config.model_copy(
+        update={
+            "part": config.part.model_copy(
+                update={
+                    "heatmap_range": display_range,
+                    "optuna_settings": config.part.optuna_settings.model_copy(
+                        update={
+                            "threshold": config.part.optuna_settings.threshold.model_copy(
+                                update={"value": 0.5}
+                            )
+                        }
+                    ),
+                }
+            )
+        }
+    )
+    prepared = paths.prepared_test("XX")
+    sources = []
+    for name, value in (("normal", 20), ("anomaly", 200)):
+        filename = f"{name}_00.png"
+        write_test_image(prepared / filename, value=value)
+        sources.append(
+            PreparedSource(
+                source_image=f"{name}.png",
+                alignment=AlignmentResult(status="aligned"),
+                splits=[
+                    PreparedSplit(
+                        source_image=f"{name}.png", split_id=0, image=filename
+                    )
+                ],
+            )
+        )
+    sources.append(
+        PreparedSource(
+            source_image="undetermined.png",
+            alignment=AlignmentResult(status="undetermined", reason="no_match"),
+            splits=[],
+        )
+    )
+    sources.append(
+        PreparedSource(
+            source_image="split_error.png",
+            alignment=AlignmentResult(status="aligned"),
+            splits=[
+                PreparedSplit(
+                    source_image="split_error.png",
+                    split_id=0,
+                    image="missing_00.png",
+                )
+            ],
+        )
+    )
+    PreparationManifest(
+        model="XX", created_at=datetime.now(UTC), sources=sources
+    ).write_json(prepared / "manifest.json")
+    monkeypatch.setattr(
+        "app.model_evaluation.evaluation.load_checkpoint_metadata",
+        lambda _path: {
+            "model": "XX",
+            "score_source": "supersimplenet.pred_score",
+            "anomalib_post_processor": False,
+            "threshold": 0.5,
+        },
+    )
+    scores = iter((0.2, 0.8))
+    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
+    results = evaluate_model(
+        config,
+        paths,
+        predictor=lambda image: Prediction(
+            next(scores), np.zeros(image.shape[:2], dtype=np.float32)
+        ),
+        finish_runtime=lambda: recorder.finish(0),
+    )
+    assert {item.overall_status for item in results} == {
+        "normal",
+        "anomaly",
+        "undetermined",
+    }
+    assert results[-1].splits[0].status == "error"
+    for result in results:
+        path = paths.results("XX") / f"{result.source_image}.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert raw["heatmap_range"] == {"min": -2.5, "max": 3.25}
+        assert InspectionResult.read_json(path).heatmap_range == display_range
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["model", "unsafe_path", "duplicate", "reference_mismatch"],
+)
+def test_evaluation_rejects_invalid_manifest_before_prediction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    config, paths = build_project(tmp_path)
+    config = config.model_copy(
+        update={
+            "part": config.part.model_copy(
+                update={
+                    "optuna_settings": config.part.optuna_settings.model_copy(
+                        update={
+                            "threshold": config.part.optuna_settings.threshold.model_copy(
+                                update={"value": 0.5}
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+    prepared = paths.prepared_test("XX")
+    prepared.mkdir(parents=True)
+    manifest = {
+        "model": "XX",
+        "created_at": datetime.now(UTC).isoformat(),
+        "sources": [
+            {
+                "source_image": "source.png",
+                "alignment": {"status": "aligned"},
+                "splits": [
+                    {
+                        "source_image": "source.png",
+                        "split_id": 0,
+                        "image": "source_00.png",
+                    }
+                ],
+            }
+        ],
+        "excluded": [],
+    }
+    if mutation == "model":
+        manifest["model"] = "YY"
+    elif mutation == "unsafe_path":
+        manifest["sources"][0]["splits"][0]["image"] = "../../outside.png"
+    elif mutation == "duplicate":
+        manifest["sources"].append(deepcopy(manifest["sources"][0]))
+    else:
+        manifest["sources"][0]["splits"][0]["source_image"] = "other.png"
+    (prepared / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"outside unchanged")
+    results_dir = paths.results("XX")
+    results_dir.mkdir(parents=True)
+    old = results_dir / "old.json"
+    old.write_bytes(b"old unchanged")
+    monkeypatch.setattr(
+        "app.model_evaluation.evaluation.load_checkpoint_metadata",
+        lambda _path: {
+            "model": "XX",
+            "score_source": "supersimplenet.pred_score",
+            "anomalib_post_processor": False,
+            "threshold": 0.5,
+        },
+    )
+    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
+
+    def predict(_image: np.ndarray) -> Prediction:
+        pytest.fail("prediction must not start")
+
+    with pytest.raises(ValueError):
+        evaluate_model(
+            config,
+            paths,
+            predictor=predict,
+            finish_runtime=lambda: recorder.finish(0),
+        )
+    assert old.read_bytes() == b"old unchanged"
+    assert {item.name for item in results_dir.iterdir()} == {"old.json"}
+    assert outside.read_bytes() == b"outside unchanged"
 
 
 @pytest.mark.parametrize(

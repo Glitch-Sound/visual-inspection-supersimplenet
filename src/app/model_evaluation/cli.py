@@ -12,6 +12,7 @@ from app.common.paths import ProjectPaths
 from app.common.runtime import RunRecorder
 from app.model_evaluation.evaluation import (
     evaluate_model,
+    require_heatmap_range,
     restart_evaluation,
     validate_best_trial_contract,
 )
@@ -30,6 +31,7 @@ def _test_command(
         config = load_config(paths.root, model)
         if restart:
             restart_evaluation(paths, model)
+        require_heatmap_range(config)
         best = BestTrialResult.read_json(paths.study_dir(model) / "best_trial.json")
         validate_best_trial_contract(config, paths, best)
         params = best.parameters

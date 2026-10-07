@@ -10,6 +10,7 @@ from conftest import build_project, write_test_image
 from app.common.contracts import (
     AlignmentResult,
     BestTrialResult,
+    HeatmapRange,
     InspectionResult,
     PreparationManifest,
     PreparedSource,
@@ -107,6 +108,7 @@ def test_workflow_records_runtime_contract(tmp_path: Path) -> None:
         checkpoint="weights/XX.ckpt",
         score_contract=ScoreContract(),
         threshold=0.5,
+        heatmap_range=HeatmapRange(min=0.0, max=1.0),
         splits=[
             SplitResult(
                 split_id=0,

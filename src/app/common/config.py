@@ -11,6 +11,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.common.contracts import HeatmapRange
 from app.common.paths import ProjectPaths, validate_model_name
 
 Probability = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -240,6 +241,7 @@ class ModelConfig(StrictModel):
     ranges: list[CropRange] = Field(alias="range")
     blacklist: list[BlacklistEntry]
     inspection_threshold: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
+    heatmap_range: HeatmapRange | None = None
     optuna_settings: OptunaSettings
     score: ScoreSettings
     augmentation: AugmentationSettings

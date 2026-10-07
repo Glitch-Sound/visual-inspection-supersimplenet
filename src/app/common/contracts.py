@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import datetime
 from enum import StrEnum
@@ -51,6 +52,30 @@ class ContractModel(BaseModel):
     @classmethod
     def read_json(cls, path: Path):
         return cls.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+class HeatmapRange(ContractModel):
+    min: float
+    max: float
+
+    @field_validator("min", "max", mode="before")
+    @classmethod
+    def finite_number(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("heatmap_range bounds must be finite JSON numbers")
+        try:
+            finite = math.isfinite(value)
+        except OverflowError:
+            finite = False
+        if not finite:
+            raise ValueError("heatmap_range bounds must be finite JSON numbers")
+        return value
+
+    @model_validator(mode="after")
+    def ordered_bounds(self) -> HeatmapRange:
+        if self.min >= self.max:
+            raise ValueError("heatmap_range.min must be less than max")
+        return self
 
 
 class ResultStatus(StrEnum):
@@ -244,6 +269,7 @@ class InspectionResult(ContractModel):
     checkpoint: str
     score_contract: ScoreContract
     threshold: float = Field(ge=0.0, le=1.0)
+    heatmap_range: HeatmapRange
     splits: list[SplitResult]
     overall_status: ResultStatus
     processed_at: datetime

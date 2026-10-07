@@ -25,6 +25,8 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | 準備manifest | 元画像と分割画像の対応、および準備結果を後続処理へ引き渡す記録 |
 | checkpoint | 学習したモデルと、対応する型番・スコア契約・暫定閾値を保存した成果物 |
 | 異常スコア | SuperSimpleNet の `pred_score`。校正済み確率ではない |
+| 異常マップ | 分割画像の画素ごとの `anomaly_map`。ヒートマップ表示に使い、画像全体の異常スコアとは別の値 |
+| ヒートマップ表示範囲 | 型番設定の `heatmap_range.min/max`。異常マップの値を共通の色尺度へ割り当てる範囲 |
 | 暫定閾値 | 学習データの異常スコアから算出する、初期評価用の判定境界 |
 | 検査用閾値 | 型番設定の `inspection_threshold`。<br />指定時に検査判定へ使用する値 |
 | `undetermined` (未判定) | 位置合わせ失敗や分割不足などで、元画像を正常と確定できない判定 |
@@ -106,6 +108,7 @@ flowchart LR
 | `range` | 分割範囲の配列。<br />各要素の`id`は0〜99の一意な分割ID、`x`・`y`は縮小前の基準画像の左上を原点とする切り出し開始座標。<br />範囲の一辺には縮小後も`SIZE`を使用する |
 | `blacklist` | 学習準備から除外する元画像名`image`と分割IDの配列`id`。試験準備には適用しない |
 | `inspection_threshold` | 任意の検査用閾値。<br />未指定または`null`なら暫定閾値を使い、0〜1の数値ならその値を`test`の判定に使う |
+| `heatmap_range` | 検査時に必須のヒートマップ表示範囲。<br />`min`と`max`に有限の数値を指定し、`min < max`とする。学習・画像準備では省略できる |
 | `alignment` | ORB位置合わせのKNN近傍候補数`knn_k` (2)、比率判定閾値`ratio_threshold` (0.75)、最低対応点数 (10)、RANSAC再投影誤差 (8.0px)・信頼確率 (0.95)、最低インライア比率 (0.2) |
 | `optuna_settings.search` | 学習率倍率、バッチサイズ、エポック数、特徴層、前処理画像サイズの探索候補。正規化・補間・antialiasの設定も含む |
 | `optuna_settings.sampler`・`pruner` | Optunaの乱数seedと枝刈り条件 |
@@ -123,6 +126,9 @@ flowchart LR
 学習後の`threshold.value`はcheckpointと`best_trial.json`にも同じ値が保存されるため、設定ファイルだけを手動で変更しない。<br />
 検査用閾値を変えるときは`inspection_threshold`を編集し、`test`を再実行する。<br />
 学習時に更新されるのは暫定閾値であり、検査用閾値は保持される。<br />
+`heatmap_range`は`anomaly_map`の尺度で指定し、異常スコアの0〜1の範囲とは独立に決める。<br />
+ひな形の0〜1は設定形式の例であり、対象の学習済みモデルの異常マップ値を評価してから範囲を決める。<br />
+モデルを再学習・更新した場合も表示範囲を見直す。<br />
 設定値の規範的な条件は[画像準備仕様](openspec/specs/visual-inspection/image-preparation/spec.md)と[モデル学習仕様](openspec/specs/visual-inspection/model-training/spec.md)を参照する。
 
 ### 2. 分割範囲を確認する
@@ -175,7 +181,11 @@ uv run --locked test --model XX
 ```
 
 型番別モデルと有効な判定閾値を全分割画像へ適用し、結果画像と元画像単位のJSONを`data/06_result/XX/`へ保存する。<br />
-結果JSONの`threshold`には実際に判定に使用した値を記録する。
+結果JSONの`threshold`には実際に判定に使用した値を、`heatmap_range`には表示に使用した下限・上限を記録する。<br />
+異常と判定した分割画像だけ、同じ型番設定の範囲で`anomaly_map`を色付けし、範囲外の値には端の色を使う。<br />
+同じ学習済みモデルと表示範囲の結果は同じ異常マップ値に同じヒートマップ色を割り当てるが、元画像へ重ねた最終画素の色は元画像によって異なる。<br />
+比較前に、使用した学習済みモデルの同一性を運用で確認し、各結果JSONの表示範囲も照合する。<br />
+表示範囲の変更は`pred_score`、判定閾値、判定結果を変えず、正常と判定した画像にはヒートマップを適用しない。<br />
 検査に使うcheckpointには、このアプリで生成し、出所を確認できるものだけを配置する。<br />
 読込時にはモデルの前処理を含むオブジェクトを復元する。
 
@@ -185,7 +195,9 @@ uv run --locked test --model XX
 uv run --locked test --model XX --restart
 ```
 
-`test --restart`は成果物の整合を確認する前に旧検査結果を削除するため、旧結果が必要なら実行前に退避する。
+表示範囲を変更した場合は`test --restart`で旧結果を削除して再生成する。<br />
+このコマンドは成果物の整合を確認する前に旧検査結果を削除するため、旧結果が必要なら実行前に退避する。<br />
+異なる表示範囲で生成した画像を色だけで直接比較しない。
 
 ### 既存の分割座標と成果物を移す
 
@@ -371,6 +383,13 @@ npx --no-install openspec update
 | improve-inspection-configuration-and-cli | AC-004 | 未検証 | タスク4.3: 実際の基準画像で縮小前座標、確認画像、学習・試験の切り出し位置と`SIZE`を照合する。 |
 | improve-inspection-configuration-and-cli | AC-005 | 未検証 | タスク4.4: 対象環境で不正設定・位置合わせ失敗・途中処理失敗の理由、終了状態、旧成果物保全と未判定を確認する。 |
 | improve-inspection-configuration-and-cli | AC-006 | 未検証 | タスク4.5: 対象型番の旧座標と分割画像を比較し、必要な再学習・検査結果再生成と旧成果物の退避を確認する。 |
+| comparable-heatmap-scale | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11で同一学習済みモデルと表示範囲を確認し、異なる異常マップの同値同色をヒートマップ層で確認する。 |
+| comparable-heatmap-scale | AC-002 | 未検証 | タスク4.3: 両OSで正常画像の非着色、異常画像の着色、スコア・閾値・判定の独立性を確認する。 |
+| comparable-heatmap-scale | AC-003 | 未検証 | タスク4.4: 両OSで表示範囲変更後の`test --restart`と結果JSONの表示範囲を確認する。 |
+| comparable-heatmap-scale | AC-004 | 未検証 | タスク4.5: 両OSで未指定・不正な表示範囲のCLI拒否と新結果が作られないことを確認する。 |
+
+`comparable-heatmap-scale` の実機確認時は、[アーカイブ済みchangeの検証記録](openspec/changes/archive/2026-10-08-comparable-heatmap-scale/verification.md)にモデル確認方法、使用範囲、結果画像・JSON、実行コマンド、環境、日付、制約を追記する。<br />
+AC-001〜AC-004 は未検証であり、自動試験の成功やアーカイブは運用開始の承認を意味しない。
 
 タスク4.3〜4.5の実行時は各条件で別の出力先を使い、OS・Python・依存版、GPU無効化方法、5 CLIの結果、成果物の読戻し、実測デバイスを change 内の `evidence/acceptance.md` へ記録する。<br />
 現時点では実機確認と運用受け入れは完了していない。

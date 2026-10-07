@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from pydantic import ValidationError
 
 from app.common.contracts import (
     AlignmentResult,
+    HeatmapRange,
     InspectionResult,
     PreparationManifest,
     ResultStatus,
@@ -67,6 +69,7 @@ def test_result_json_contains_traceable_contract(tmp_path: Path) -> None:
         checkpoint="weights/XX.ckpt",
         score_contract=ScoreContract(),
         threshold=0.5,
+        heatmap_range=HeatmapRange(min=0.0, max=1.0),
         splits=[split(0, ResultStatus.ERROR)],
         overall_status=ResultStatus.UNDETERMINED,
         processed_at=datetime.now(UTC),
@@ -95,6 +98,7 @@ def test_result_contract_rejects_invalid_score_and_runtime() -> None:
         checkpoint="weights/XX.ckpt",
         score_contract=ScoreContract(),
         threshold=0.5,
+        heatmap_range=HeatmapRange(min=0.0, max=1.0),
         splits=[split(0, ResultStatus.NORMAL, 0.1)],
         overall_status=ResultStatus.NORMAL,
         processed_at=datetime.now(UTC),
@@ -133,6 +137,46 @@ def test_result_contract_rejects_invalid_score_and_runtime() -> None:
         with pytest.raises(ValidationError) as captured:
             InspectionResult.model_validate(payload)
         assert expected_location in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    "range_value",
+    [
+        None,
+        {"min": 0},
+        {"max": 1},
+        {"min": "0", "max": 1},
+        {"min": True, "max": 1},
+        {"min": 0, "max": float("inf")},
+        {"min": 1, "max": 1},
+        {"min": 2, "max": 1},
+    ],
+)
+def test_result_rejects_invalid_heatmap_range(
+    tmp_path: Path, range_value: object
+) -> None:
+    runtime = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test")).finish(0)
+    valid = InspectionResult(
+        source_image="source.png",
+        model="XX",
+        checkpoint="weights/XX.ckpt",
+        score_contract=ScoreContract(),
+        threshold=0.5,
+        heatmap_range=HeatmapRange(min=-2.5, max=3.25),
+        splits=[split(0, ResultStatus.NORMAL, 0.1)],
+        overall_status=ResultStatus.NORMAL,
+        processed_at=datetime.now(UTC),
+        alignment=AlignmentResult(status="aligned"),
+        runtime=runtime,
+    ).model_dump(mode="json")
+    if range_value is None:
+        valid.pop("heatmap_range")
+    else:
+        valid["heatmap_range"] = range_value
+    path = tmp_path / "result.json"
+    path.write_text(json.dumps(valid), encoding="utf-8")
+    with pytest.raises(ValidationError, match="heatmap_range"):
+        InspectionResult.read_json(path)
 
 
 def test_manifest_contract_rejects_unsafe_or_inconsistent_entries(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -16,6 +17,7 @@ from app.common.atomic import recover_directory_swap
 from app.common.config import AppConfig
 from app.common.contracts import (
     BestTrialResult,
+    HeatmapRange,
     InspectionResult,
     PreparationManifest,
     ResultStatus,
@@ -68,6 +70,13 @@ def effective_threshold(config: AppConfig, provisional_threshold: float) -> floa
     return provisional_threshold if override is None else override
 
 
+def require_heatmap_range(config: AppConfig) -> HeatmapRange:
+    heatmap_range = config.part.heatmap_range
+    if heatmap_range is None:
+        raise ValueError("heatmap_range is required for evaluation")
+    return heatmap_range
+
+
 def validate_best_trial_contract(
     config: AppConfig, paths: ProjectPaths, best: BestTrialResult
 ) -> None:
@@ -102,15 +111,20 @@ def validate_best_trial_contract(
         raise ValueError("best_trial image_size is outside search space")
 
 
-def _heatmap(image: ImageArray, anomaly_map: np.ndarray) -> ImageArray:
+def _heatmap(
+    image: ImageArray, anomaly_map: np.ndarray, heatmap_range: HeatmapRange
+) -> ImageArray:
     height, width = image.shape[:2]
     resized = cv2.resize(anomaly_map.astype(np.float32), (width, height))
-    minimum, maximum = float(resized.min()), float(resized.max())
-    normalized = (
-        np.zeros_like(resized, dtype=np.uint8)
-        if np.isclose(minimum, maximum)
-        else ((resized - minimum) / (maximum - minimum) * 255).astype(np.uint8)
-    )
+    lower, upper = heatmap_range.min, heatmap_range.max
+    span = upper - lower
+    if not math.isfinite(span):
+        normalized_values = (resized.astype(np.float64) / 2 - lower / 2) / (
+            upper / 2 - lower / 2
+        )
+    else:
+        normalized_values = (resized.astype(np.float64) - lower) / span
+    normalized = (np.clip(normalized_values, 0.0, 1.0) * 255).astype(np.uint8)
     colored = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
     return cast(ImageArray, cv2.addWeighted(image, 0.55, colored, 0.45, 0))
 
@@ -120,6 +134,7 @@ def evaluate_split(
     image_path: Path,
     split_id: int,
     threshold: float,
+    heatmap_range: HeatmapRange,
     predictor: Predictor,
     result_path: Path,
 ) -> SplitResult:
@@ -131,7 +146,7 @@ def evaluate_split(
     output = (
         image
         if status == ResultStatus.NORMAL
-        else _heatmap(image, prediction.anomaly_map)
+        else _heatmap(image, prediction.anomaly_map, heatmap_range)
     )
     write_image(result_path, output)
     return SplitResult(
@@ -153,6 +168,7 @@ def evaluate_model(
     record_error: Callable[[str], None] = _ignore_message,
     on_threshold_selected: Callable[[float], None] | None = None,
 ) -> list[InspectionResult]:
+    heatmap_range = require_heatmap_range(config)
     checkpoint = paths.checkpoint(config.model)
     metadata = load_checkpoint_metadata(checkpoint)
     provisional_threshold = validate_score_contract(config, metadata)
@@ -190,6 +206,7 @@ def evaluate_model(
                             image_path=image_path,
                             split_id=split.split_id,
                             threshold=threshold,
+                            heatmap_range=heatmap_range,
                             predictor=predictor,
                             result_path=stage / result_name,
                         )
@@ -217,6 +234,7 @@ def evaluate_model(
                     "checkpoint": str(checkpoint.relative_to(paths.root)),
                     "score_contract": ScoreContract(),
                     "threshold": threshold,
+                    "heatmap_range": heatmap_range,
                     "splits": split_results,
                     "overall_status": overall,
                     "processed_at": datetime.now(UTC),
