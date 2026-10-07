@@ -112,10 +112,10 @@
 
 | TC ID | 要件ID | Scenario ID | テスト層 | 前提・操作 | 期待値 | pytest 実装 | 自動化 | 検証範囲 | 残る検証 | 証跡 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| TC-001 | REQ-014 | REQ-014-S01 | unit / integration | 分離済み集合でrunnerを実行し、実Folderでも2件を渡す | `same_as_test`、比率指定なし、検証2件を保持 | `tests/test_training.py::test_trial_runner_uses_all_validation_images` | はい | テストダブルで引渡し、同ファイルの `test_anomalib_uses_complete_validation_folder` で実Anomalibの全件利用 | Ubuntu実機、3.1 | openspec/changes/fix-anomalib-training-checkpoint/evidence/acceptance.md |
-| TC-002 | REQ-015 | REQ-015-S01 | unit / integration | 倍率を変えたモデルを生成し、軽量な学習本体でLightningの1バッチ学習とcheckpoint保存を行う | pickle可能、両学習率に倍率適用、PreProcessor入りcheckpointを保存 | `tests/test_training.py::test_tunable_model_is_pickleable_and_uses_trial_multiplier` | はい | optimizer契約と同ファイルの `test_tunable_model_saves_lightning_checkpoint` で実Lightning保存経路。学習本体は軽量代替 | Ubuntu実機、3.2 | openspec/changes/fix-anomalib-training-checkpoint/evidence/acceptance.md |
-| TC-003 | REQ-016 | REQ-016-S01 | integration | PreProcessor入りcheckpointを保存して読込み、分割画像を検査する | メタデータ照合を通過し、結果JSONを生成 | `tests/test_evaluation.py::test_load_checkpoint_metadata_with_preprocessor` | はい | PyTorch実読込と同ファイルの `test_evaluation_starts_with_preprocessor_checkpoint` による検査処理。推論本体はテストダブル | Ubuntu実機、3.3 | openspec/changes/fix-anomalib-training-checkpoint/evidence/acceptance.md |
-| TC-004 | REQ-016 | REQ-016-S02 | unit | メタデータなしcheckpointを読込 | 理由付き拒否 | `tests/test_evaluation.py::test_load_checkpoint_metadata_rejects_missing_metadata` | はい | 不備の拒否 | Ubuntu実機、3.3 | openspec/changes/fix-anomalib-training-checkpoint/evidence/acceptance.md |
+| TC-001 | REQ-014 | REQ-014-S01 | unit / integration | 分離済み集合でrunnerを実行し、実Folderでも2件を渡す | `same_as_test`、比率指定なし、検証2件を保持 | `tests/test_training.py::test_trial_runner_uses_all_validation_images` | はい | テストダブルで引渡し、同ファイルの `test_anomalib_uses_complete_validation_folder` で実Anomalibの全件利用 | Ubuntu実機、3.1 | openspec/changes/archive/2026-10-07-fix-anomalib-training-checkpoint/evidence/acceptance.md |
+| TC-002 | REQ-015 | REQ-015-S01 | unit / integration | 倍率を変えたモデルを生成し、軽量な学習本体でLightningの1バッチ学習とcheckpoint保存を行う | pickle可能、両学習率に倍率適用、PreProcessor入りcheckpointを保存 | `tests/test_training.py::test_tunable_model_is_pickleable_and_uses_trial_multiplier` | はい | optimizer契約と同ファイルの `test_tunable_model_saves_lightning_checkpoint` で実Lightning保存経路。学習本体は軽量代替 | Ubuntu実機、3.2 | openspec/changes/archive/2026-10-07-fix-anomalib-training-checkpoint/evidence/acceptance.md |
+| TC-003 | REQ-016 | REQ-016-S01 | integration | PreProcessor入りcheckpointを保存して読込み、分割画像を検査する | メタデータ照合を通過し、結果JSONを生成 | `tests/test_evaluation.py::test_load_checkpoint_metadata_with_preprocessor` | はい | PyTorch実読込と同ファイルの `test_evaluation_starts_with_preprocessor_checkpoint` による検査処理。推論本体はテストダブル | Ubuntu実機、3.3 | openspec/changes/archive/2026-10-07-fix-anomalib-training-checkpoint/evidence/acceptance.md |
+| TC-004 | REQ-016 | REQ-016-S02 | unit | メタデータなしcheckpointを読込 | 理由付き拒否 | `tests/test_evaluation.py::test_load_checkpoint_metadata_rejects_missing_metadata` | はい | 不備の拒否 | Ubuntu実機、3.3 | openspec/changes/archive/2026-10-07-fix-anomalib-training-checkpoint/evidence/acceptance.md |
 
 ## 網羅性確認
 
@@ -129,7 +129,7 @@
 
 | 受け入れID | 検証範囲・条件 | 検証方法 | 残る検証 | 状態 | 証跡 |
 | --- | --- | --- | --- | --- | --- |
-| AC-001 | 分離済み検証画像の全件利用 | TC-001、Ubuntuスモーク | Ubuntu実機 3.1 | 未検証 | openspec/changes/fix-anomalib-training-checkpoint/evidence/acceptance.md |
-| AC-002 | 倍率とcheckpoint保存 | TC-002、Ubuntuスモーク | Ubuntu実機 3.2 | 未検証 | openspec/changes/fix-anomalib-training-checkpoint/evidence/acceptance.md |
-| AC-003 | PreProcessor入りcheckpointの読込と契約照合 | TC-003、TC-004、Ubuntuスモーク | Ubuntu実機 3.3 | 未検証 | openspec/changes/fix-anomalib-training-checkpoint/evidence/acceptance.md |
-| AC-004 | Ubuntu 24.04 LTSの学習から検査 | `scripts/run_visual_inspection_smoke.py` | Ubuntu実機 3.4 | 未検証 | openspec/changes/fix-anomalib-training-checkpoint/evidence/acceptance.md |
+| AC-001 | 分離済み検証画像の全件利用 | TC-001、Ubuntuスモーク | Ubuntu実機 3.1 | 未検証 | openspec/changes/archive/2026-10-07-fix-anomalib-training-checkpoint/evidence/acceptance.md |
+| AC-002 | 倍率とcheckpoint保存 | TC-002、Ubuntuスモーク | Ubuntu実機 3.2 | 未検証 | openspec/changes/archive/2026-10-07-fix-anomalib-training-checkpoint/evidence/acceptance.md |
+| AC-003 | PreProcessor入りcheckpointの読込と契約照合 | TC-003、TC-004、Ubuntuスモーク | Ubuntu実機 3.3 | 未検証 | openspec/changes/archive/2026-10-07-fix-anomalib-training-checkpoint/evidence/acceptance.md |
+| AC-004 | Ubuntu 24.04 LTSの学習から検査 | `scripts/run_visual_inspection_smoke.py` | Ubuntu実機 3.4 | 未検証 | openspec/changes/archive/2026-10-07-fix-anomalib-training-checkpoint/evidence/acceptance.md |

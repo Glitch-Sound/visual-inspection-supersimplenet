@@ -135,6 +135,23 @@
 - **WHEN** 運用者が学習と検査のスモーク試験を実行する
 - **THEN** システムは CPU へ切り替えて完了し、切り替え理由と処理時間を運用記録へ出力する
 
+### Requirement: REQ-016 アプリ生成checkpointの契約照合
+
+システムは、アプリが生成したcheckpointを用いて検査を開始する時に、保存された型番、スコア契約および閾値を読み込み、現在の設定と照合しなければならない (MUST)。
+
+#### Scenario: REQ-016-S01 一致するcheckpointで検査する
+
+- **GIVEN** 型番、スコア契約および閾値が設定と一致するアプリ生成checkpointがある
+- **WHEN** 運用者が `test --model <型番>` を実行する
+- **THEN** 契約照合を通過し、分割画像の検査が実行される
+
+#### Scenario: REQ-016-S02 メタデータのないcheckpointを拒否する
+
+- **GIVEN** 必要なメタデータを持たないcheckpointがある
+- **WHEN** 運用者が `test --model <型番>` を実行する
+- **THEN** 必要なメタデータがない理由を示して検査開始前にエラー終了する
+- **AND** 運用者は正しい学習成果物を用意して再実行できる
+
 ## 未決事項
 
 | 未決事項 | 影響する要件 / 運用 | 決定者 | 確定が必要な工程 |
@@ -151,3 +168,4 @@
 | 推論・可視化 | unit / integration | `pred_score`、PostProcessor無効、スコア契約不一致、閾値未満・一致・超過、共通決定的前処理、データ拡張無効、`anomaly_map`ヒートマップ | 小規模モデルまたはテストダブルと固定画像で全 Scenario を自動検証する |
 | 集約・結果契約 | unit / integration | 正常、異常、未判定、エラー、固定スコア契約、共通実行記録、必須項目、タイムゾーン付き日時、null スコア、同stem・異拡張子、再検査 | 判定組合せ、契約違反とファイル状態を pytest で自動検証する |
 | 環境互換性 | integration / e2e | Ubuntu・Windows、GPU・CPU、成果物読戻し | OS 非依存部分は CI で自動化し、対象実機のスモーク試験結果を運用記録として必須化する |
+| checkpoint契約 | unit / integration | メタデータを含むcheckpointの読込、欠落時の拒否 | 各Scenarioをpytestで検証し、Ubuntu実機の検査実行を別途確認する |
