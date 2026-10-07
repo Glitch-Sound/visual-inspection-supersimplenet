@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+import pickle
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import numpy as np
 import optuna
 import pytest
 import torch
-from conftest import build_project
+from conftest import build_project, write_test_image
 
 from app.common.artifact_transaction import (
     _transaction_path,
@@ -24,6 +27,8 @@ from app.common.contracts import (
     ScoreContract,
     TrialParametersContract,
 )
+from app.common.model_adapter import TunableSupersimplenet
+from app.common.runtime import DeviceSelection
 from app.model_training import artifacts
 from app.model_training.artifacts import persist_best_trial, restart_training
 from app.model_training.augmentation import AugmentationPipeline
@@ -36,7 +41,7 @@ from app.model_training.search import (
     run_search,
     split_by_source,
 )
-from app.model_training.trainer import ensure_cached
+from app.model_training.trainer import AnomalibTrialRunner, ensure_cached
 
 TRIAL_PARAMETERS = {
     "learning_rate_multiplier": 1.0,
@@ -45,6 +50,164 @@ TRIAL_PARAMETERS = {
     "feature_layers": ["layer2"],
     "image_size": 256,
 }
+
+
+def test_trial_runner_uses_all_validation_images(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import anomalib.data
+    import anomalib.engine
+
+    folder_options: dict[str, object] = {}
+    predicted_paths: list[Path] = []
+
+    def fake_folder(**kwargs: object) -> object:
+        folder_options.update(kwargs)
+        return object()
+
+    class FakeEngine:
+        def __init__(self, **_kwargs: object) -> None:
+            self.trainer = self
+
+        def fit(self, _model: object, *, datamodule: object) -> None:
+            del datamodule
+
+        def save_checkpoint(self, path: Path) -> None:
+            path.write_bytes(b"checkpoint")
+
+        def predict(
+            self, *, model: object, data_path: Path, return_predictions: bool
+        ) -> list[dict[str, float]]:
+            del model, return_predictions
+            predicted_paths.append(data_path)
+            return [{"pred_score": 0.1}]
+
+    monkeypatch.setattr(anomalib.data, "Folder", fake_folder)
+    monkeypatch.setattr(anomalib.engine, "Engine", FakeEngine)
+    monkeypatch.setattr(
+        "app.model_training.trainer.create_supersimplenet", lambda **_kwargs: object()
+    )
+    train_image = tmp_path / "train.png"
+    validation_images = [tmp_path / f"validation-{index}.png" for index in range(2)]
+    for path in (train_image, *validation_images):
+        path.write_bytes(b"image")
+    split = DatasetSplit(
+        train_images=(train_image,),
+        validation_images=tuple(validation_images),
+        train_sources=("train.png",),
+        validation_sources=("validation.png",),
+    )
+    trial = optuna.create_study().ask()
+    parameters = TrialParameters(**TRIAL_PARAMETERS)
+    runner = AnomalibTrialRunner(
+        tmp_path / "work", DeviceSelection("cpu", "test", "test")
+    )
+    runner(parameters, split, trial)
+
+    assert folder_options["val_split_mode"] == "same_as_test"
+    assert "val_split_ratio" not in folder_options
+    validation_dir = folder_options["normal_test_dir"]
+    assert isinstance(validation_dir, Path)
+    assert len(list(validation_dir.iterdir())) == len(validation_images)
+    assert predicted_paths[0] == validation_dir
+
+
+def test_anomalib_uses_complete_validation_folder(tmp_path: Path) -> None:
+    from anomalib.data import Folder
+
+    train_dir = tmp_path / "train"
+    validation_dir = tmp_path / "validation"
+    write_test_image(train_dir / "train.png")
+    for index in range(2):
+        write_test_image(validation_dir / f"validation-{index}.png")
+
+    datamodule = Folder(
+        name="validation-contract",
+        normal_dir=train_dir,
+        normal_test_dir=validation_dir,
+        val_split_mode="same_as_test",
+        num_workers=0,
+    )
+    datamodule.setup()
+
+    assert len(datamodule.val_data) == 2
+    assert len(datamodule.test_data) == 2
+
+
+def test_tunable_model_is_pickleable_and_uses_trial_multiplier() -> None:
+    model = TunableSupersimplenet.__new__(TunableSupersimplenet)
+    from lightning.pytorch import LightningModule
+
+    LightningModule.__init__(model)
+    model.learning_rate_multiplier = 2.0
+    core = torch.nn.Module()
+    core.add_module("adaptor", torch.nn.Linear(1, 1))
+    core.add_module("segdec", torch.nn.Linear(1, 1))
+    model.model = core
+    cast(Any, model)._trainer = SimpleNamespace(max_epochs=200)
+
+    optimizers, schedulers = model.configure_optimizers()
+    serialized = pickle.dumps(model)
+
+    assert serialized
+    assert model.learning_rate_multiplier == 2.0
+    assert [group["lr"] for group in optimizers[0].param_groups] == pytest.approx(
+        [0.0002, 0.0004]
+    )
+    assert schedulers[0].milestones == {160: 1, 180: 1}
+
+
+def test_tunable_model_saves_lightning_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lightning.pytorch import Trainer
+    from torch.utils.data import DataLoader, TensorDataset
+
+    core = torch.nn.Module()
+    core.add_module("adaptor", torch.nn.Linear(1, 1))
+    core.add_module("segdec", torch.nn.Linear(1, 1))
+    monkeypatch.setattr(
+        "anomalib.models.image.supersimplenet.lightning_model.SupersimplenetModel",
+        lambda **_kwargs: core,
+    )
+
+    def train_step(
+        self: TunableSupersimplenet, batch: tuple[torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
+        del batch_idx
+        core_model = cast(Any, self.model)
+        output = core_model.segdec(core_model.adaptor(batch[0]))
+        return output.square().mean()
+
+    monkeypatch.setattr(TunableSupersimplenet, "training_step", train_step)
+    monkeypatch.setattr(TunableSupersimplenet, "configure_callbacks", lambda self: [])
+    model = TunableSupersimplenet(
+        learning_rate_multiplier=2.0,
+        pre_processor=TunableSupersimplenet.configure_pre_processor((8, 8)),
+        post_processor=False,
+        evaluator=False,
+        visualizer=False,
+    )
+    trainer = Trainer(
+        default_root_dir=tmp_path,
+        max_epochs=1,
+        limit_train_batches=1,
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_checkpointing=False,
+        enable_model_summary=False,
+        enable_progress_bar=False,
+    )
+    loader = DataLoader(TensorDataset(torch.ones(2, 1)), batch_size=2)
+    trainer.fit(model, train_dataloaders=loader)
+    checkpoint = tmp_path / "model.ckpt"
+    trainer.save_checkpoint(checkpoint)
+
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    assert checkpoint.is_file()
+    assert payload["hyper_parameters"]["pre_processor"] is not None
+    assert "model.adaptor.weight" in payload["state_dict"]
 
 
 def set_trial_parameters(trial: optuna.Trial) -> None:

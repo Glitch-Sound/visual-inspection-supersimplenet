@@ -31,7 +31,7 @@ def rgb_image_tensor(image: NDArray[np.uint8], torch: Any) -> Any:
 def load_checkpoint_metadata(path: Path) -> dict[str, Any]:
     import torch
 
-    payload = torch.load(path, map_location="cpu", weights_only=True)
+    payload = torch.load(path, map_location="cpu", weights_only=False)
     metadata = payload.get("visual_inspection")
     if not isinstance(metadata, dict):
         raise ValueError("checkpoint lacks visual_inspection metadata")

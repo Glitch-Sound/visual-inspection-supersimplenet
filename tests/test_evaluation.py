@@ -31,8 +31,119 @@ from app.model_evaluation.evaluation import (
     validate_best_trial_contract,
     validate_score_contract,
 )
-from app.model_evaluation.predictor import CheckpointPredictor, Prediction
+from app.model_evaluation.predictor import (
+    CheckpointPredictor,
+    Prediction,
+    load_checkpoint_metadata,
+)
 from app.model_training.artifacts import _write_transaction_journal
+
+
+def test_load_checkpoint_metadata_with_preprocessor(tmp_path: Path) -> None:
+    from app.common.model_adapter import TunableSupersimplenet
+
+    checkpoint = tmp_path / "model.ckpt"
+    metadata = {
+        "model": "XX",
+        "score_source": "supersimplenet.pred_score",
+        "anomalib_post_processor": False,
+        "threshold": 0.5,
+    }
+    torch.save(
+        {
+            "state_dict": {},
+            "pre_processor": TunableSupersimplenet.configure_pre_processor((256, 256)),
+            "visual_inspection": metadata,
+        },
+        checkpoint,
+    )
+
+    assert load_checkpoint_metadata(checkpoint) == metadata
+
+
+def test_evaluation_starts_with_preprocessor_checkpoint(tmp_path: Path) -> None:
+    from app.common.model_adapter import TunableSupersimplenet
+
+    config, paths = build_project(tmp_path)
+    config = config.model_copy(
+        update={
+            "part": config.part.model_copy(
+                update={
+                    "optuna_settings": config.part.optuna_settings.model_copy(
+                        update={
+                            "threshold": config.part.optuna_settings.threshold.model_copy(
+                                update={"value": 0.5}
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+    checkpoint = paths.checkpoint("XX")
+    checkpoint.parent.mkdir(parents=True)
+    torch.save(
+        {
+            "state_dict": {},
+            "hyper_parameters": {
+                "pre_processor": TunableSupersimplenet.configure_pre_processor(
+                    (256, 256)
+                )
+            },
+            "visual_inspection": {
+                "model": "XX",
+                "score_source": "supersimplenet.pred_score",
+                "anomalib_post_processor": False,
+                "threshold": 0.5,
+            },
+        },
+        checkpoint,
+    )
+    prepared_dir = paths.prepared_test("XX")
+    image_path = prepared_dir / "source_00.png"
+    write_test_image(image_path)
+    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
+    PreparationManifest(
+        model="XX",
+        created_at=recorder.started_at,
+        sources=[
+            PreparedSource(
+                source_image="source.png",
+                alignment=AlignmentResult(status="aligned"),
+                splits=[
+                    PreparedSplit(
+                        source_image="source.png", split_id=0, image=image_path.name
+                    )
+                ],
+            )
+        ],
+    ).write_json(prepared_dir / "manifest.json")
+    predictions = 0
+
+    def predictor(image: np.ndarray) -> Prediction:
+        nonlocal predictions
+        predictions += 1
+        return Prediction(0.2, np.zeros(image.shape[:2], dtype=np.float32))
+
+    results = evaluate_model(
+        config,
+        paths,
+        predictor=predictor,
+        finish_runtime=lambda: recorder.finish(0),
+    )
+
+    assert predictions == 1
+    assert len(results) == 1
+    assert results[0].overall_status == "normal"
+    assert (paths.results("XX") / "source.png.json").is_file()
+
+
+def test_load_checkpoint_metadata_rejects_missing_metadata(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "model.ckpt"
+    torch.save({"state_dict": {}}, checkpoint)
+
+    with pytest.raises(ValueError, match="lacks visual_inspection metadata"):
+        load_checkpoint_metadata(checkpoint)
 
 
 def test_test_cli_recovers_interrupted_training_artifacts(

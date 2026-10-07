@@ -114,8 +114,7 @@ class AnomalibTrialRunner:
             ),
             val_augmentations=None,
             test_augmentations=None,
-            val_split_mode="from_test",
-            val_split_ratio=1.0,
+            val_split_mode="same_as_test",
             seed=42,
         )
         model = create_supersimplenet(
