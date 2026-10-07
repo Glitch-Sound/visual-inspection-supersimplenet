@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any, cast
 
 import cv2
 import numpy as np
@@ -8,9 +10,15 @@ import pytest
 from conftest import build_project, write_test_image
 
 from app.common.atomic import recover_directory_swap
-from app.common.config import AlignmentSettings
+from app.common.cli import PreparationProgress
+from app.common.config import AlignmentSettings, CropRange, load_config
 from app.common.image_io import ImageReadError
-from app.image_preparation.imaging import AlignedImage, AlignmentError, align_orb
+from app.image_preparation.imaging import (
+    AlignedImage,
+    AlignmentError,
+    align_orb,
+    scaled_crop_range,
+)
 from app.image_preparation.preparation import (
     PreparationError,
     alignment_warning,
@@ -338,3 +346,223 @@ def test_alignment_warning_identifies_source_reason_and_action() -> None:
     assert "homography_failed" in testing
     assert "undetermined" in testing
     assert "recapture is required" in testing
+
+
+def test_change_req_001_01(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path, ranges=[{"id": 3, "x": 4, "y": 6}])
+    write_test_image(paths.original_train("XX") / "base.png", size=32)
+    output = cv2.imread(str(create_check_image(config, paths)))
+    assert output is not None and output.shape == (32, 32, 3)
+    assert tuple(output[6, 4]) == (0, 0, 255)
+
+
+def test_change_req_001_02(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path, ranges=[{"id": 3, "x": 32, "y": 0}])
+    write_test_image(paths.original_train("XX") / "base.png")
+    with pytest.raises(ValueError, match="range id 3.*outside image bounds"):
+        create_check_image(config, paths)
+    assert not paths.check_image("XX").exists()
+
+
+def test_change_req_001_03(tmp_path: Path) -> None:
+    _config, paths = build_project(tmp_path)
+    payload = json.loads(paths.model_config("XX").read_text())
+    payload["base"] = "../outside.png"
+    paths.model_config("XX").write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="base"):
+        load_config(tmp_path, "XX")
+
+
+def test_change_req_001_04(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, paths = build_project(
+        tmp_path,
+        image_size=500,
+        ranges=[{"id": 1, "x": 400, "y": 0}, {"id": 2, "x": 401, "y": 0}],
+    )
+    config = config.model_copy(update={"image_resize": 0.5})
+    write_test_image(paths.original_train("XX") / "base.png", size=1500)
+    reference = np.zeros((750, 750, 3), dtype=np.uint8)
+    assert scaled_crop_range(reference, CropRange(id=1, x=400, y=0), 500, 0.5).x == 200
+    assert scaled_crop_range(reference, CropRange(id=2, x=401, y=0), 500, 0.5).x == 201
+    rectangles: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    labels: list[str] = []
+    original_rectangle = cv2.rectangle
+    original_put_text = cv2.putText
+
+    def record_rectangle(
+        image: np.ndarray,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        color: tuple[int, int, int],
+        thickness: int,
+    ) -> np.ndarray:
+        rectangles.append((start, end))
+        return original_rectangle(image, start, end, color, thickness)
+
+    def record_label(image: np.ndarray, label: str, *args: object) -> np.ndarray:
+        labels.append(label)
+        return cast(np.ndarray, cast(Any, original_put_text)(image, label, *args))
+
+    monkeypatch.setattr(cv2, "rectangle", record_rectangle)
+    monkeypatch.setattr(cv2, "putText", record_label)
+    output = cv2.imread(str(create_check_image(config, paths)))
+    assert output is not None and output.shape == (750, 750, 3)
+    assert rectangles == [((200, 0), (699, 499)), ((201, 0), (700, 499))]
+    assert labels == ["01", "02"]
+
+
+def test_change_req_002_01(tmp_path: Path) -> None:
+    config, paths = build_project(
+        tmp_path, image_size=8, ranges=[{"id": 0, "x": 8, "y": 10}]
+    )
+    config = config.model_copy(update={"image_resize": 0.5})
+    write_test_image(paths.original_train("XX") / "base.png", size=32)
+    manifest = prepare_training(config, paths, aligner=identity_aligner)
+    original = cv2.imread(str(paths.original_train("XX") / "base.png"))
+    split = cv2.imread(str(paths.prepared_train("XX") / "base_00.png"))
+    assert original is not None and split is not None
+    expected = cv2.resize(original, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+    assert np.array_equal(split, expected[5:13, 4:12])
+    assert manifest.sources[0].splits[0].split_id == 0
+
+
+def test_change_req_002_02(tmp_path: Path) -> None:
+    config, paths = build_project(
+        tmp_path, blacklist=[{"image": "base.png", "id": [0]}]
+    )
+    write_test_image(paths.original_train("XX") / "base.png")
+    manifest = prepare_training(config, paths, aligner=identity_aligner)
+    assert manifest.sources[0].splits == []
+    assert not (paths.prepared_train("XX") / "base_00.png").exists()
+
+
+def test_change_req_002_03(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    write_test_image(paths.original_train("XX") / "base.png")
+
+    def fail(*_args: object) -> AlignedImage:
+        raise AlignmentError("insufficient_matches")
+
+    manifest = prepare_training(config, paths, aligner=fail)
+    assert manifest.sources[0].splits == []
+    assert manifest.excluded[0]["reason"] == "insufficient_matches"
+
+
+def test_change_req_002_04(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path, ranges=[{"id": 7, "x": 40, "y": 0}])
+    write_test_image(paths.original_train("XX") / "base.png")
+    with pytest.raises(PreparationError, match="base.png: range id 7"):
+        prepare_training(config, paths, aligner=identity_aligner)
+    assert not paths.prepared_train("XX").exists()
+
+
+def test_change_req_002_05(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    write_test_image(paths.original_train("XX") / "base.png")
+    (paths.original_train("XX") / "broken.png").write_bytes(b"broken")
+    target = paths.prepared_train("XX")
+    target.mkdir(parents=True)
+    (target / "keep").write_bytes(b"old")
+    with pytest.raises(ImageReadError, match="broken.png"):
+        prepare_training(config, paths, aligner=identity_aligner)
+    assert (target / "keep").read_bytes() == b"old"
+
+
+def test_change_req_002_06(tmp_path: Path) -> None:
+    _config, paths = build_project(tmp_path)
+    payload = json.loads(paths.model_config("XX").read_text())
+    payload["alignment"]["ratio_threshold"] = 1
+    paths.model_config("XX").write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="ratio_threshold"):
+        load_config(tmp_path, "XX")
+
+
+def test_change_req_003_01(tmp_path: Path) -> None:
+    config, paths = build_project(
+        tmp_path,
+        image_size=8,
+        ranges=[{"id": 0, "x": 8, "y": 10}],
+        blacklist=[{"image": "sample.png", "id": [0]}],
+    )
+    config = config.model_copy(update={"image_resize": 0.5})
+    write_test_image(paths.original_train("XX") / "base.png", size=32)
+    original = write_test_image(paths.original_test("XX") / "sample.png", size=32)
+    manifest = prepare_testing(config, paths, aligner=identity_aligner)
+    expected = cv2.resize(original, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+    split = cv2.imread(str(paths.prepared_test("XX") / "sample_00.png"))
+    assert split is not None and np.array_equal(split, expected[5:13, 4:12])
+    assert manifest.sources[0].splits[0].image == "sample_00.png"
+
+
+def test_change_req_003_02(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    write_test_image(paths.original_train("XX") / "base.png")
+    write_test_image(paths.original_test("XX") / "sample.png")
+
+    def fail(*_args: object) -> AlignedImage:
+        raise AlignmentError("homography_failed")
+
+    manifest = prepare_testing(config, paths, aligner=fail)
+    assert manifest.sources[0].alignment.status == "undetermined"
+    assert manifest.sources[0].splits == []
+
+
+def test_change_req_003_03(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path, ranges=[{"id": 7, "x": 40, "y": 0}])
+    write_test_image(paths.original_train("XX") / "base.png")
+    write_test_image(paths.original_test("XX") / "sample.png")
+    with pytest.raises(PreparationError, match="sample.png: range id 7"):
+        prepare_testing(config, paths, aligner=identity_aligner)
+    assert not paths.prepared_test("XX").exists()
+
+
+def test_change_req_003_04(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    write_test_image(paths.original_train("XX") / "base.png")
+    (paths.original_test("XX") / "broken.png").parent.mkdir(parents=True)
+    (paths.original_test("XX") / "broken.png").write_bytes(b"broken")
+    target = paths.prepared_test("XX")
+    target.mkdir(parents=True)
+    (target / "keep").write_bytes(b"old")
+    with pytest.raises(ImageReadError, match="broken.png"):
+        prepare_testing(config, paths, aligner=identity_aligner)
+    assert (target / "keep").read_bytes() == b"old"
+
+
+@pytest.mark.parametrize("testing", [False, True])
+def test_change_req_017_01(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], testing: bool
+) -> None:
+    config, paths = build_project(tmp_path)
+    write_test_image(paths.original_train("XX") / "base.png")
+    prepare = prepare_testing if testing else prepare_training
+    source_dir = paths.original_test("XX") if testing else paths.original_train("XX")
+    write_test_image(source_dir / "sample.png")
+    with PreparationProgress() as progress:
+        manifest = prepare(
+            config, paths, aligner=identity_aligner, on_progress=progress.update
+        )
+    assert len(manifest.sources) == (1 if testing else 2)
+    stderr = capsys.readouterr().err
+    assert "準備進捗 0/" in stderr
+    assert f"準備進捗 {len(manifest.sources)}/{len(manifest.sources)}" in stderr
+
+
+@pytest.mark.parametrize("testing", [False, True])
+def test_change_req_017_02(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], testing: bool
+) -> None:
+    config, paths = build_project(tmp_path)
+    write_test_image(paths.original_train("XX") / "base.png")
+    source_dir = paths.original_test("XX") if testing else paths.original_train("XX")
+    source_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "broken.png").write_bytes(b"broken")
+    prepare = prepare_testing if testing else prepare_training
+    with (
+        pytest.raises(ImageReadError, match="broken.png"),
+        PreparationProgress() as progress,
+    ):
+        prepare(config, paths, aligner=identity_aligner, on_progress=progress.update)
+    stderr = capsys.readouterr().err
+    assert "準備進捗 0/" in stderr
+    assert "準備進捗 2/2" not in stderr

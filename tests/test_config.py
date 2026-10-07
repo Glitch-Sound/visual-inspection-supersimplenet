@@ -9,13 +9,37 @@ from conftest import build_project, write_test_image
 from pydantic import ValidationError
 
 from app.common.config import (
+    BlurSettings,
+    ExecutionSettings,
+    PrunerSettings,
     load_config,
     load_image_settings,
     load_image_size,
     load_model_config,
+    write_threshold,
 )
 from app.common.paths import ProjectPaths
 from app.image_preparation.preparation import create_check_image
+
+
+def test_training_template_matches_defaults() -> None:
+    root = Path(__file__).parents[1]
+    part = load_model_config(root / "config" / "part_XX.json")
+    fixture = load_model_config(root / "tests" / "fixtures" / "model_config.json")
+
+    for model in (part, fixture):
+        assert model.optuna_settings.search.epochs.choices == [100, 200, 300]
+        assert model.optuna_settings.pruner.startup_trials == 5
+        assert model.optuna_settings.pruner.warmup_epochs == 40
+        assert model.optuna_settings.pruner.interval_epochs == 10
+        assert model.optuna_settings.execution.trials == 10
+        assert model.augmentation.blur.enabled is False
+
+    assert PrunerSettings().warmup_epochs == 40
+    assert ExecutionSettings().trials == 10
+    assert BlurSettings(probability=0.2, kernel_sizes=[3, 5]).enabled is False
+    assert PrunerSettings(warmup_epochs=50).warmup_epochs == 50
+    assert ExecutionSettings(trials=50).trials == 50
 
 
 @pytest.mark.parametrize("value", ["10.5", "0", "-1", "500 # comment"])
@@ -133,3 +157,18 @@ def test_base_rejects_paths_outside_model_root(tmp_path: Path, base: str) -> Non
         load_config(tmp_path, "XX")
 
     assert outside.read_bytes() == b"unchanged"
+
+
+def test_inspection_threshold_is_preserved_when_training_threshold_changes(
+    tmp_path: Path,
+) -> None:
+    _config, paths = build_project(tmp_path)
+    path = paths.model_config("XX")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["inspection_threshold"] = 0.25
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert load_config(tmp_path, "XX").part.inspection_threshold == 0.25
+    write_threshold(path, 0.6)
+    updated = load_config(tmp_path, "XX").part
+    assert updated.inspection_threshold == 0.25
+    assert updated.optuna_settings.threshold.value == 0.6

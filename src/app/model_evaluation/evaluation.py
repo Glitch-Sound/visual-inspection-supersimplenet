@@ -63,6 +63,11 @@ def validate_score_contract(
     return threshold
 
 
+def effective_threshold(config: AppConfig, provisional_threshold: float) -> float:
+    override = config.part.inspection_threshold
+    return provisional_threshold if override is None else override
+
+
 def validate_best_trial_contract(
     config: AppConfig, paths: ProjectPaths, best: BestTrialResult
 ) -> None:
@@ -146,10 +151,14 @@ def evaluate_model(
     finish_runtime: Callable[[], RunMetadata],
     record_warning: Callable[[str], None] = _ignore_message,
     record_error: Callable[[str], None] = _ignore_message,
+    on_threshold_selected: Callable[[float], None] | None = None,
 ) -> list[InspectionResult]:
     checkpoint = paths.checkpoint(config.model)
     metadata = load_checkpoint_metadata(checkpoint)
-    threshold = validate_score_contract(config, metadata)
+    provisional_threshold = validate_score_contract(config, metadata)
+    threshold = effective_threshold(config, provisional_threshold)
+    if on_threshold_selected is not None:
+        on_threshold_selected(threshold)
     prepared_dir = paths.prepared_test(config.model)
     manifest = PreparationManifest.read_json(prepared_dir / "manifest.json")
     if manifest.model != config.model:

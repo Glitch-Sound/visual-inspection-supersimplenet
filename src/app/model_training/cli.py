@@ -7,7 +7,7 @@ import os
 import typer
 
 from app.common.artifact_transaction import recover_artifact_transaction
-from app.common.cli import _run
+from app.common.cli import _run, show_stage
 from app.common.config import load_config
 from app.common.contracts import BestTrialResult, PreparationManifest
 from app.common.paths import ProjectPaths
@@ -29,6 +29,7 @@ def _train_command(
 
     def action(paths: ProjectPaths, recorder: RunRecorder) -> str:
         recover_artifact_transaction(paths, model)
+        show_stage("設定読込と学習入力の確認")
         config = load_config(paths.root, model)
         os.environ.setdefault("TORCH_HOME", str(paths.pretrained))
         if restart:
@@ -45,15 +46,21 @@ def _train_command(
             manifest, prepared, train_ratio=normal.train_ratio, seed=normal.seed
         )
         study_dir = paths.study_dir(model)
+        show_stage("Optuna 探索を実行")
         study = create_study(config, study_dir / "study.db")
         runner = AnomalibTrialRunner(study_dir / "trials", recorder.device, config)
         study, outcomes = run_search(config, split, study, runner)
+        show_stage("最良試行と暫定閾値を保存")
         result = persist_best_trial(
             config=config,
             paths=paths,
             split=split,
             study=study,
             outcomes=outcomes,
+        )
+        show_stage(
+            f"学習完了: 試行数={len(study.trials)} 暫定探索指標={result.objective} "
+            f"暫定閾値={result.threshold} 保存先={paths.checkpoint(model)}"
         )
         return format_training_summary(result)
 

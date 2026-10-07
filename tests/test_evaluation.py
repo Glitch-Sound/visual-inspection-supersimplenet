@@ -12,6 +12,7 @@ import torch
 from conftest import build_project, write_test_image
 
 from app.common.artifact_transaction import _transaction_path
+from app.common.config import load_config
 from app.common.contracts import (
     AlignmentResult,
     BestTrialResult,
@@ -25,6 +26,7 @@ from app.common.contracts import (
 )
 from app.common.runtime import DeviceSelection, RunRecorder
 from app.model_evaluation.evaluation import (
+    effective_threshold,
     evaluate_model,
     evaluate_split,
     restart_evaluation,
@@ -367,6 +369,144 @@ def test_evaluation_restart_replaces_only_results(tmp_path: Path) -> None:
     assert not results.exists()
     assert checkpoint.read_text(encoding="utf-8") == "keep"
     assert (prepared / "manifest.json").read_text(encoding="utf-8") == "keep"
+
+
+def _change_evaluation_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    override: float | None,
+    present: bool = True,
+    score: float = 0.3,
+) -> InspectionResult:
+    _config, paths = build_project(tmp_path)
+    payload = json.loads(paths.model_config("XX").read_text(encoding="utf-8"))
+    payload["optuna_settings"]["threshold"]["value"] = 0.5
+    if present:
+        payload["inspection_threshold"] = override
+    else:
+        payload.pop("inspection_threshold", None)
+    paths.model_config("XX").write_text(json.dumps(payload), encoding="utf-8")
+    config = load_config(tmp_path, "XX")
+    prepared = paths.prepared_test("XX")
+    write_test_image(prepared / "source_00.png")
+    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
+    PreparationManifest(
+        model="XX",
+        created_at=recorder.started_at,
+        sources=[
+            PreparedSource(
+                source_image="source.png",
+                alignment=AlignmentResult(status="aligned"),
+                splits=[
+                    PreparedSplit(
+                        source_image="source.png", split_id=0, image="source_00.png"
+                    )
+                ],
+            )
+        ],
+    ).write_json(prepared / "manifest.json")
+    monkeypatch.setattr(
+        "app.model_evaluation.evaluation.load_checkpoint_metadata",
+        lambda _path: {
+            "model": "XX",
+            "score_source": "supersimplenet.pred_score",
+            "anomalib_post_processor": False,
+            "threshold": 0.5,
+        },
+    )
+    selected_thresholds: list[float] = []
+
+    def predict(image: np.ndarray) -> Prediction:
+        assert selected_thresholds == [0.5 if override is None else override]
+        return Prediction(score, np.zeros(image.shape[:2], dtype=np.float32))
+
+    result = evaluate_model(
+        config,
+        paths,
+        predictor=predict,
+        finish_runtime=lambda: recorder.finish(0),
+        on_threshold_selected=selected_thresholds.append,
+    )[0]
+    assert selected_thresholds == [result.threshold]
+    saved = InspectionResult.read_json(paths.results("XX") / "source.png.json")
+    assert saved.threshold == result.threshold
+    return result
+
+
+def test_change_req_018_01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _change_evaluation_case(
+        tmp_path, monkeypatch, override=None, present=False
+    )
+    assert result.threshold == 0.5
+    assert result.overall_status == "normal"
+
+
+def test_change_req_018_02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _change_evaluation_case(tmp_path, monkeypatch, override=None)
+    assert result.threshold == 0.5
+
+
+def test_change_req_018_03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _change_evaluation_case(tmp_path, monkeypatch, override=0.2)
+    assert result.threshold == 0.2
+    assert result.overall_status == "anomaly"
+    payload = json.loads((tmp_path / "config" / "part_XX.json").read_text())
+    assert payload["optuna_settings"]["threshold"]["value"] == 0.5
+
+
+@pytest.mark.parametrize("override,score", [(0.0, 0.0), (1.0, 1.0)])
+def test_change_req_018_04(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: float, score: float
+) -> None:
+    result = _change_evaluation_case(
+        tmp_path, monkeypatch, override=override, score=score
+    )
+    assert result.threshold == override
+    assert result.overall_status == "anomaly"
+
+
+@pytest.mark.parametrize("invalid", [-0.1, 1.1, True, "0.5", float("inf")])
+def test_change_req_018_05(tmp_path: Path, invalid: object) -> None:
+    _config, paths = build_project(tmp_path)
+    payload = json.loads(paths.model_config("XX").read_text())
+    payload["inspection_threshold"] = invalid
+    paths.model_config("XX").write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="inspection_threshold"):
+        load_config(tmp_path, "XX")
+    assert not paths.results("XX").exists()
+
+
+def test_change_req_018_06(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    config = config.model_copy(
+        update={
+            "part": config.part.model_copy(
+                update={
+                    "inspection_threshold": 0.2,
+                    "optuna_settings": config.part.optuna_settings.model_copy(
+                        update={
+                            "threshold": config.part.optuna_settings.threshold.model_copy(
+                                update={"value": 0.5}
+                            )
+                        }
+                    ),
+                }
+            )
+        }
+    )
+    assert effective_threshold(config, 0.5) == 0.2
+    with pytest.raises(ValueError, match="threshold"):
+        validate_score_contract(
+            config,
+            {
+                "model": "XX",
+                "score_source": "supersimplenet.pred_score",
+                "anomalib_post_processor": False,
+                "threshold": 0.6,
+            },
+        )
+    assert not paths.results("XX").exists()
 
 
 def test_predictor_uses_model_preprocessor(

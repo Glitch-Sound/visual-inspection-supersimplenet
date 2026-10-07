@@ -80,7 +80,7 @@ class SamplerSettings(StrictModel):
 class PrunerSettings(StrictModel):
     name: Literal["MedianPruner"] = "MedianPruner"
     startup_trials: Annotated[int, Field(ge=0)] = 5
-    warmup_epochs: Annotated[int, Field(ge=0)] = 50
+    warmup_epochs: Annotated[int, Field(ge=0)] = 40
     interval_epochs: Annotated[int, Field(gt=0)] = 10
 
 
@@ -107,7 +107,7 @@ class NormalOnlySettings(StrictModel):
 
 
 class ExecutionSettings(StrictModel):
-    trials: Annotated[int, Field(gt=0)] = 50
+    trials: Annotated[int, Field(gt=0)] = 10
     seed: int = 42
     resume: bool = True
 
@@ -179,6 +179,7 @@ class SensorNoiseSettings(EnabledProbability):
 
 
 class BlurSettings(EnabledProbability):
+    enabled: bool = False
     kernel_sizes: list[Annotated[int, Field(gt=0)]]
     sigma_min: PositiveFloat = 0.1
     sigma_max: PositiveFloat = 1.0
@@ -238,10 +239,24 @@ class ModelConfig(StrictModel):
     base: str
     ranges: list[CropRange] = Field(alias="range")
     blacklist: list[BlacklistEntry]
+    inspection_threshold: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
     optuna_settings: OptunaSettings
     score: ScoreSettings
     augmentation: AugmentationSettings
     alignment: AlignmentSettings
+
+    @field_validator("inspection_threshold", mode="before")
+    @classmethod
+    def validate_inspection_threshold(cls, value: object) -> object:
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError(
+                "inspection_threshold must be a finite JSON number or null"
+            )
+        return value
 
     @field_validator("base")
     @classmethod

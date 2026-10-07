@@ -25,10 +25,12 @@ from app.image_preparation.imaging import (
     crop_image,
     draw_ranges,
     resize_image,
+    scaled_crop_range,
 )
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 Aligner = Callable[[ImageArray, ImageArray, object], AlignedImage]
+ProgressCallback = Callable[[int, int], None]
 
 
 class PreparationError(RuntimeError):
@@ -36,10 +38,15 @@ class PreparationError(RuntimeError):
 
 
 def _prepared_crop(
-    image: ImageArray, crop: CropRange, size: int, *, source_image: str
+    image: ImageArray,
+    crop: CropRange,
+    size: int,
+    scale: float,
+    *,
+    source_image: str,
 ) -> ImageArray:
     try:
-        return crop_image(image, crop, size)
+        return crop_image(image, scaled_crop_range(image, crop, size, scale), size)
     except ValueError as error:
         raise PreparationError(f"{source_image}: {error}") from error
 
@@ -90,7 +97,11 @@ def _atomic_replace_directory(target: Path, populate: Callable[[Path], None]) ->
 def create_check_image(config: AppConfig, paths: ProjectPaths) -> Path:
     base_path = paths.original_train(config.model) / config.part.base
     reference = resize_image(read_image(base_path), config.image_resize)
-    output = draw_ranges(reference, config.part.ranges, config.image_size)
+    ranges = [
+        scaled_crop_range(reference, crop, config.image_size, config.image_resize)
+        for crop in config.part.ranges
+    ]
+    output = draw_ranges(reference, ranges, config.image_size)
     target = paths.check_image(config.model)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".tmp.png")
@@ -108,9 +119,12 @@ def prepare_training(
     paths: ProjectPaths,
     *,
     aligner: Callable[..., AlignedImage] = align_orb,
+    on_progress: ProgressCallback | None = None,
 ) -> PreparationManifest:
     source_dir = paths.original_train(config.model)
     images = list_images(source_dir)
+    if on_progress is not None:
+        on_progress(0, len(images))
     validate_blacklist_images(config, {path.name for path in images})
     reference = resize_image(
         read_image(source_dir / config.part.base), config.image_resize
@@ -145,6 +159,8 @@ def prepare_training(
                 excluded.append(
                     {"source_image": source_path.name, "reason": error.reason}
                 )
+                if on_progress is not None:
+                    on_progress(len(sources), len(images))
                 continue
             splits: list[PreparedSplit] = []
             for crop in config.part.ranges:
@@ -161,6 +177,7 @@ def prepare_training(
                     aligned.image,
                     crop,
                     config.image_size,
+                    config.image_resize,
                     source_image=source_path.name,
                 )
                 filename = f"{source_path.stem}_{crop.id:02d}{source_path.suffix}"
@@ -183,6 +200,8 @@ def prepare_training(
                     splits=splits,
                 )
             )
+            if on_progress is not None:
+                on_progress(len(sources), len(images))
         manifest = PreparationManifest(
             model=config.model,
             created_at=datetime.now(UTC),
@@ -202,9 +221,12 @@ def prepare_testing(
     paths: ProjectPaths,
     *,
     aligner: Callable[..., AlignedImage] = align_orb,
+    on_progress: ProgressCallback | None = None,
 ) -> PreparationManifest:
     source_dir = paths.original_test(config.model)
     images = list_images(source_dir)
+    if on_progress is not None:
+        on_progress(0, len(images))
     reference = resize_image(
         read_image(paths.original_train(config.model) / config.part.base),
         config.image_resize,
@@ -230,6 +252,8 @@ def prepare_testing(
                         ),
                     )
                 )
+                if on_progress is not None:
+                    on_progress(len(sources), len(images))
                 continue
             splits: list[PreparedSplit] = []
             for crop in config.part.ranges:
@@ -237,6 +261,7 @@ def prepare_testing(
                     aligned.image,
                     crop,
                     config.image_size,
+                    config.image_resize,
                     source_image=source_path.name,
                 )
                 filename = f"{source_path.stem}_{crop.id:02d}{source_path.suffix}"
@@ -259,6 +284,8 @@ def prepare_testing(
                     splits=splits,
                 )
             )
+            if on_progress is not None:
+                on_progress(len(sources), len(images))
         manifest = PreparationManifest(
             model=config.model,
             created_at=datetime.now(UTC),

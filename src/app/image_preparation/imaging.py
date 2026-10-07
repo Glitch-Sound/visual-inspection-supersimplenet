@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import floor
 from typing import Any, cast
 
 import cv2
@@ -113,6 +114,20 @@ def validate_crop(image: ImageArray, crop: CropRange, size: int) -> None:
             f"[{crop.x},{crop.x + size}) x [{crop.y},{crop.y + size}) "
             f"for {width}x{height}"
         )
+
+
+def scaled_crop_range(
+    image: ImageArray, crop: CropRange, size: int, scale: float
+) -> CropRange:
+    """Map a range on the original reference to the resized image."""
+
+    scaled = CropRange(
+        id=crop.id,
+        x=floor(crop.x * scale + 0.5),
+        y=floor(crop.y * scale + 0.5),
+    )
+    validate_crop(image, scaled, size)
+    return scaled
 
 
 def crop_image(image: ImageArray, crop: CropRange, size: int) -> ImageArray:

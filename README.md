@@ -26,6 +26,7 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | checkpoint | 学習したモデルと、対応する型番・スコア契約・暫定閾値を保存した成果物 |
 | 異常スコア | SuperSimpleNet の `pred_score`。校正済み確率ではない |
 | 暫定閾値 | 学習データの異常スコアから算出する、初期評価用の判定境界 |
+| 検査用閾値 | 型番設定の `inspection_threshold`。<br />指定時に検査判定へ使用する値 |
 | `undetermined` (未判定) | 位置合わせ失敗や分割不足などで、元画像を正常と確定できない判定 |
 | capability (仕様上の能力) | 継続して管理する機能・責務の単位。<br />このプロジェクトでは画像準備、モデル学習、モデル評価の3つ |
 | OpenSpec change | 一回の変更を計画・実装・検証する単位。<br />capabilityとは別に管理する |
@@ -88,7 +89,9 @@ flowchart LR
 `RESIZE`を省略した既存設定は倍率1として扱う。<br />
 設定値は全型番に適用される。<br />
 `SIZE = 500`なら各分割範囲は500×500ピクセルとなる。<br />
-`SIZE`は縮小後も変わらず、`range`の座標は縮小後の基準画像を基準とする。<br />
+`SIZE`は縮小後も変わらず、`range`の座標は縮小前の基準画像を基準とする。<br />
+例えば`RESIZE = 0.5`で元画像上の`x = 400`を指定すると、縮小後の`x = 200`から`SIZE`ピクセル四方を切り出す。<br />
+座標に倍率を掛けた値は、小数部が0.5以上なら切り上げる。<br />
 値と同じ行にコメントを記載しない。
 
 #### 型番別設定：`config/part_<model>.json`
@@ -100,8 +103,9 @@ flowchart LR
 | 項目 | 設定内容 |
 | --- | --- |
 | `base` | `data/01_original_train/<model>/`直下にある基準画像のファイル名。<br />ディレクトリを含むパスは指定できない |
-| `range` | 分割範囲の配列。<br />各要素の`id`は0〜99の一意な分割ID、`x`・`y`は縮小後の基準画像の左上を原点とする切り出し開始座標。<br />範囲の一辺には縮小後も`SIZE`を使用する |
+| `range` | 分割範囲の配列。<br />各要素の`id`は0〜99の一意な分割ID、`x`・`y`は縮小前の基準画像の左上を原点とする切り出し開始座標。<br />範囲の一辺には縮小後も`SIZE`を使用する |
 | `blacklist` | 学習準備から除外する元画像名`image`と分割IDの配列`id`。試験準備には適用しない |
+| `inspection_threshold` | 任意の検査用閾値。<br />未指定または`null`なら暫定閾値を使い、0〜1の数値ならその値を`test`の判定に使う |
 | `alignment` | ORB位置合わせのKNN近傍候補数`knn_k` (2)、比率判定閾値`ratio_threshold` (0.75)、最低対応点数 (10)、RANSAC再投影誤差 (8.0px)・信頼確率 (0.95)、最低インライア比率 (0.2) |
 | `optuna_settings.search` | 学習率倍率、バッチサイズ、エポック数、特徴層、前処理画像サイズの探索候補。正規化・補間・antialiasの設定も含む |
 | `optuna_settings.sampler`・`pruner` | Optunaの乱数seedと枝刈り条件 |
@@ -117,6 +121,8 @@ flowchart LR
 
 `score.source`と`optuna_settings.threshold.score_source`は一致させ、PostProcessorを有効にしない。<br />
 学習後の`threshold.value`はcheckpointと`best_trial.json`にも同じ値が保存されるため、設定ファイルだけを手動で変更しない。<br />
+検査用閾値を変えるときは`inspection_threshold`を編集し、`test`を再実行する。<br />
+学習時に更新されるのは暫定閾値であり、検査用閾値は保持される。<br />
 設定値の規範的な条件は[画像準備仕様](openspec/specs/visual-inspection/image-preparation/spec.md)と[モデル学習仕様](openspec/specs/visual-inspection/model-training/spec.md)を参照する。
 
 ### 2. 分割範囲を確認する
@@ -168,7 +174,8 @@ uv run --locked test-pre --model XX
 uv run --locked test --model XX
 ```
 
-型番別モデルと暫定閾値を全分割画像へ適用し、結果画像と元画像単位のJSONを`data/06_result/XX/`へ保存する。
+型番別モデルと有効な判定閾値を全分割画像へ適用し、結果画像と元画像単位のJSONを`data/06_result/XX/`へ保存する。<br />
+結果JSONの`threshold`には実際に判定に使用した値を記録する。
 検査に使うcheckpointには、このアプリで生成し、出所を確認できるものだけを配置する。<br />
 読込時にはモデルの前処理を含むオブジェクトを復元する。
 
@@ -177,6 +184,18 @@ uv run --locked test --model XX
 ```bash
 uv run --locked test --model XX --restart
 ```
+
+`test --restart`は成果物の整合を確認する前に旧検査結果を削除するため、旧結果が必要なら実行前に退避する。
+
+### 既存の分割座標と成果物を移す
+
+旧`range`は縮小後の座標なので、設定と準備画像、checkpoint、最良試行、検査結果を先に退避する。<br />
+旧座標と一致するように縮小前の整数座標へ書き換え、`floor(新座標 × RESIZE + 0.5)`が旧座標になることを確認する。<br />
+`SIZE`と`RESIZE`が同じであることを確認し、`check`の確認画像で各範囲を目視確認する。<br />
+`train-pre`と`test-pre`を再実行し、旧分割画像と新分割画像の画素、manifestの元画像名と分割IDを比較する。<br />
+一致する場合は既存モデルを使えるか確認して記録し、異なる場合や確認できない場合は`train --restart`で学習し直して`test`を再実行する。<br />
+結果が必要なら再実行前に退避し、ロールバック時は旧コード、旧設定、旧準備画像、checkpoint、最良試行、検査結果を一式で戻す。<br />
+準備済み画像と設定の対応は自動照合しないため、旧成果物と新成果物を混用しないよう運用で確認する。
 
 ## 判定とエラーの扱い
 
@@ -200,7 +219,11 @@ uv run --locked test --model XX --restart
 | `2` | 設定、入力、成果物契約の不備 |
 | `3` | 画像I/Oや学習・推論などの処理失敗 |
 
-各コマンドの標準出力と検査結果JSONには、開始・終了日時、処理時間、終了状態、OS、Python・主要依存関係、使用デバイス、警告、エラーを記録する。
+各コマンドの標準出力は終了時に1件の機械可読JSONを出す。<br />
+人向けの処理段階、警告、エラー、終了要約は標準エラー出力に表示する。<br />
+`train-pre`と`test-pre`は端末上でRichによる進捗バーを表示し、端末以外では対象元画像の処理済み件数を行単位で表示する。<br />
+その他の処理段階と終了要約は読みやすいテキストで表示する。<br />
+終了JSONには開始・終了日時、処理時間、終了状態、OS、Python・主要依存関係、使用デバイス、警告、エラーを記録する。
 
 ## 成果物
 
@@ -343,6 +366,11 @@ npx --no-install openspec update
 | fix-anomalib-training-checkpoint | AC-002 | 未検証 | タスク3.2: Ubuntu 24.04 LTSで試行ごとの学習率倍率を維持してcheckpointを保存できることを確認する。 |
 | fix-anomalib-training-checkpoint | AC-003 | 未検証 | タスク3.3: Ubuntu 24.04 LTSでPreProcessor入りcheckpointのメタデータを読み込み、契約照合を通過して検査を開始できることを確認する。 |
 | fix-anomalib-training-checkpoint | AC-004 | 未検証 | タスク3.4: Ubuntu 24.04 LTSで学習から検査までを実行し、報告された3件のエラーなく完了することを確認する。 |
+| improve-inspection-configuration-and-cli | AC-001 | 未検証 | タスク4.1: 対象OSと実モデルで暫定・検査用閾値による判定と学習成果物の整合を確認する。 |
+| improve-inspection-configuration-and-cli | AC-003 | 未検証 | タスク4.2: Ubuntu 24.04 LTSとWindows 11で5 CLIの段階表示、準備進捗、標準出力JSON、終了コードを確認する。 |
+| improve-inspection-configuration-and-cli | AC-004 | 未検証 | タスク4.3: 実際の基準画像で縮小前座標、確認画像、学習・試験の切り出し位置と`SIZE`を照合する。 |
+| improve-inspection-configuration-and-cli | AC-005 | 未検証 | タスク4.4: 対象環境で不正設定・位置合わせ失敗・途中処理失敗の理由、終了状態、旧成果物保全と未判定を確認する。 |
+| improve-inspection-configuration-and-cli | AC-006 | 未検証 | タスク4.5: 対象型番の旧座標と分割画像を比較し、必要な再学習・検査結果再生成と旧成果物の退避を確認する。 |
 
 タスク4.3〜4.5の実行時は各条件で別の出力先を使い、OS・Python・依存版、GPU無効化方法、5 CLIの結果、成果物の読戻し、実測デバイスを change 内の `evidence/acceptance.md` へ記録する。<br />
 現時点では実機確認と運用受け入れは完了していない。

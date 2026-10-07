@@ -260,6 +260,9 @@ def test_split_rejects_insufficient_source_images(tmp_path: Path) -> None:
 def test_search_selects_lowest_validation_percentile(tmp_path: Path) -> None:
     config, _paths = build_project(tmp_path)
     study = create_study(config, tmp_path / "study.db")
+    assert vars(study.pruner)["_n_startup_trials"] == 5
+    assert vars(study.pruner)["_n_warmup_steps"] == 40
+    assert vars(study.pruner)["_interval_steps"] == 10
     checkpoint = tmp_path / "candidate.ckpt"
     torch.save({"state_dict": {}}, checkpoint)
 
@@ -275,7 +278,7 @@ def test_search_selects_lowest_validation_percentile(tmp_path: Path) -> None:
 
     split = split_by_source(make_manifest(5), tmp_path)
     study, outcomes = run_search(config, split, study, runner)
-    assert len(study.trials) == 50
+    assert len(study.trials) == 10
     assert study.best_trial.number == 0
     assert 0 in outcomes
     assert {trial.state.name for trial in study.trials} >= {
@@ -317,6 +320,28 @@ def test_augmentation_is_training_only_and_ephemeral(tmp_path: Path) -> None:
     assert float(output.min()) >= 0.0 and float(output.max()) <= 1.0
     assert np.array_equal(source, source_before)
     assert list(tmp_path.iterdir()) == [tmp_path / "config"]
+
+
+def test_blur_template_default_and_opt_in(tmp_path: Path) -> None:
+    config, _paths = build_project(tmp_path)
+    settings = config.part.augmentation.model_copy(deep=True)
+    for name in settings.order:
+        item = getattr(settings, name)
+        setattr(settings, name, item.model_copy(update={"enabled": False}))
+    source = np.zeros((9, 9, 3), dtype=np.float32)
+    source[4, 4] = 1.0
+
+    assert settings.blur.enabled is False
+    assert np.array_equal(AugmentationPipeline(settings)(source, training=True), source)
+
+    settings.blur = settings.blur.model_copy(
+        update={"enabled": True, "probability": 1.0}
+    )
+    blurred = AugmentationPipeline(settings)(source, training=True)
+    assert not np.array_equal(blurred, source)
+    assert np.array_equal(
+        AugmentationPipeline(settings)(source, training=False), source
+    )
 
 
 def test_validation_pipeline_disables_augmentation(tmp_path: Path) -> None:
@@ -467,7 +492,7 @@ def test_training_resumes_existing_study(tmp_path: Path) -> None:
     )
     assert len(study.trials) == 2
     resumed, _ = run_search(config, split, create_study(config, storage), runner)
-    assert len(resumed.trials) == 50
+    assert len(resumed.trials) == 10
     assert resumed.trials[0].number == 0
 
 
