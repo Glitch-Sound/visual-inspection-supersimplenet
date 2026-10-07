@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import sys
+from typing import Any
+
 import typer
+from rich.console import Console
+from rich.progress import BarColumn, Progress, TextColumn
 
 from app.common.artifact_transaction import recover_artifact_transaction
 from app.common.cli import ExitCode, _run, show_stage
@@ -17,6 +22,37 @@ from app.model_evaluation.evaluation import (
     validate_best_trial_contract,
 )
 from app.model_evaluation.predictor import CheckpointPredictor
+
+
+class EvaluationProgress:
+    """Render one source-image counter for evaluation on stderr."""
+
+    def __init__(self) -> None:
+        self._progress: Progress | None = None
+        self._task_id: Any = None
+
+    def __enter__(self) -> EvaluationProgress:
+        if sys.stderr.isatty():
+            self._progress = Progress(
+                TextColumn("検査進捗"),
+                BarColumn(),
+                TextColumn("{task.completed}/{task.total}"),
+                console=Console(stderr=True),
+            )
+            self._progress.start()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        if self._progress is not None:
+            self._progress.stop()
+
+    def update(self, processed: int, total: int) -> None:
+        if self._progress is None:
+            show_stage(f"検査進捗 {processed}/{total}")
+            return
+        if self._task_id is None:
+            self._task_id = self._progress.add_task("検査進捗", total=total)
+        self._progress.update(self._task_id, completed=processed, total=total)
 
 
 def _test_command(
@@ -50,15 +86,17 @@ def _test_command(
             show_stage(f"判定閾値: {threshold} ({source})")
             show_stage("分割画像を推論し、元画像単位の結果を保存")
 
-        results = evaluate_model(
-            config,
-            paths,
-            predictor=predictor,
-            finish_runtime=lambda: recorder.finish(ExitCode.SUCCESS),
-            record_warning=recorder.warnings.append,
-            record_error=recorder.errors.append,
-            on_threshold_selected=show_selected_threshold,
-        )
+        with EvaluationProgress() as progress:
+            results = evaluate_model(
+                config,
+                paths,
+                predictor=predictor,
+                finish_runtime=lambda: recorder.finish(ExitCode.SUCCESS),
+                record_warning=recorder.warnings.append,
+                record_error=recorder.errors.append,
+                on_threshold_selected=show_selected_threshold,
+                on_progress=progress.update,
+            )
         counts = {
             status: sum(result.overall_status == status for result in results)
             for status in ("normal", "anomaly", "undetermined")

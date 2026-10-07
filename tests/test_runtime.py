@@ -31,7 +31,7 @@ from app.image_preparation.preparation import (
     prepare_testing,
     prepare_training,
 )
-from app.model_evaluation.cli import _test_command
+from app.model_evaluation.cli import EvaluationProgress, _test_command
 from app.model_training.cli import _train_command
 
 
@@ -367,3 +367,83 @@ def test_preparation_progress_uses_bar_on_terminal(
     output = buffer.getvalue()
     assert "準備進捗" in output
     assert "1/1" in output
+
+
+def test_evaluation_progress_uses_bar_on_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TerminalBuffer(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    buffer = TerminalBuffer()
+    monkeypatch.setattr(sys, "stderr", buffer)
+    with EvaluationProgress() as progress:
+        progress.update(0, 2)
+        progress.update(1, 2)
+        progress.update(2, 2)
+    output = buffer.getvalue()
+    assert "検査進捗" in output
+    assert "2/2" in output
+
+
+def test_test_cli_reports_source_progress_non_tty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _config, paths = build_project(tmp_path)
+    payload = json.loads(paths.model_config("XX").read_text(encoding="utf-8"))
+    payload["optuna_settings"]["threshold"]["value"] = 0.5
+    paths.model_config("XX").write_text(json.dumps(payload), encoding="utf-8")
+    best = BestTrialResult(
+        model="XX",
+        trial_number=0,
+        parameters=TrialParametersContract(
+            learning_rate_multiplier=1.0,
+            batch_size=4,
+            epochs=200,
+            feature_layers=["layer2"],
+            image_size=256,
+        ),
+        objective=0.1,
+        checkpoint="weights/XX.ckpt",
+        score_contract=ScoreContract(),
+        threshold=0.5,
+        train_sources=["base.png"],
+        validation_sources=["normal.png"],
+        seed=42,
+        dependencies={},
+    )
+    best.write_json(paths.study_dir("XX") / "best_trial.json")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "app.common.cli.select_device", lambda: DeviceSelection("cpu", "CPU", "test")
+    )
+    monkeypatch.setattr(
+        "app.model_evaluation.cli.CheckpointPredictor", lambda *_a, **_k: object()
+    )
+
+    def evaluate_stub(
+        _config: AppConfig,
+        _paths: ProjectPaths,
+        *,
+        on_progress: Callable[[int, int], None],
+        on_threshold_selected: Callable[[float], None],
+        **_kwargs: object,
+    ) -> list[object]:
+        on_threshold_selected(0.5)
+        on_progress(0, 2)
+        on_progress(1, 2)
+        on_progress(2, 2)
+        return []
+
+    monkeypatch.setattr("app.model_evaluation.cli.evaluate_model", evaluate_stub)
+
+    _test_command("XX", restart=False)
+    captured = capsys.readouterr()
+    assert "検査進捗 0/2" in captured.err
+    assert "検査進捗 1/2" in captured.err
+    assert "検査進捗 2/2" in captured.err
+    assert captured.out.count("\n") == 1
+    assert json.loads(captured.out)["exit_code"] == 0

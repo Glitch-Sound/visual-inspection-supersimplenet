@@ -48,7 +48,7 @@ def create_supersimplenet(
 
     return TunableSupersimplenet(
         learning_rate_multiplier=learning_rate_multiplier,
-        backbone="wide_resnet50_2.tv_in1k",
+        backbone="wide_resnet50_2.racm_in1k",
         layers=layers,
         pre_processor=TunableSupersimplenet.configure_pre_processor(
             (image_size, image_size)

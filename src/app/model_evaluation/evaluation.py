@@ -167,6 +167,7 @@ def evaluate_model(
     record_warning: Callable[[str], None] = _ignore_message,
     record_error: Callable[[str], None] = _ignore_message,
     on_threshold_selected: Callable[[float], None] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> list[InspectionResult]:
     heatmap_range = require_heatmap_range(config)
     checkpoint = paths.checkpoint(config.model)
@@ -182,6 +183,9 @@ def evaluate_model(
             f"test manifest model mismatch: expected {config.model}, "
             f"got {manifest.model}"
         )
+    total_sources = len(manifest.sources)
+    if on_progress is not None:
+        on_progress(0, total_sources)
     target = paths.results(config.model)
     target.parent.mkdir(parents=True, exist_ok=True)
     backup = recover_directory_swap(target)
@@ -189,7 +193,7 @@ def evaluate_model(
     pending_results: list[dict[str, object]] = []
     required_ids = {item.id for item in config.part.ranges}
     try:
-        for source in manifest.sources:
+        for processed, source in enumerate(manifest.sources, start=1):
             split_results: list[SplitResult] = []
             errors: list[str] = []
             warnings: list[str] = []
@@ -244,6 +248,8 @@ def evaluate_model(
                     "next_action": next_action,
                 }
             )
+            if on_progress is not None:
+                on_progress(processed, total_sources)
         runtime = finish_runtime()
         results = [
             InspectionResult.model_validate({**values, "runtime": runtime})

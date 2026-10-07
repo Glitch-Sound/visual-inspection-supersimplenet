@@ -52,6 +52,33 @@ TRIAL_PARAMETERS = {
 }
 
 
+def test_model_adapter_uses_racm_backbone(monkeypatch: pytest.MonkeyPatch) -> None:
+    import timm
+
+    from app.common import model_adapter
+
+    captured: dict[str, object] = {}
+    original_create = cast(Any, timm.create_model)
+
+    def create_without_download(model_name: str, *args: Any, **kwargs: Any) -> Any:
+        captured["backbone"] = model_name
+        captured["pretrained"] = kwargs["pretrained"]
+        kwargs["pretrained"] = False
+        return original_create(model_name, *args, **kwargs)
+
+    monkeypatch.setattr(timm, "create_model", create_without_download)
+    model = model_adapter.create_supersimplenet(
+        layers=["layer2", "layer3"], image_size=256, learning_rate_multiplier=1.0
+    )
+
+    assert captured == {
+        "backbone": "wide_resnet50_2.racm_in1k",
+        "pretrained": True,
+    }
+    feature_extractor = cast(Any, model.model.feature_extractor)
+    assert feature_extractor.get_channels_dim() == 1536
+
+
 def test_trial_runner_uses_all_validation_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -497,7 +524,7 @@ def test_training_resumes_existing_study(tmp_path: Path) -> None:
 
 
 def test_training_restart_replaces_only_derived_artifacts(tmp_path: Path) -> None:
-    _config, paths = build_project(tmp_path)
+    config, paths = build_project(tmp_path)
     paths.study_dir("XX").mkdir(parents=True)
     (paths.study_dir("XX") / "study.db").write_text("old", encoding="utf-8")
     paths.checkpoint("XX").parent.mkdir(parents=True)
@@ -514,3 +541,5 @@ def test_training_restart_replaces_only_derived_artifacts(tmp_path: Path) -> Non
     assert cached.read_text(encoding="utf-8") == "keep"
     assert original.read_text(encoding="utf-8") == "keep"
     assert paths.model_config("XX").is_file()
+    fresh_study = create_study(config, paths.study_dir("XX") / "study.db")
+    assert len(fresh_study.trials) == 0

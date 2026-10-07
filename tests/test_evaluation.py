@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Iterable
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from app.common.contracts import (
     PreparedSplit,
     RunMetadata,
     ScoreContract,
+    SplitResult,
     TrialParametersContract,
 )
 from app.common.runtime import DeviceSelection, RunRecorder
@@ -151,6 +153,145 @@ def test_load_checkpoint_metadata_rejects_missing_metadata(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="lacks visual_inspection metadata"):
         load_checkpoint_metadata(checkpoint)
+
+
+def test_evaluation_progress_counts_undetermined_and_split_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, paths = build_project(tmp_path)
+    config = config.model_copy(
+        update={
+            "part": config.part.model_copy(
+                update={
+                    "optuna_settings": config.part.optuna_settings.model_copy(
+                        update={
+                            "threshold": config.part.optuna_settings.threshold.model_copy(
+                                update={"value": 0.5}
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+    prepared = paths.prepared_test("XX")
+    PreparationManifest(
+        model="XX",
+        created_at=datetime.now(UTC),
+        sources=[
+            PreparedSource(
+                source_image="unaligned.png",
+                alignment=AlignmentResult(status="undetermined", reason="no_match"),
+                splits=[],
+            ),
+            PreparedSource(
+                source_image="missing.png",
+                alignment=AlignmentResult(status="aligned"),
+                splits=[
+                    PreparedSplit(
+                        source_image="missing.png", split_id=0, image="missing_00.png"
+                    )
+                ],
+            ),
+        ],
+    ).write_json(prepared / "manifest.json")
+    monkeypatch.setattr(
+        "app.model_evaluation.evaluation.load_checkpoint_metadata",
+        lambda _path: {
+            "model": "XX",
+            "score_source": "supersimplenet.pred_score",
+            "anomalib_post_processor": False,
+            "threshold": 0.5,
+        },
+    )
+    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
+    progress: list[tuple[int, int]] = []
+    results = evaluate_model(
+        config,
+        paths,
+        predictor=lambda _image: pytest.fail("missing split must not be inferred"),
+        finish_runtime=lambda: recorder.finish(0),
+        on_progress=lambda processed, total: progress.append((processed, total)),
+    )
+    assert progress == [(0, 2), (1, 2), (2, 2)]
+    assert [result.overall_status for result in results] == [
+        "undetermined",
+        "undetermined",
+    ]
+    assert results[1].splits[0].status == "error"
+
+
+def test_evaluation_progress_stops_on_fatal_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, paths = build_project(tmp_path)
+    config = config.model_copy(
+        update={
+            "part": config.part.model_copy(
+                update={
+                    "optuna_settings": config.part.optuna_settings.model_copy(
+                        update={
+                            "threshold": config.part.optuna_settings.threshold.model_copy(
+                                update={"value": 0.5}
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+    PreparationManifest(
+        model="XX",
+        created_at=datetime.now(UTC),
+        sources=[
+            PreparedSource(
+                source_image="first.png",
+                alignment=AlignmentResult(status="undetermined", reason="no_match"),
+                splits=[],
+            ),
+            PreparedSource(
+                source_image="second.png",
+                alignment=AlignmentResult(status="undetermined", reason="no_match"),
+                splits=[],
+            ),
+        ],
+    ).write_json(paths.prepared_test("XX") / "manifest.json")
+    monkeypatch.setattr(
+        "app.model_evaluation.evaluation.load_checkpoint_metadata",
+        lambda _path: {
+            "model": "XX",
+            "score_source": "supersimplenet.pred_score",
+            "anomalib_post_processor": False,
+            "threshold": 0.5,
+        },
+    )
+    from app.model_evaluation import evaluation
+
+    original_aggregate = evaluation.aggregate_status
+    calls = 0
+
+    def fail_on_second(
+        splits: Iterable[SplitResult], *, required_split_ids: set[int]
+    ) -> tuple[object, str | None]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("fatal aggregation error")
+        return original_aggregate(splits, required_split_ids=required_split_ids)
+
+    monkeypatch.setattr(evaluation, "aggregate_status", fail_on_second)
+    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
+    progress: list[tuple[int, int]] = []
+    with pytest.raises(RuntimeError, match="fatal aggregation error"):
+        evaluate_model(
+            config,
+            paths,
+            predictor=lambda _image: pytest.fail("no splits expected"),
+            finish_runtime=lambda: recorder.finish(0),
+            on_progress=lambda processed, total: progress.append((processed, total)),
+        )
+    assert progress == [(0, 2), (1, 2)]
+    assert not paths.results("XX").exists()
 
 
 def test_test_cli_recovers_interrupted_training_artifacts(

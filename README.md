@@ -24,6 +24,7 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | 分割画像 | 元画像を基準画像へ位置合わせし、設定された範囲で切り出した画像 |
 | 準備manifest | 元画像と分割画像の対応、および準備結果を後続処理へ引き渡す記録 |
 | checkpoint | 学習したモデルと、対応する型番・スコア契約・暫定閾値を保存した成果物 |
+| バックボーン | 分割画像から特徴を取り出す事前学習済みのモデル部分。<br />学習開始時の重みを指定する |
 | 異常スコア | SuperSimpleNet の `pred_score`。校正済み確率ではない |
 | 異常マップ | 分割画像の画素ごとの `anomaly_map`。ヒートマップ表示に使い、画像全体の異常スコアとは別の値 |
 | ヒートマップ表示範囲 | 型番設定の `heatmap_range.min/max`。異常マップの値を共通の色尺度へ割り当てる範囲 |
@@ -156,6 +157,7 @@ uv run --locked train --model XX
 ```
 
 元画像単位で学習用と検証用へ分離し、Optunaによる探索を実行する。<br />
+事前学習バックボーンには`wide_resnet50_2.racm_in1k`を使用する。<br />
 通常の再実行では`optuna/XX/study.db`にある探索履歴を使用して未完了試行から再開する。
 
 探索履歴とモデルを破棄して最初から実行する場合だけ、`--restart`を指定する。
@@ -163,6 +165,12 @@ uv run --locked train --model XX
 ```bash
 uv run --locked train --model XX --restart
 ```
+
+旧`wide_resnet50_2.tv_in1k`から切り替える際は、対象の全型番で`train --restart`を実行し、旧探索履歴とcheckpointを破棄して再学習する。<br />
+通常の`train`による探索再開や旧checkpointを使った`test`は行わない。<br />
+新しい暫定閾値を確認し、必要に応じて`inspection_threshold`を見直す。<br />
+異常マップの値に合わせて`heatmap_range`も見直し、試験結果は`test --restart`で再生成する。<br />
+元画像と準備済み画像は、この再学習で削除しない。
 
 ### 5. 試験画像を準備する
 
@@ -181,6 +189,9 @@ uv run --locked test --model XX
 ```
 
 型番別モデルと有効な判定閾値を全分割画像へ適用し、結果画像と元画像単位のJSONを`data/06_result/XX/`へ保存する。<br />
+検査中は元画像単位の処理済み件数と総件数を標準エラーへ表示する。<br />
+端末では進捗バー、それ以外では`検査進捗 1/10`のような件数表示になり、未判定や個別分割エラーの元画像も集約後に一件として数える。<br />
+標準出力には従来どおり一件の実行記録JSONを出す。<br />
 結果JSONの`threshold`には実際に判定に使用した値を、`heatmap_range`には表示に使用した下限・上限を記録する。<br />
 異常と判定した分割画像だけ、同じ型番設定の範囲で`anomaly_map`を色付けし、範囲外の値には端の色を使う。<br />
 同じ学習済みモデルと表示範囲の結果は同じ異常マップ値に同じヒートマップ色を割り当てるが、元画像へ重ねた最終画素の色は元画像によって異なる。<br />
@@ -387,6 +398,10 @@ npx --no-install openspec update
 | comparable-heatmap-scale | AC-002 | 未検証 | タスク4.3: 両OSで正常画像の非着色、異常画像の着色、スコア・閾値・判定の独立性を確認する。 |
 | comparable-heatmap-scale | AC-003 | 未検証 | タスク4.4: 両OSで表示範囲変更後の`test --restart`と結果JSONの表示範囲を確認する。 |
 | comparable-heatmap-scale | AC-004 | 未検証 | タスク4.5: 両OSで未指定・不正な表示範囲のCLI拒否と新結果が作られないことを確認する。 |
+| show-test-progress-and-update-backbone | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTS・Windows 11の端末・非端末で`test`の元画像進捗、標準出力JSONと終了コードを確認する。 |
+| show-test-progress-and-update-backbone | AC-002 | 未検証 | タスク4.2: 両OSの実画像で未判定・個別分割エラー・全体失敗時の進捗と終了状態を確認する。 |
+| show-test-progress-and-update-backbone | AC-003 | 未検証 | タスク4.3: 対象型番で`racm_in1k`実重みの取得、再学習、checkpointによる検査を確認する。 |
+| show-test-progress-and-update-backbone | AC-004 | 未検証 | タスク4.4: 全型番で旧探索履歴・checkpointの破棄、閾値・表示範囲の見直し、旧検査結果の再生成を確認する。 |
 
 `comparable-heatmap-scale` の実機確認時は、[アーカイブ済みchangeの検証記録](openspec/changes/archive/2026-10-08-comparable-heatmap-scale/verification.md)にモデル確認方法、使用範囲、結果画像・JSON、実行コマンド、環境、日付、制約を追記する。<br />
 AC-001〜AC-004 は未検証であり、自動試験の成功やアーカイブは運用開始の承認を意味しない。
