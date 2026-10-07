@@ -25,4 +25,4 @@
 - [ ] 4.3 `AC-004` を実際の基準画像で `check`、`train-pre`、`test-pre` を実行し、縮小前座標と切り出し位置・`SIZE` を照合して `evidence/acceptance.md` に記録する。完了条件: 対象位置と出力画像を評価者が確認できる。
 - [ ] 4.4 `AC-005` を不正設定・位置合わせ失敗・途中処理失敗で確認し、旧成果物保全と未判定を `evidence/acceptance.md` に記録する。完了条件: 理由、終了状態、既存データの状態が一致する。
 - [ ] 4.5 `AC-006` を対象型番の旧座標の換算、旧分割画像との画素比較、差異がある場合のモデル・検査結果の再生成、旧成果物の退避で確認し、`evidence/acceptance.md` に記録する。完了条件: 既存モデルを利用する根拠または再学習結果と、新旧成果物の非混用が確認できる。
-- [ ] 4.6 設計「受け入れ検証」の全 AC-ID と証跡内容をレビューし、`npx --no-install openspec validate improve-inspection-configuration-and-cli --strict` と通常 `--phase complete` のトレーサビリティ検査を実行する。実機確認だけを延期する場合は、該当する4.xタスクを未完了のまま README の延期表へ引き継ぎ、利用者の明示的了承後に限り `--phase limited-archive` を使用する。完了条件: 選んだ工程の検査が成功し、未検証条件を完了扱いにしていない。
+- [x] 4.6 設計「受け入れ検証」の全 AC-ID と証跡内容をレビューし、`npx --no-install openspec validate improve-inspection-configuration-and-cli --strict` と通常 `--phase complete` のトレーサビリティ検査を実行する。実機確認だけを延期する場合は、該当する4.xタスクを未完了のまま README の延期表へ引き継ぎ、利用者の明示的了承後に限り `--phase limited-archive` を使用する。完了条件: 選んだ工程の検査が成功し、未検証条件を完了扱いにしていない。
