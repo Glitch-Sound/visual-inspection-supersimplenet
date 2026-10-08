@@ -1,4 +1,4 @@
-"""Anomalib trial execution and pretrained cache handling."""
+"""Anomalib trial execution."""
 
 from __future__ import annotations
 
@@ -155,24 +155,6 @@ class AnomalibTrialRunner:
             training_scores=extract_predictions(training_predictions or []),
             checkpoint=checkpoint,
         )
-
-
-def ensure_cached(path: Path, fetch: Any) -> Path:
-    """Populate a pretrained artifact once without exposing a partial download."""
-
-    if path.is_file():
-        return path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    try:
-        fetch(temporary)
-        if not temporary.is_file():
-            raise OSError("pretrained fetcher did not create the requested artifact")
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-    return path
 
 
 def extract_predictions(prediction_batches: list[Any]) -> list[float]:

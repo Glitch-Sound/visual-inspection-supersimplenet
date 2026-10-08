@@ -47,7 +47,7 @@ from app.model_training.search import (
     run_search,
     split_by_source,
 )
-from app.model_training.trainer import AnomalibTrialRunner, ensure_cached
+from app.model_training.trainer import AnomalibTrialRunner
 
 TRIAL_PARAMETERS = {
     "learning_rate_multiplier": 1.0,
@@ -738,6 +738,106 @@ def test_augmentation_defaults_order_and_seed(
     assert calls == settings.order
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "translation",
+        "rotation",
+        "brightness",
+        "contrast",
+        "color_temperature",
+        "gamma",
+        "sensor_noise",
+        "blur",
+    ],
+)
+def test_augmentation_probability_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    config, _paths = build_project(tmp_path)
+    settings = config.part.augmentation.model_copy(deep=True)
+    for item_name in settings.order:
+        item = getattr(settings, item_name)
+        setattr(
+            settings,
+            item_name,
+            item.model_copy(update={"enabled": item_name == name, "probability": 0.5}),
+        )
+    pipeline = AugmentationPipeline(settings)
+    applied: list[bool] = []
+    monkeypatch.setattr(
+        pipeline,
+        f"_{name}",
+        lambda image, _setting: applied.append(True) or image,
+    )
+
+    class BoundaryRandom:
+        values = iter((0.4999, 0.5))
+
+        def random(self) -> float:
+            return next(self.values)
+
+    monkeypatch.setattr(pipeline, "rng", BoundaryRandom())
+    image = np.full((8, 8, 3), 0.5, dtype=np.float32)
+    pipeline(image, training=True)
+    pipeline(image, training=True)
+    assert applied == [True]
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_ranges"),
+    [
+        ("translation", [(-0.02, 0.02), (-0.02, 0.02)]),
+        ("rotation", [(-3.0, 3.0)]),
+        ("brightness", [(0.9, 1.1)]),
+        ("contrast", [(0.9, 1.1)]),
+        ("color_temperature", [(6000, 7000)]),
+        ("gamma", [(0.9, 1.1)]),
+        ("sensor_noise", [(0.0, 0.01)]),
+        ("blur", [(0.1, 1.0)]),
+    ],
+)
+def test_augmentation_samples_configured_ranges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    expected_ranges: list[tuple[float, float]],
+) -> None:
+    config, _paths = build_project(tmp_path)
+    pipeline = AugmentationPipeline(config.part.augmentation)
+    sampled_ranges: list[tuple[float, float]] = []
+    sampled_normal: list[tuple[float, float, tuple[int, ...]]] = []
+    sampled_kernels: list[list[int]] = []
+
+    class RecordingRandom:
+        def uniform(self, low: float, high: float) -> float:
+            sampled_ranges.append((low, high))
+            return (low + high) / 2
+
+        def normal(
+            self, mean: float, stddev: float, shape: tuple[int, ...]
+        ) -> np.ndarray:
+            sampled_normal.append((mean, stddev, shape))
+            return np.zeros(shape, dtype=np.float32)
+
+        def choice(self, values: list[int]) -> int:
+            sampled_kernels.append(values)
+            return values[0]
+
+    monkeypatch.setattr(pipeline, "rng", RecordingRandom())
+    image = np.full((9, 9, 3), 0.5, dtype=np.float32)
+    transformed = getattr(pipeline, f"_{name}")(
+        image, getattr(config.part.augmentation, name)
+    )
+
+    assert transformed.shape == image.shape
+    assert sampled_ranges == expected_ranges
+    assert sampled_normal == (
+        [(0.0, 0.005, image.shape)] if name == "sensor_noise" else []
+    )
+    assert sampled_kernels == ([[3, 5]] if name == "blur" else [])
+
+
 def test_blur_template_default_and_opt_in(tmp_path: Path) -> None:
     config, _paths = build_project(tmp_path)
     settings = config.part.augmentation.model_copy(deep=True)
@@ -861,18 +961,106 @@ def test_training_artifact_transaction_restores_previous_set(
     assert best.read_bytes() == old_bytes["best"]
 
 
-def test_pretrained_weights_are_cached(tmp_path: Path) -> None:
-    calls: list[Path] = []
+def test_model_creation_reuses_cached_pretrained_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import timm.models._hub as hub
+    from timm.models.resnet import ResNet
 
-    def fetch(path: Path) -> None:
-        calls.append(path)
-        path.write_bytes(b"weights")
+    from app.common.model_adapter import create_supersimplenet
 
-    target = tmp_path / "pretrained" / "model.bin"
-    ensure_cached(target, fetch)
-    ensure_cached(target, fetch)
-    assert target.read_bytes() == b"weights"
-    assert len(calls) == 1
+    cache_file = tmp_path / "hf-cache" / "model.bin"
+    downloads: list[Path] = []
+    cache_lookups: list[tuple[str, str]] = []
+
+    def cached_download(repo_id: str, *, filename: str, **_kwargs: object) -> str:
+        cache_lookups.append((repo_id, filename))
+        if not cache_file.exists():
+            cache_file.parent.mkdir(parents=True)
+            cache_file.write_bytes(b"test weights")
+            downloads.append(cache_file)
+        return str(cache_file)
+
+    def read_cached_weights(path: str, **_kwargs: object) -> dict[str, object]:
+        assert Path(path) == cache_file
+        assert cache_file.read_bytes() == b"test weights"
+        return {}
+
+    monkeypatch.setattr(hub, "_has_safetensors", False)
+    monkeypatch.setattr(hub, "hf_hub_download", cached_download)
+    monkeypatch.setattr(hub, "_torch_load", read_cached_weights)
+    monkeypatch.setattr(
+        ResNet,
+        "load_state_dict",
+        lambda _self, _state, **_kwargs: SimpleNamespace(
+            missing_keys=[], unexpected_keys=[]
+        ),
+    )
+
+    for _ in range(2):
+        model = create_supersimplenet(
+            layers=["layer2"], image_size=256, learning_rate_multiplier=1.0
+        )
+        del model
+
+    assert cache_lookups == [
+        ("timm/wide_resnet50_2.tv_in1k", "pytorch_model.bin"),
+        ("timm/wide_resnet50_2.tv_in1k", "pytorch_model.bin"),
+    ]
+    assert downloads == [cache_file]
+
+
+def test_model_creation_uses_real_hub_cache_while_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import safetensors.torch as safetensors_torch
+    from huggingface_hub import constants, file_download
+    from timm.models.resnet import ResNet
+
+    from app.common.model_adapter import create_supersimplenet
+
+    cache_root = tmp_path / "hub"
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(cache_root))
+    storage = cache_root / file_download.repo_folder_name(
+        repo_id="timm/wide_resnet50_2.tv_in1k", repo_type="model"
+    )
+    commit = "0" * 40
+    reference = storage / "refs" / "main"
+    reference.parent.mkdir(parents=True)
+    reference.write_text(commit, encoding="utf-8")
+    cached_weights = storage / "snapshots" / commit / "model.safetensors"
+    cached_weights.parent.mkdir(parents=True)
+    cached_weights.write_bytes(b"cached test weights")
+    metadata_lookups: list[bool] = []
+
+    def offline_metadata(
+        **_kwargs: object,
+    ) -> tuple[None, None, None, None, None, OSError]:
+        metadata_lookups.append(True)
+        return None, None, None, None, None, OSError("offline")
+
+    def read_cached_weights(path: str, **_kwargs: object) -> dict[str, object]:
+        assert Path(path) == cached_weights
+        return {}
+
+    monkeypatch.setattr(file_download, "_get_metadata_or_catch_error", offline_metadata)
+    monkeypatch.setattr(safetensors_torch, "load_file", read_cached_weights)
+    monkeypatch.setattr(
+        ResNet,
+        "load_state_dict",
+        lambda _self, _state, **_kwargs: SimpleNamespace(
+            missing_keys=[], unexpected_keys=[]
+        ),
+    )
+
+    for _ in range(2):
+        model = create_supersimplenet(
+            layers=["layer2"], image_size=256, learning_rate_multiplier=1.0
+        )
+        del model
+
+    assert metadata_lookups == [True, True]
+    assert cached_weights.read_bytes() == b"cached test weights"
 
 
 def test_training_resumes_existing_study(tmp_path: Path) -> None:

@@ -13,6 +13,7 @@ from app.common.atomic import recover_directory_swap
 from app.common.cli import PreparationProgress
 from app.common.config import AlignmentSettings, CropRange, load_config
 from app.common.image_io import ImageReadError
+from app.image_preparation import cli as preparation_cli
 from app.image_preparation.imaging import (
     AlignedImage,
     AlignmentError,
@@ -371,6 +372,54 @@ def test_change_req_001_03(tmp_path: Path) -> None:
     paths.model_config("XX").write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="base"):
         load_config(tmp_path, "XX")
+
+
+@pytest.mark.parametrize(
+    ("command", "output_name"),
+    [
+        (preparation_cli._check_command, "check_image"),
+        (preparation_cli._train_pre_command, "prepared_train"),
+        (preparation_cli._test_pre_command, "prepared_test"),
+    ],
+)
+def test_base_symlink_outside_model_root_is_rejected_before_preparation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: Any,
+    output_name: str,
+) -> None:
+    _config, paths = build_project(tmp_path)
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"outside unchanged")
+    base = paths.original_train("XX") / "base.png"
+    base.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        base.symlink_to(outside)
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+
+    output = getattr(paths, output_name)("XX")
+    if output.is_dir() or output_name != "check_image":
+        output.mkdir(parents=True, exist_ok=True)
+        old_artifact = output / "manifest.json"
+    else:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        old_artifact = output
+    old_artifact.write_bytes(b"old unchanged")
+    monkeypatch.setattr(
+        preparation_cli,
+        "_run",
+        lambda _name, _model, action: action(paths, None),
+    )
+    monkeypatch.setattr(
+        "app.image_preparation.preparation.read_image",
+        lambda _path: pytest.fail("image must not be read"),
+    )
+
+    with pytest.raises(ValueError, match="path escapes managed root"):
+        command(model="XX")
+    assert outside.read_bytes() == b"outside unchanged"
+    assert old_artifact.read_bytes() == b"old unchanged"
 
 
 def test_change_req_001_04(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
