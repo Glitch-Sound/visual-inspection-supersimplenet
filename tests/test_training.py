@@ -32,7 +32,11 @@ from app.common.runtime import DeviceSelection
 from app.model_training import artifacts
 from app.model_training.artifacts import persist_best_trial, restart_training
 from app.model_training.augmentation import AugmentationPipeline
-from app.model_training.cli import format_training_summary
+from app.model_training.cli import (
+    format_training_summary,
+    show_trial_conditions,
+    show_trial_outcome,
+)
 from app.model_training.search import (
     DatasetSplit,
     TrialOutcome,
@@ -52,7 +56,7 @@ TRIAL_PARAMETERS = {
 }
 
 
-def test_model_adapter_uses_racm_backbone(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_model_adapter_uses_tv_backbone(monkeypatch: pytest.MonkeyPatch) -> None:
     import timm
 
     from app.common import model_adapter
@@ -72,7 +76,7 @@ def test_model_adapter_uses_racm_backbone(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     assert captured == {
-        "backbone": "wide_resnet50_2.racm_in1k",
+        "backbone": "wide_resnet50_2.tv_in1k",
         "pretrained": True,
     }
     feature_extractor = cast(Any, model.model.feature_extractor)
@@ -313,6 +317,97 @@ def test_search_selects_lowest_validation_percentile(tmp_path: Path) -> None:
         "FAIL",
         "PRUNED",
     }
+
+
+def test_search_reports_trial_conditions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config, _paths = build_project(tmp_path)
+    study = create_study(config, tmp_path / "conditions.db")
+    split = split_by_source(make_manifest(5), tmp_path)
+    starts: list[tuple[int, TrialParameters]] = []
+
+    def on_start(number: int, parameters: TrialParameters) -> None:
+        starts.append((number, parameters))
+        show_trial_conditions(f"試行 {number + 1}/10 開始条件", parameters)
+
+    run_search(
+        config,
+        split,
+        study,
+        lambda parameters, split, trial: TrialOutcome(
+            [0.2], [0.1], tmp_path / "candidate.ckpt"
+        ),
+        on_trial_start=on_start,
+    )
+    captured = capsys.readouterr()
+    assert len(starts) == 10
+    assert [number for number, _parameters in starts] == list(range(10))
+    for label in (
+        "学習率倍率",
+        "バッチサイズ",
+        "エポック数",
+        "特徴層",
+        "前処理画像サイズ",
+    ):
+        assert label in captured.err
+    assert "条件" in captured.err
+    assert "値" in captured.err
+    first = starts[0][1]
+    for value in (
+        str(first.learning_rate_multiplier),
+        str(first.batch_size),
+        str(first.epochs),
+        ", ".join(first.feature_layers),
+        f"{first.image_size} px",
+    ):
+        assert value in captured.err
+    assert "試行 1/10 開始条件" in captured.err
+    assert captured.out == ""
+
+
+def test_search_reports_trial_outcomes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config, _paths = build_project(tmp_path)
+    study = create_study(config, tmp_path / "outcomes.db")
+    split = split_by_source(make_manifest(5), tmp_path)
+
+    def runner(
+        parameters: TrialParameters, split: DatasetSplit, trial: optuna.Trial
+    ) -> TrialOutcome:
+        del parameters, split
+        if trial.number == 1:
+            raise optuna.TrialPruned()
+        if trial.number == 2:
+            raise RuntimeError("simulated failure")
+        return TrialOutcome([0.2], [0.1], tmp_path / "candidate.ckpt")
+
+    run_search(config, split, study, runner, on_trial_finish=show_trial_outcome)
+    captured = capsys.readouterr()
+    assert "試行 1 完了 暫定探索指標=0.2" in captured.err
+    assert "試行 2 枝刈り" in captured.err
+    assert "試行 3 失敗" in captured.err
+    assert captured.out == ""
+
+
+def test_search_reports_resumed_trial_count(tmp_path: Path) -> None:
+    config, _paths = build_project(tmp_path)
+    study = create_study(config, tmp_path / "resume.db")
+    study.optimize(lambda _trial: 0.5, n_trials=2)
+    split = split_by_source(make_manifest(5), tmp_path)
+    started: list[int] = []
+    run_search(
+        config,
+        split,
+        study,
+        lambda parameters, split, trial: TrialOutcome(
+            [0.2], [0.1], tmp_path / "candidate.ckpt"
+        ),
+        on_trial_start=lambda number, _parameters: started.append(number),
+    )
+    assert started == list(range(2, 10))
+    assert len(study.trials) == 10
 
 
 def test_search_report_labels_objective_as_provisional() -> None:

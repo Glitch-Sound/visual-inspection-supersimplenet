@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -137,12 +138,17 @@ def run_search(
     split: DatasetSplit,
     study: optuna.Study,
     runner: TrialRunner,
+    *,
+    on_trial_start: Callable[[int, TrialParameters], None] | None = None,
+    on_trial_finish: Callable[[optuna.trial.FrozenTrial], None] | None = None,
 ) -> tuple[optuna.Study, dict[int, TrialOutcome]]:
     settings = config.part.optuna_settings
     outcomes: dict[int, TrialOutcome] = {}
 
     def objective(trial: optuna.Trial) -> float:
         parameters = suggest_parameters(trial, config)
+        if on_trial_start is not None:
+            on_trial_start(trial.number, parameters)
         outcome = runner(parameters, split, trial)
         if not outcome.validation_scores:
             raise ValueError("validation produced no pred_score values")
@@ -158,7 +164,14 @@ def run_search(
         return objective_value
 
     remaining = max(0, settings.execution.trials - len(study.trials))
-    study.optimize(objective, n_trials=remaining, catch=(Exception,))
+    callbacks = (
+        [lambda _study, trial: on_trial_finish(trial)]
+        if on_trial_finish is not None
+        else None
+    )
+    study.optimize(
+        objective, n_trials=remaining, catch=(Exception,), callbacks=callbacks
+    )
     if not study.best_trials:
         raise RuntimeError("all Optuna trials failed or were pruned")
     return study, outcomes

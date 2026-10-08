@@ -445,9 +445,16 @@ def test_evaluation_visualizes_anomalous_split(tmp_path: Path, score: float) -> 
         result_path=result_path,
     )
     assert result.status == "anomaly"
+    assert result.score == score
     written = cv2.imread(str(result_path))
     assert written is not None
-    assert not np.array_equal(written, original)
+    height, width = original.shape[:2]
+    assert written.shape == (height, width * 2, 3)
+    assert np.array_equal(written[:, :width], original)
+    assert np.array_equal(
+        written[:, width:],
+        _heatmap(original, anomaly_map, HeatmapRange(min=0.0, max=1.0)),
+    )
 
 
 def test_heatmap_uses_shared_range_across_images(tmp_path: Path) -> None:

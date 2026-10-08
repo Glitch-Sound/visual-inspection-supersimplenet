@@ -8,6 +8,8 @@ from anomalib.models import Supersimplenet
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import MultiStepLR
 
+BACKBONE_NAME = "wide_resnet50_2.tv_in1k"
+
 
 class TunableSupersimplenet(Supersimplenet):
     """SuperSimpleNet with a trial-specific learning rate multiplier."""
@@ -48,7 +50,7 @@ def create_supersimplenet(
 
     return TunableSupersimplenet(
         learning_rate_multiplier=learning_rate_multiplier,
-        backbone="wide_resnet50_2.racm_in1k",
+        backbone=BACKBONE_NAME,
         layers=layers,
         pre_processor=TunableSupersimplenet.configure_pre_processor(
             (image_size, image_size)

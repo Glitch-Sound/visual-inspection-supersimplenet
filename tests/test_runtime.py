@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import optuna
 import pytest
 import typer
 from conftest import build_project, write_test_image
@@ -33,6 +34,7 @@ from app.image_preparation.preparation import (
 )
 from app.model_evaluation.cli import EvaluationProgress, _test_command
 from app.model_training.cli import _train_command
+from app.model_training.search import TrialParameters
 
 
 def test_run_preserves_exit_contract(
@@ -214,16 +216,29 @@ def test_change_nreq_002_01(
     )
     study = SimpleNamespace(trials=[object()])
     monkeypatch.setattr(
-        "app.model_training.cli.split_by_source", lambda *_a, **_k: object()
+        "app.model_training.cli.split_by_source",
+        lambda *_a, **_k: SimpleNamespace(train_images=[], validation_images=[]),
     )
     monkeypatch.setattr("app.model_training.cli.create_study", lambda *_a: study)
     monkeypatch.setattr(
         "app.model_training.cli.AnomalibTrialRunner", lambda *_a: object()
     )
-    monkeypatch.setattr("app.model_training.cli.run_search", lambda *_a: (study, {}))
+
+    def search_stub(
+        *_args: object,
+        on_trial_start: Callable[[int, TrialParameters], None],
+        on_trial_finish: Callable[[object], None],
+    ) -> tuple[SimpleNamespace, dict[int, object]]:
+        on_trial_start(0, TrialParameters(1.0, 4, 200, ["layer2"], 256))
+        on_trial_finish(
+            SimpleNamespace(number=0, state=optuna.trial.TrialState.COMPLETE, value=0.1)
+        )
+        return study, {}
+
+    monkeypatch.setattr("app.model_training.cli.run_search", search_stub)
     monkeypatch.setattr(
         "app.model_training.cli.persist_best_trial",
-        lambda **_kwargs: SimpleNamespace(objective=0.1, threshold=0.5),
+        lambda **_kwargs: best,
     )
     best = BestTrialResult(
         model="XX",
@@ -281,6 +296,12 @@ def test_change_nreq_002_01(
             assert "準備進捗" in captured.err
         if command == "test":
             assert captured.err.index("判定閾値") < captured.err.index("分割画像を推論")
+        if command == "train":
+            assert "既存試行=1 今回の試行=9" in captured.err
+            assert "試行 1/10 開始条件" in captured.err
+            assert "学習率倍率" in captured.err
+            assert "試行 1 完了 暫定探索指標=0.1" in captured.err
+            assert "最良試行 1 の条件" in captured.err
 
 
 def test_change_nreq_002_02(

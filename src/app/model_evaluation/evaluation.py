@@ -146,7 +146,12 @@ def evaluate_split(
     output = (
         image
         if status == ResultStatus.NORMAL
-        else _heatmap(image, prediction.anomaly_map, heatmap_range)
+        else cast(
+            ImageArray,
+            cv2.hconcat(
+                [image, _heatmap(image, prediction.anomaly_map, heatmap_range)]
+            ),
+        )
     )
     write_image(result_path, output)
     return SplitResult(

@@ -157,7 +157,10 @@ uv run --locked train --model XX
 ```
 
 元画像単位で学習用と検証用へ分離し、Optunaによる探索を実行する。<br />
-事前学習バックボーンには`wide_resnet50_2.racm_in1k`を使用する。<br />
+事前学習バックボーンには`wide_resnet50_2.tv_in1k`を使用する。<br />
+探索開始時に学習・検証画像数、既存試行数、今回の試行数を標準エラーへ表示する。<br />
+各試行の開始時には学習率倍率、バッチサイズ、エポック数、特徴層、前処理画像サイズを表で示し、終了時には完了・枝刈り・失敗と、完了した試行の暫定探索指標を示す。<br />
+学習終了時には最良試行の条件も表で示し、標準出力の実行記録JSONは一件のまま維持する。<br />
 通常の再実行では`optuna/XX/study.db`にある探索履歴を使用して未完了試行から再開する。
 
 探索履歴とモデルを破棄して最初から実行する場合だけ、`--restart`を指定する。
@@ -166,7 +169,7 @@ uv run --locked train --model XX
 uv run --locked train --model XX --restart
 ```
 
-旧`wide_resnet50_2.tv_in1k`から切り替える際は、対象の全型番で`train --restart`を実行し、旧探索履歴とcheckpointを破棄して再学習する。<br />
+旧`wide_resnet50_2.racm_in1k`から戻す際は、対象の全型番で`train --restart`を実行し、旧探索履歴とcheckpointを破棄して再学習する。<br />
 通常の`train`による探索再開や旧checkpointを使った`test`は行わない。<br />
 新しい暫定閾値を確認し、必要に応じて`inspection_threshold`を見直す。<br />
 異常マップの値に合わせて`heatmap_range`も見直し、試験結果は`test --restart`で再生成する。<br />
@@ -194,6 +197,8 @@ uv run --locked test --model XX
 標準出力には従来どおり一件の実行記録JSONを出す。<br />
 結果JSONの`threshold`には実際に判定に使用した値を、`heatmap_range`には表示に使用した下限・上限を記録する。<br />
 異常と判定した分割画像だけ、同じ型番設定の範囲で`anomaly_map`を色付けし、範囲外の値には端の色を使う。<br />
+その結果画像は左に元の分割画像、右にヒートマップ付き画像を同じ高さで並べる。<br />
+正常と判定した分割の結果画像は従来どおり元の分割画像を保存する。<br />
 同じ学習済みモデルと表示範囲の結果は同じ異常マップ値に同じヒートマップ色を割り当てるが、元画像へ重ねた最終画素の色は元画像によって異なる。<br />
 比較前に、使用した学習済みモデルの同一性を運用で確認し、各結果JSONの表示範囲も照合する。<br />
 表示範囲の変更は`pred_score`、判定閾値、判定結果を変えず、正常と判定した画像にはヒートマップを適用しない。<br />
@@ -402,6 +407,13 @@ npx --no-install openspec update
 | show-test-progress-and-update-backbone | AC-002 | 未検証 | タスク4.2: 両OSの実画像で未判定・個別分割エラー・全体失敗時の進捗と終了状態を確認する。 |
 | show-test-progress-and-update-backbone | AC-003 | 未検証 | タスク4.3: 対象型番で`racm_in1k`実重みの取得、再学習、checkpointによる検査を確認する。 |
 | show-test-progress-and-update-backbone | AC-004 | 未検証 | タスク4.4: 全型番で旧探索履歴・checkpointの破棄、閾値・表示範囲の見直し、旧検査結果の再生成を確認する。 |
+| restore-tv-backbone-and-improve-output | AC-001 | 未検証 | タスク5.1: Ubuntu 24.04 LTSとWindows 11で`tv_in1k`の実重みを取得して学習し、checkpointによる検査を確認する。 |
+| restore-tv-backbone-and-improve-output | AC-002 | 未検証 | タスク5.2: 対象の全型番で旧成果物を退避し、`train --restart`、閾値と表示範囲の確認、`test --restart`を実施する。 |
+| restore-tv-backbone-and-improve-output | AC-003 | 未検証 | タスク5.3: 両OSの実画像で正常分割と、異常分割の左原画像・右ヒートマップ付き画像を結果JSONと照合する。 |
+| restore-tv-backbone-and-improve-output | AC-004 | 未検証 | タスク5.4: 両OSの端末・非端末で試行条件表、終了状態、再開時の件数、標準出力JSONと終了コードを確認する。 |
+
+`show-test-progress-and-update-backbone` のAC-003にある`racm_in1k`確認は当時の未検証事項であり、現在の運用には適用しない。<br />
+現在のバックボーンと移行確認は`restore-tv-backbone-and-improve-output`で扱う。
 
 `comparable-heatmap-scale` の実機確認時は、[アーカイブ済みchangeの検証記録](openspec/changes/archive/2026-10-08-comparable-heatmap-scale/verification.md)にモデル確認方法、使用範囲、結果画像・JSON、実行コマンド、環境、日付、制約を追記する。<br />
 AC-001〜AC-004 は未検証であり、自動試験の成功やアーカイブは運用開始の承認を意味しない。
