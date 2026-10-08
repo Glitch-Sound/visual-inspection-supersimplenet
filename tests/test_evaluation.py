@@ -155,6 +155,119 @@ def test_load_checkpoint_metadata_rejects_missing_metadata(tmp_path: Path) -> No
         load_checkpoint_metadata(checkpoint)
 
 
+def _prepare_test_cli_checkpoint(tmp_path: Path, metadata: object) -> Path:
+    _config, paths = build_project(tmp_path)
+    config_path = paths.model_config("XX")
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["optuna_settings"]["threshold"]["value"] = 0.5
+    config_path.write_text(json.dumps(config_payload) + "\n", encoding="utf-8")
+    checkpoint = paths.checkpoint("XX")
+    checkpoint.parent.mkdir(parents=True)
+    torch.save({"state_dict": {}, "visual_inspection": metadata}, checkpoint)
+    BestTrialResult(
+        model="XX",
+        trial_number=0,
+        parameters=TrialParametersContract(
+            learning_rate_multiplier=1.0,
+            batch_size=4,
+            epochs=200,
+            feature_layers=["layer2"],
+            image_size=256,
+        ),
+        objective=0.1,
+        checkpoint="weights/XX.ckpt",
+        score_contract=ScoreContract(),
+        threshold=0.5,
+        train_sources=["train.png"],
+        validation_sources=["validation.png"],
+        seed=42,
+        dependencies={},
+    ).write_json(paths.study_dir("XX") / "best_trial.json")
+    return checkpoint
+
+
+@pytest.mark.parametrize(
+    ("metadata", "reason"),
+    [
+        (None, "lacks visual_inspection metadata"),
+        (
+            {
+                "model": "XX",
+                "score_source": "supersimplenet.pred_score",
+                "anomalib_post_processor": False,
+                "threshold": 0.6,
+            },
+            "checkpoint threshold does not match model config",
+        ),
+    ],
+)
+def test_test_cli_rejects_checkpoint_contract_before_model_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    metadata: object,
+    reason: str,
+) -> None:
+    _prepare_test_cli_checkpoint(tmp_path, metadata)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "app.common.cli.select_device",
+        lambda: DeviceSelection("cpu", "CPU", "test"),
+    )
+    monkeypatch.setattr(
+        "app.model_evaluation.cli.CheckpointPredictor",
+        lambda *_args, **_kwargs: pytest.fail("model construction must not start"),
+    )
+    from app.model_evaluation.cli import _test_command
+
+    with pytest.raises(typer.Exit) as caught:
+        _test_command("XX", restart=False)
+    assert caught.value.exit_code == 2
+    output = json.loads(capsys.readouterr().out)
+    assert reason in output["errors"][0]
+    assert output["status"] == "error"
+
+
+def test_test_cli_validates_checkpoint_before_model_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    metadata = {
+        "model": "XX",
+        "score_source": "supersimplenet.pred_score",
+        "anomalib_post_processor": False,
+        "threshold": 0.5,
+    }
+    checkpoint = _prepare_test_cli_checkpoint(tmp_path, metadata)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "app.common.cli.select_device",
+        lambda: DeviceSelection("cpu", "CPU", "test"),
+    )
+    events: list[str] = []
+
+    def make_predictor(path: Path, **_kwargs: object) -> object:
+        assert path == checkpoint
+        events.append("predictor")
+        return object()
+
+    def evaluate(_config: object, _paths: object, **kwargs: object) -> list[object]:
+        assert kwargs["checkpoint_metadata"] == metadata
+        events.append("evaluate")
+        return []
+
+    monkeypatch.setattr("app.model_evaluation.cli.CheckpointPredictor", make_predictor)
+    monkeypatch.setattr("app.model_evaluation.cli.evaluate_model", evaluate)
+    from app.model_evaluation.cli import _test_command
+
+    _test_command("XX", restart=False)
+    output = json.loads(capsys.readouterr().out)
+    assert events == ["predictor", "evaluate"]
+    assert output["exit_code"] == 0
+    assert output["result"] == "0 source images"
+
+
 def test_evaluation_progress_counts_undetermined_and_split_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -307,7 +420,18 @@ def test_test_cli_recovers_interrupted_training_artifacts(
 
     checkpoint = paths.checkpoint("XX")
     checkpoint.parent.mkdir(parents=True)
-    checkpoint.write_bytes(b"previous checkpoint")
+    torch.save(
+        {
+            "state_dict": {},
+            "visual_inspection": {
+                "model": "XX",
+                "score_source": "supersimplenet.pred_score",
+                "anomalib_post_processor": False,
+                "threshold": 0.5,
+            },
+        },
+        checkpoint,
+    )
     best_path = paths.study_dir("XX") / "best_trial.json"
     best_path.parent.mkdir(parents=True)
     BestTrialResult(

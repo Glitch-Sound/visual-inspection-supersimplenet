@@ -173,10 +173,15 @@ def evaluate_model(
     record_error: Callable[[str], None] = _ignore_message,
     on_threshold_selected: Callable[[float], None] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
+    checkpoint_metadata: dict[str, object] | None = None,
 ) -> list[InspectionResult]:
     heatmap_range = require_heatmap_range(config)
     checkpoint = paths.checkpoint(config.model)
-    metadata = load_checkpoint_metadata(checkpoint)
+    metadata = (
+        load_checkpoint_metadata(checkpoint)
+        if checkpoint_metadata is None
+        else checkpoint_metadata
+    )
     provisional_threshold = validate_score_contract(config, metadata)
     threshold = effective_threshold(config, provisional_threshold)
     if on_threshold_selected is not None:

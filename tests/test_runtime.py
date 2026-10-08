@@ -261,6 +261,15 @@ def test_change_nreq_002_01(
     )
     best.write_json(paths.study_dir("XX") / "best_trial.json")
     monkeypatch.setattr(
+        "app.model_evaluation.cli.load_checkpoint_metadata",
+        lambda _path: {
+            "model": "XX",
+            "score_source": "supersimplenet.pred_score",
+            "anomalib_post_processor": False,
+            "threshold": 0.5,
+        },
+    )
+    monkeypatch.setattr(
         "app.model_evaluation.cli.CheckpointPredictor", lambda *_a, **_k: object()
     )
 
@@ -437,6 +446,15 @@ def test_test_cli_reports_source_progress_non_tty(
         dependencies={},
     )
     best.write_json(paths.study_dir("XX") / "best_trial.json")
+    monkeypatch.setattr(
+        "app.model_evaluation.cli.load_checkpoint_metadata",
+        lambda _path: {
+            "model": "XX",
+            "score_source": "supersimplenet.pred_score",
+            "anomalib_post_processor": False,
+            "threshold": 0.5,
+        },
+    )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "app.common.cli.select_device", lambda: DeviceSelection("cpu", "CPU", "test")

@@ -20,8 +20,9 @@ from app.model_evaluation.evaluation import (
     require_heatmap_range,
     restart_evaluation,
     validate_best_trial_contract,
+    validate_score_contract,
 )
-from app.model_evaluation.predictor import CheckpointPredictor
+from app.model_evaluation.predictor import CheckpointPredictor, load_checkpoint_metadata
 
 
 class EvaluationProgress:
@@ -70,6 +71,8 @@ def _test_command(
         require_heatmap_range(config)
         best = BestTrialResult.read_json(paths.study_dir(model) / "best_trial.json")
         validate_best_trial_contract(config, paths, best)
+        checkpoint_metadata = load_checkpoint_metadata(paths.checkpoint(model))
+        validate_score_contract(config, checkpoint_metadata)
         params = best.parameters
         predictor = CheckpointPredictor(
             paths.checkpoint(model),
@@ -96,6 +99,7 @@ def _test_command(
                 record_error=recorder.errors.append,
                 on_threshold_selected=show_selected_threshold,
                 on_progress=progress.update,
+                checkpoint_metadata=checkpoint_metadata,
             )
         counts = {
             status: sum(result.overall_status == status for result in results)
