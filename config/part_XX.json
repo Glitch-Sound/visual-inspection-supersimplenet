@@ -29,7 +29,7 @@
             },
             "epochs": {
                 "type": "categorical",
-                "choices": [100, 200, 300]
+                "choices": [200]
             },
             "feature_layers": {
                 "type": "categorical",

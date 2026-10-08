@@ -27,8 +27,10 @@ def test_training_template_matches_defaults() -> None:
     part = load_model_config(root / "config" / "part_XX.json")
     fixture = load_model_config(root / "tests" / "fixtures" / "model_config.json")
 
+    assert part.optuna_settings.search.epochs.choices == [200]
+    assert fixture.optuna_settings.search.epochs.choices == [100, 200, 300]
+
     for model in (part, fixture):
-        assert model.optuna_settings.search.epochs.choices == [100, 200, 300]
         assert model.optuna_settings.pruner.startup_trials == 5
         assert model.optuna_settings.pruner.warmup_epochs == 40
         assert model.optuna_settings.pruner.interval_epochs == 10
