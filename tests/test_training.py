@@ -26,6 +26,7 @@ from app.common.contracts import (
     PreparedSplit,
     ScoreContract,
     TrialParametersContract,
+    load_preparation_manifest,
 )
 from app.common.model_adapter import TunableSupersimplenet
 from app.common.runtime import DeviceSelection
@@ -33,6 +34,7 @@ from app.model_training import artifacts
 from app.model_training.artifacts import persist_best_trial, restart_training
 from app.model_training.augmentation import AugmentationPipeline
 from app.model_training.cli import (
+    _train_command,
     format_training_summary,
     show_trial_conditions,
     show_trial_outcome,
@@ -54,6 +56,221 @@ TRIAL_PARAMETERS = {
     "feature_layers": ["layer2"],
     "image_size": 256,
 }
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [("image_mismatch", "split_id"), ("unknown_id", "not configured")],
+)
+def test_train_rejects_invalid_prepared_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str, reason: str
+) -> None:
+    _config, paths = build_project(tmp_path)
+    prepared = paths.prepared_train("XX")
+    prepared.mkdir(parents=True)
+    image = "source_01.png" if mutation == "image_mismatch" else "source_02.png"
+    payload = {
+        "model": "XX",
+        "created_at": datetime.now(UTC).isoformat(),
+        "sources": [
+            {
+                "source_image": "source.png",
+                "alignment": {"status": "aligned"},
+                "splits": [
+                    {
+                        "source_image": "source.png",
+                        "split_id": 2 if mutation == "unknown_id" else 0,
+                        "image": image,
+                    }
+                ],
+            }
+        ],
+    }
+    (prepared / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    checkpoint = paths.checkpoint("XX")
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"old checkpoint")
+    monkeypatch.setattr(
+        "app.model_training.cli._run",
+        lambda _name, _model, action, **_kwargs: action(paths, None),
+    )
+    monkeypatch.setattr(
+        "app.model_training.cli.split_by_source",
+        lambda *_args, **_kwargs: pytest.fail("training must not start"),
+    )
+
+    with pytest.raises(ValueError, match=reason):
+        _train_command(model="XX", restart=True)
+    assert checkpoint.read_bytes() == b"old checkpoint"
+
+
+@pytest.mark.parametrize("linked", ["manifest", "image", "directory"])
+def test_train_rejects_symlinked_prepared_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked: str
+) -> None:
+    _config, paths = build_project(tmp_path)
+    prepared = tmp_path / "data" / "04_train" / "XX"
+    real_prepared = tmp_path / "real_prepared"
+    real_prepared.mkdir(parents=True)
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"outside unchanged")
+    payload = {
+        "model": "XX",
+        "created_at": datetime.now(UTC).isoformat(),
+        "sources": [
+            {
+                "source_image": "source.png",
+                "alignment": {"status": "aligned"},
+                "splits": [
+                    {
+                        "source_image": "source.png",
+                        "split_id": 0,
+                        "image": "source_00.png",
+                    }
+                ],
+            }
+        ],
+    }
+    (real_prepared / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        if linked == "directory":
+            prepared.parent.mkdir(parents=True)
+            prepared.symlink_to(real_prepared, target_is_directory=True)
+        else:
+            prepared.mkdir(parents=True)
+            if linked == "manifest":
+                (prepared / "manifest.json").symlink_to(real_prepared / "manifest.json")
+            else:
+                (prepared / "manifest.json").write_text(
+                    json.dumps(payload), encoding="utf-8"
+                )
+                (prepared / "source_00.png").symlink_to(outside)
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+    checkpoint = paths.checkpoint("XX")
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"old checkpoint")
+    monkeypatch.setattr(
+        "app.model_training.cli._run",
+        lambda _name, _model, action, **_kwargs: action(paths, None),
+    )
+    monkeypatch.setattr(
+        "app.model_training.cli.split_by_source",
+        lambda *_args, **_kwargs: pytest.fail("training must not start"),
+    )
+
+    with pytest.raises(ValueError, match="symlink"):
+        _train_command(model="XX", restart=True)
+    assert checkpoint.read_bytes() == b"old checkpoint"
+    assert outside.read_bytes() == b"outside unchanged"
+
+
+def test_valid_prepared_manifest_accepts_configured_split(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    prepared = paths.prepared_train("XX")
+    prepared.mkdir(parents=True)
+    manifest = PreparationManifest(
+        model="XX",
+        created_at=datetime.now(UTC),
+        sources=[
+            PreparedSource(
+                source_image="source.png",
+                alignment=AlignmentResult(status="aligned"),
+                splits=[
+                    PreparedSplit(
+                        source_image="source.png", split_id=0, image="source_00.png"
+                    )
+                ],
+            )
+        ],
+    )
+    manifest.write_json(prepared / "manifest.json")
+    assert (
+        load_preparation_manifest(
+            prepared,
+            model="XX",
+            allowed_split_ids={item.id for item in config.part.ranges},
+        )
+        == manifest
+    )
+
+
+def test_train_cli_accepts_valid_prepared_images(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _config, paths = build_project(tmp_path)
+    prepared = paths.prepared_train("XX")
+    sources: list[PreparedSource] = []
+    for index in range(5):
+        source_name = f"source-{index}.png"
+        split_name = f"source-{index}_00.png"
+        write_test_image(prepared / split_name)
+        sources.append(
+            PreparedSource(
+                source_image=source_name,
+                alignment=AlignmentResult(status="aligned"),
+                splits=[
+                    PreparedSplit(
+                        source_image=source_name, split_id=0, image=split_name
+                    )
+                ],
+            )
+        )
+    PreparationManifest(
+        model="XX", created_at=datetime.now(UTC), sources=sources
+    ).write_json(prepared / "manifest.json")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "app.common.cli.select_device",
+        lambda: DeviceSelection("cpu", "CPU", "test"),
+    )
+    study = SimpleNamespace(trials=[])
+    monkeypatch.setattr("app.model_training.cli.create_study", lambda *_args: study)
+    observed: dict[str, object] = {}
+
+    def run_search_stub(
+        _config: object,
+        split: DatasetSplit,
+        current_study: object,
+        _runner: object,
+        **_kwargs: object,
+    ) -> tuple[object, list[object]]:
+        assert current_study is study
+        observed["split"] = split
+        return study, []
+
+    monkeypatch.setattr("app.model_training.cli.run_search", run_search_stub)
+    monkeypatch.setattr(
+        "app.model_training.cli.persist_best_trial",
+        lambda **_kwargs: BestTrialResult(
+            model="XX",
+            trial_number=0,
+            parameters=TrialParametersContract.model_validate(TRIAL_PARAMETERS),
+            objective=0.1,
+            checkpoint="weights/XX.ckpt",
+            score_contract=ScoreContract(),
+            threshold=0.5,
+            train_sources=["source-0.png"],
+            validation_sources=["source-1.png"],
+            seed=42,
+            dependencies={},
+        ),
+    )
+
+    _train_command(model="XX", restart=False)
+    split = observed["split"]
+    assert isinstance(split, DatasetSplit)
+    assert len(split.train_sources) == 4
+    assert len(split.validation_sources) == 1
+    assert set(split.train_sources).isdisjoint(split.validation_sources)
+    assert all(
+        path.is_file() for path in (*split.train_images, *split.validation_images)
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert output["exit_code"] == 0
+    assert output["result"] == "暫定探索指標=0.1 threshold=0.5"
 
 
 def test_model_adapter_uses_tv_backbone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -442,6 +659,83 @@ def test_augmentation_is_training_only_and_ephemeral(tmp_path: Path) -> None:
     assert float(output.min()) >= 0.0 and float(output.max()) <= 1.0
     assert np.array_equal(source, source_before)
     assert list(tmp_path.iterdir()) == [tmp_path / "config"]
+
+
+def test_augmentation_defaults_order_and_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _paths = build_project(tmp_path)
+    settings = config.part.augmentation.model_copy(deep=True)
+    assert settings.enabled is True
+    assert settings.seed == 42
+    assert settings.order == [
+        "translation",
+        "rotation",
+        "brightness",
+        "contrast",
+        "color_temperature",
+        "gamma",
+        "sensor_noise",
+        "blur",
+    ]
+    assert settings.translation.model_dump() == {
+        "enabled": True,
+        "probability": 0.5,
+        "max_ratio": 0.02,
+        "padding_mode": "reflection",
+    }
+    assert settings.rotation.model_dump() == {
+        "enabled": True,
+        "probability": 0.5,
+        "max_degrees": 3.0,
+        "padding_mode": "reflection",
+    }
+    for name in ("brightness", "contrast", "gamma"):
+        item = getattr(settings, name)
+        assert (item.probability, item.factor_min, item.factor_max) == (0.3, 0.9, 1.1)
+    assert settings.color_temperature.model_dump() == {
+        "enabled": True,
+        "probability": 0.2,
+        "base_kelvin": 6500,
+        "max_delta_kelvin": 500,
+    }
+    assert settings.sensor_noise.model_dump() == {
+        "enabled": True,
+        "probability": 0.3,
+        "stddev_min": 0.0,
+        "stddev_max": 0.01,
+    }
+    assert settings.blur.model_dump() == {
+        "enabled": False,
+        "probability": 0.2,
+        "kernel_sizes": [3, 5],
+        "sigma_min": 0.1,
+        "sigma_max": 1.0,
+    }
+
+    image = np.linspace(0, 1, 16 * 16 * 3, dtype=np.float32).reshape(16, 16, 3)
+    assert np.array_equal(
+        AugmentationPipeline(settings)(image, training=True),
+        AugmentationPipeline(settings)(image, training=True),
+    )
+
+    calls: list[str] = []
+    for name in settings.order:
+        setting = getattr(settings, name)
+        setattr(
+            settings,
+            name,
+            setting.model_copy(update={"enabled": True, "probability": 1.0}),
+        )
+    pipeline = AugmentationPipeline(settings)
+    for name in settings.order:
+        monkeypatch.setattr(
+            pipeline,
+            f"_{name}",
+            lambda current, _setting, label=name: calls.append(label) or current,
+        )
+    pipeline(image, training=True)
+    assert calls == settings.order
 
 
 def test_blur_template_default_and_opt_in(tmp_path: Path) -> None:

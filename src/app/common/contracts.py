@@ -152,6 +152,14 @@ class PreparedSource(ContractModel):
     def splits_match_source(self) -> PreparedSource:
         if any(split.source_image != self.source_image for split in self.splits):
             raise ValueError("split source_image must match parent source_image")
+        source_path = Path(self.source_image)
+        for split in self.splits:
+            expected = f"{source_path.stem}_{split.split_id:02d}{source_path.suffix}"
+            if split.image != expected:
+                raise ValueError(
+                    f"split image {split.image!r} does not match split_id "
+                    f"{split.split_id}; expected {expected!r}"
+                )
         split_ids = [split.split_id for split in self.splits]
         if len(split_ids) != len(set(split_ids)):
             raise ValueError("split_id must be unique within a source image")
@@ -190,6 +198,34 @@ class PreparationManifest(ContractModel):
         if len(split_images) != len(set(split_images)):
             raise ValueError("split image must be unique within a manifest")
         return self
+
+
+def load_preparation_manifest(
+    prepared_dir: Path, *, model: str, allowed_split_ids: set[int]
+) -> PreparationManifest:
+    """Validate a prepared input before training or inference reads any image."""
+
+    manifest_path = prepared_dir / "manifest.json"
+    if manifest_path.is_symlink():
+        raise ValueError(f"prepared manifest must not be a symlink: {manifest_path}")
+    manifest = PreparationManifest.read_json(manifest_path)
+    if manifest.model != model:
+        raise ValueError(
+            f"prepared manifest model mismatch: expected {model}, got {manifest.model}"
+        )
+    for source in manifest.sources:
+        for split in source.splits:
+            if split.split_id not in allowed_split_ids:
+                raise ValueError(
+                    f"split_id {split.split_id} for {source.source_image} "
+                    "is not configured"
+                )
+            image_path = prepared_dir / split.image
+            if image_path.is_symlink():
+                raise ValueError(
+                    f"prepared split image must not be a symlink: {image_path}"
+                )
+    return manifest
 
 
 class ScoreContract(ContractModel):

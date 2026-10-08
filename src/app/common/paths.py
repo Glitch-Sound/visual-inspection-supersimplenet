@@ -30,6 +30,17 @@ def ensure_within(root: Path, candidate: Path) -> Path:
     return resolved
 
 
+def ensure_no_symlink_components(root: Path, candidate: Path) -> None:
+    """Reject symlinks between a managed root and a prepared input path."""
+
+    relative = candidate.relative_to(root)
+    current = root
+    for component in relative.parts:
+        current = current / component
+        if current.is_symlink():
+            raise ValueError(f"prepared input must not be a symlink: {current}")
+
+
 @dataclass(frozen=True)
 class ProjectPaths:
     """All known filesystem locations for one project root."""
@@ -63,9 +74,15 @@ class ProjectPaths:
         return ensure_within(self.root, self.root / "data/03_check" / f"{model}.png")
 
     def prepared_train(self, model: str) -> Path:
+        ensure_no_symlink_components(
+            self.root, self.root / "data/04_train" / validate_model_name(model)
+        )
         return self._model_dir("data/04_train", model)
 
     def prepared_test(self, model: str) -> Path:
+        ensure_no_symlink_components(
+            self.root, self.root / "data/05_test" / validate_model_name(model)
+        )
         return self._model_dir("data/05_test", model)
 
     def results(self, model: str) -> Path:

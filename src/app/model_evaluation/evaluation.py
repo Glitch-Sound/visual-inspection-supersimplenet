@@ -19,11 +19,11 @@ from app.common.contracts import (
     BestTrialResult,
     HeatmapRange,
     InspectionResult,
-    PreparationManifest,
     ResultStatus,
     RunMetadata,
     ScoreContract,
     SplitResult,
+    load_preparation_manifest,
 )
 from app.common.image_io import ImageArray, read_image, write_image
 from app.common.paths import ProjectPaths
@@ -187,12 +187,11 @@ def evaluate_model(
     if on_threshold_selected is not None:
         on_threshold_selected(threshold)
     prepared_dir = paths.prepared_test(config.model)
-    manifest = PreparationManifest.read_json(prepared_dir / "manifest.json")
-    if manifest.model != config.model:
-        raise ValueError(
-            f"test manifest model mismatch: expected {config.model}, "
-            f"got {manifest.model}"
-        )
+    manifest = load_preparation_manifest(
+        prepared_dir,
+        model=config.model,
+        allowed_split_ids={item.id for item in config.part.ranges},
+    )
     total_sources = len(manifest.sources)
     if on_progress is not None:
         on_progress(0, total_sources)

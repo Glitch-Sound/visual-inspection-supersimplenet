@@ -12,7 +12,7 @@ from rich.progress import BarColumn, Progress, TextColumn
 from app.common.artifact_transaction import recover_artifact_transaction
 from app.common.cli import ExitCode, _run, show_stage
 from app.common.config import load_config
-from app.common.contracts import BestTrialResult
+from app.common.contracts import BestTrialResult, load_preparation_manifest
 from app.common.paths import ProjectPaths
 from app.common.runtime import RunRecorder
 from app.model_evaluation.evaluation import (
@@ -66,13 +66,18 @@ def _test_command(
         recover_artifact_transaction(paths, model)
         show_stage("設定読込と学習成果物の照合")
         config = load_config(paths.root, model)
-        if restart:
-            restart_evaluation(paths, model)
         require_heatmap_range(config)
         best = BestTrialResult.read_json(paths.study_dir(model) / "best_trial.json")
         validate_best_trial_contract(config, paths, best)
         checkpoint_metadata = load_checkpoint_metadata(paths.checkpoint(model))
         validate_score_contract(config, checkpoint_metadata)
+        load_preparation_manifest(
+            paths.prepared_test(model),
+            model=config.model,
+            allowed_split_ids={item.id for item in config.part.ranges},
+        )
+        if restart:
+            restart_evaluation(paths, model)
         params = best.parameters
         predictor = CheckpointPredictor(
             paths.checkpoint(model),

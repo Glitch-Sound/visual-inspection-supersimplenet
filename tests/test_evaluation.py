@@ -30,6 +30,7 @@ from app.common.contracts import (
     SplitResult,
     TrialParametersContract,
 )
+from app.common.paths import ProjectPaths
 from app.common.runtime import DeviceSelection, RunRecorder
 from app.model_evaluation.evaluation import (
     _heatmap,
@@ -183,6 +184,9 @@ def _prepare_test_cli_checkpoint(tmp_path: Path, metadata: object) -> Path:
         seed=42,
         dependencies={},
     ).write_json(paths.study_dir("XX") / "best_trial.json")
+    PreparationManifest(
+        model="XX", created_at=datetime.now(UTC), sources=[]
+    ).write_json(paths.prepared_test("XX") / "manifest.json")
     return checkpoint
 
 
@@ -266,6 +270,72 @@ def test_test_cli_validates_checkpoint_before_model_construction(
     assert events == ["predictor", "evaluate"]
     assert output["exit_code"] == 0
     assert output["result"] == "0 source images"
+
+
+@pytest.mark.parametrize("invalid", ["name", "symlink"])
+def test_test_cli_restart_preserves_results_for_invalid_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    invalid: str,
+) -> None:
+    metadata = {
+        "model": "XX",
+        "score_source": "supersimplenet.pred_score",
+        "anomalib_post_processor": False,
+        "threshold": 0.5,
+    }
+    _prepare_test_cli_checkpoint(tmp_path, metadata)
+    paths = ProjectPaths(tmp_path)
+    manifest_path = paths.prepared_test("XX") / "manifest.json"
+    manifest = PreparationManifest(
+        model="XX",
+        created_at=datetime.now(UTC),
+        sources=[
+            PreparedSource(
+                source_image="source.png",
+                alignment=AlignmentResult(status="aligned"),
+                splits=[
+                    PreparedSplit(
+                        source_image="source.png", split_id=0, image="source_00.png"
+                    )
+                ],
+            )
+        ],
+    )
+    if invalid == "name":
+        payload = manifest.model_dump(mode="json")
+        payload["sources"][0]["splits"][0]["image"] = "source_01.png"
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        outside_manifest = tmp_path / "outside_manifest.json"
+        manifest.write_json(outside_manifest)
+        manifest_path.unlink()
+        try:
+            manifest_path.symlink_to(outside_manifest)
+        except OSError as error:
+            pytest.skip(f"symlinks unavailable: {error}")
+    results_dir = paths.results("XX")
+    results_dir.mkdir(parents=True)
+    old = results_dir / "old.json"
+    old.write_bytes(b"old unchanged")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "app.common.cli.select_device",
+        lambda: DeviceSelection("cpu", "CPU", "test"),
+    )
+    monkeypatch.setattr(
+        "app.model_evaluation.cli.CheckpointPredictor",
+        lambda *_args, **_kwargs: pytest.fail("model construction must not start"),
+    )
+    from app.model_evaluation.cli import _test_command
+
+    with pytest.raises(typer.Exit) as caught:
+        _test_command("XX", restart=True)
+    assert caught.value.exit_code == 2
+    output = json.loads(capsys.readouterr().out)
+    assert ("split_id" if invalid == "name" else "symlink") in output["errors"][0]
+    assert old.read_bytes() == b"old unchanged"
 
 
 def test_evaluation_progress_counts_undetermined_and_split_errors(
@@ -453,6 +523,9 @@ def test_test_cli_recovers_interrupted_training_artifacts(
         seed=42,
         dependencies={},
     ).write_json(best_path)
+    PreparationManifest(
+        model="XX", created_at=datetime.now(UTC), sources=[]
+    ).write_json(paths.prepared_test("XX") / "manifest.json")
     targets = {"checkpoint": checkpoint, "config": config_path, "best_trial": best_path}
     previous = {name: path.read_bytes() for name, path in targets.items()}
     for path in targets.values():
@@ -670,7 +743,7 @@ def test_evaluation_records_heatmap_range_in_results(
                 PreparedSplit(
                     source_image="split_error.png",
                     split_id=0,
-                    image="missing_00.png",
+                    image="split_error_00.png",
                 )
             ],
         )
@@ -712,7 +785,14 @@ def test_evaluation_records_heatmap_range_in_results(
 
 @pytest.mark.parametrize(
     "mutation",
-    ["model", "unsafe_path", "duplicate", "reference_mismatch"],
+    [
+        "model",
+        "unsafe_path",
+        "duplicate",
+        "reference_mismatch",
+        "image_mismatch",
+        "unknown_id",
+    ],
 )
 def test_evaluation_rejects_invalid_manifest_before_prediction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
@@ -759,6 +839,11 @@ def test_evaluation_rejects_invalid_manifest_before_prediction(
         manifest["sources"][0]["splits"][0]["image"] = "../../outside.png"
     elif mutation == "duplicate":
         manifest["sources"].append(deepcopy(manifest["sources"][0]))
+    elif mutation == "image_mismatch":
+        manifest["sources"][0]["splits"][0]["image"] = "source_01.png"
+    elif mutation == "unknown_id":
+        manifest["sources"][0]["splits"][0]["split_id"] = 2
+        manifest["sources"][0]["splits"][0]["image"] = "source_02.png"
     else:
         manifest["sources"][0]["splits"][0]["source_image"] = "other.png"
     (prepared / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -791,6 +876,93 @@ def test_evaluation_rejects_invalid_manifest_before_prediction(
         )
     assert old.read_bytes() == b"old unchanged"
     assert {item.name for item in results_dir.iterdir()} == {"old.json"}
+    assert outside.read_bytes() == b"outside unchanged"
+
+
+@pytest.mark.parametrize("linked", ["manifest", "image", "directory"])
+def test_evaluation_rejects_symlinked_prepared_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked: str
+) -> None:
+    config, paths = build_project(tmp_path)
+    config = config.model_copy(
+        update={
+            "part": config.part.model_copy(
+                update={
+                    "optuna_settings": config.part.optuna_settings.model_copy(
+                        update={
+                            "threshold": config.part.optuna_settings.threshold.model_copy(
+                                update={"value": 0.5}
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+    prepared = tmp_path / "data" / "05_test" / "XX"
+    real_prepared = tmp_path / "real_prepared"
+    real_prepared.mkdir(parents=True)
+    payload = {
+        "model": "XX",
+        "created_at": datetime.now(UTC).isoformat(),
+        "sources": [
+            {
+                "source_image": "source.png",
+                "alignment": {"status": "aligned"},
+                "splits": [
+                    {
+                        "source_image": "source.png",
+                        "split_id": 0,
+                        "image": "source_00.png",
+                    }
+                ],
+            }
+        ],
+    }
+    (real_prepared / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"outside unchanged")
+    try:
+        if linked == "directory":
+            prepared.parent.mkdir(parents=True)
+            prepared.symlink_to(real_prepared, target_is_directory=True)
+        else:
+            prepared.mkdir(parents=True)
+            if linked == "manifest":
+                (prepared / "manifest.json").symlink_to(real_prepared / "manifest.json")
+            else:
+                (prepared / "manifest.json").write_text(
+                    json.dumps(payload), encoding="utf-8"
+                )
+                (prepared / "source_00.png").symlink_to(outside)
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+    results_dir = paths.results("XX")
+    results_dir.mkdir(parents=True)
+    old = results_dir / "old.json"
+    old.write_bytes(b"old unchanged")
+    monkeypatch.setattr(
+        "app.model_evaluation.evaluation.load_checkpoint_metadata",
+        lambda _path: {
+            "model": "XX",
+            "score_source": "supersimplenet.pred_score",
+            "anomalib_post_processor": False,
+            "threshold": 0.5,
+        },
+    )
+    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
+
+    def predict(_image: np.ndarray) -> Prediction:
+        pytest.fail("prediction must not start")
+
+    with pytest.raises(ValueError, match="symlink"):
+        evaluate_model(
+            config,
+            paths,
+            predictor=predict,
+            finish_runtime=lambda: recorder.finish(0),
+        )
+    assert old.read_bytes() == b"old unchanged"
     assert outside.read_bytes() == b"outside unchanged"
 
 

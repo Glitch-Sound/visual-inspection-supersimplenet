@@ -260,6 +260,9 @@ def test_change_nreq_002_01(
         dependencies={},
     )
     best.write_json(paths.study_dir("XX") / "best_trial.json")
+    PreparationManifest.model_validate(
+        {"model": "XX", "created_at": "2026-10-09T00:00:00Z", "sources": []}
+    ).write_json(paths.prepared_test("XX") / "manifest.json")
     monkeypatch.setattr(
         "app.model_evaluation.cli.load_checkpoint_metadata",
         lambda _path: {
@@ -446,6 +449,9 @@ def test_test_cli_reports_source_progress_non_tty(
         dependencies={},
     )
     best.write_json(paths.study_dir("XX") / "best_trial.json")
+    PreparationManifest.model_validate(
+        {"model": "XX", "created_at": "2026-10-09T00:00:00Z", "sources": []}
+    ).write_json(paths.prepared_test("XX") / "manifest.json")
     monkeypatch.setattr(
         "app.model_evaluation.cli.load_checkpoint_metadata",
         lambda _path: {

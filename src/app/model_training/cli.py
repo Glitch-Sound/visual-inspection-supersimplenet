@@ -14,8 +14,8 @@ from app.common.cli import _run, show_stage
 from app.common.config import load_config
 from app.common.contracts import (
     BestTrialResult,
-    PreparationManifest,
     TrialParametersContract,
+    load_preparation_manifest,
 )
 from app.common.model_adapter import BACKBONE_NAME
 from app.common.paths import ProjectPaths
@@ -78,19 +78,18 @@ def _train_command(
         show_stage("設定読込と学習入力の確認")
         config = load_config(paths.root, model)
         os.environ.setdefault("TORCH_HOME", str(paths.pretrained))
-        if restart:
-            restart_training(paths, model)
         prepared = paths.prepared_train(model)
-        manifest = PreparationManifest.read_json(prepared / "manifest.json")
-        if manifest.model != config.model:
-            raise ValueError(
-                f"training manifest model mismatch: expected {config.model}, "
-                f"got {manifest.model}"
-            )
+        manifest = load_preparation_manifest(
+            prepared,
+            model=config.model,
+            allowed_split_ids={item.id for item in config.part.ranges},
+        )
         normal = config.part.optuna_settings.normal_only
         split = split_by_source(
             manifest, prepared, train_ratio=normal.train_ratio, seed=normal.seed
         )
+        if restart:
+            restart_training(paths, model)
         study_dir = paths.study_dir(model)
         show_stage("Optuna 探索を実行")
         study = create_study(config, study_dir / "study.db")
