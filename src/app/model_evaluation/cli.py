@@ -71,7 +71,7 @@ def _test_command(
         config = load_config(paths.root, model)
         groups = config.part.select_groups(group)
         recorder.groups = [item.id for item in groups]
-        load_preparation_manifest(
+        manifest = load_preparation_manifest(
             paths.prepared_test(model),
             model=config.model,
             allowed_split_ids={item.id for item in config.part.ranges},
@@ -104,34 +104,39 @@ def _test_command(
         )
         generation = create_generation(paths, model)
         all_results = []
-        for selected in groups:
-            try:
-                best, metadata = validated[selected.id]
-                params = best.parameters
-                predictor = CheckpointPredictor(
-                    paths.checkpoint(model, selected.id),
-                    layers=list(params.feature_layers),
-                    image_size=params.image_size,
-                    learning_rate_multiplier=params.learning_rate_multiplier,
-                    device=recorder.device.device,
-                )
-                source = (
-                    "暫定閾値"
-                    if selected.inspection_threshold is None
-                    else "検査用設定"
-                )
-
-                def show_threshold(
-                    threshold: float,
-                    *,
-                    group_id: int = selected.id,
-                    threshold_source: str = source,
-                ) -> None:
-                    show_stage(
-                        f"グループ {group_id} 判定閾値: {threshold} ({threshold_source})"
+        with EvaluationProgress() as progress:
+            progress.update(0, len(manifest.sources))
+            for selected in groups:
+                try:
+                    best, metadata = validated[selected.id]
+                    params = best.parameters
+                    predictor = CheckpointPredictor(
+                        paths.checkpoint(model, selected.id),
+                        layers=list(params.feature_layers),
+                        image_size=params.image_size,
+                        learning_rate_multiplier=params.learning_rate_multiplier,
+                        device=recorder.device.device,
+                    )
+                    source = (
+                        "暫定閾値"
+                        if selected.inspection_threshold is None
+                        else "検査用設定"
                     )
 
-                with EvaluationProgress() as progress:
+                    def show_threshold(
+                        threshold: float,
+                        *,
+                        group_id: int = selected.id,
+                        threshold_source: str = source,
+                    ) -> None:
+                        show_stage(
+                            f"グループ {group_id} 判定閾値: {threshold} ({threshold_source})"
+                        )
+
+                    def show_progress(processed: int, total: int) -> None:
+                        if 0 < processed < total:
+                            progress.update(processed, total)
+
                     results = evaluate_model(
                         config,
                         selected,
@@ -142,23 +147,28 @@ def _test_command(
                         record_warning=recorder.warnings.append,
                         record_error=recorder.errors.append,
                         on_threshold_selected=show_threshold,
-                        on_progress=progress.update,
+                        on_progress=show_progress if selected is groups[-1] else None,
                         checkpoint_metadata=metadata,
                     )
-                all_results.extend(results)
-            except Exception as error:
-                raise RuntimeError(f"group {selected.id} failed: {error}") from error
-        final_runtime = recorder.snapshot(ExitCode.SUCCESS)
-        for result in all_results:
-            result.runtime = final_runtime
-            result.write_json(
-                generation / f"group_{result.group}" / f"{result.source_image}.json"
-            )
-        new_paths = {
-            item.id: f"generations/{generation.name}/group_{item.id}" for item in groups
-        }
-        current = {**old_current, **new_paths}
-        publish_current(paths, model, current)
+                    all_results.extend(results)
+                except Exception as error:
+                    raise RuntimeError(
+                        f"group {selected.id} failed: {error}"
+                    ) from error
+            final_runtime = recorder.snapshot(ExitCode.SUCCESS)
+            for result in all_results:
+                result.runtime = final_runtime
+                result.write_json(
+                    generation / f"group_{result.group}" / f"{result.source_image}.json"
+                )
+            new_paths = {
+                item.id: f"generations/{generation.name}/group_{item.id}"
+                for item in groups
+            }
+            current = {**old_current, **new_paths}
+            publish_current(paths, model, current)
+            if manifest.sources:
+                progress.update(len(manifest.sources), len(manifest.sources))
         try:
             cleanup_generations(paths, model, current)
         except (OSError, ValueError) as error:

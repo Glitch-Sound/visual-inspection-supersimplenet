@@ -209,9 +209,7 @@ def test_tunable_model_saves_lightning_checkpoint(
     assert "model.adaptor.weight" in payload["state_dict"]
 
 
-def test_model_creation_reuses_cached_pretrained_weights(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_group_req_007_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import timm.models._hub as hub
     from timm.models.resnet import ResNet
 

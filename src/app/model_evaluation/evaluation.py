@@ -201,9 +201,9 @@ def evaluate_model(
     if on_progress is not None:
         on_progress(0, total_sources)
     output_dir.mkdir(parents=True, exist_ok=False)
-    pending_results: list[dict[str, object]] = []
+    results: list[InspectionResult] = []
     required_ids = set(group.range_ids)
-    for processed, source in enumerate(manifest.sources, start=1):
+    for source in manifest.sources:
         split_results: list[SplitResult] = []
         errors: list[str] = []
         warnings: list[str] = []
@@ -247,7 +247,7 @@ def evaluate_model(
         overall, next_action = aggregate_status(
             split_results, required_split_ids=required_ids
         )
-        pending_results.append(
+        result = InspectionResult.model_validate(
             {
                 "source_image": source.source_image,
                 "model": config.model,
@@ -264,15 +264,11 @@ def evaluate_model(
                 "errors": errors,
                 "warnings": warnings,
                 "next_action": next_action,
+                "runtime": finish_runtime(),
             }
         )
-        if on_progress is not None:
-            on_progress(processed, total_sources)
-    runtime = finish_runtime()
-    results = [
-        InspectionResult.model_validate({**values, "runtime": runtime})
-        for values in pending_results
-    ]
-    for result in results:
         write_inspection_result(result, output_dir / f"{result.source_image}.json")
+        results.append(result)
+        if on_progress is not None:
+            on_progress(len(results), total_sources)
     return results

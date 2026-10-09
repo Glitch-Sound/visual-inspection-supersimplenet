@@ -227,10 +227,25 @@ def test_group_req_005_s01(tmp_path: Path) -> None:
 
 def test_group_req_005_s02(tmp_path: Path) -> None:
     config, paths = _project(tmp_path)
-    selected = config.part.groups[0]
-    selected.optuna_settings.sampler.seed = 7
-    study = create_study(config, selected, paths.study_dir("XX", 0) / "study.db")
-    assert study.study_name == "visual-inspection-XX-group-0"
+    selected, (study, outcomes) = _study(config, paths)
+    split = split_by_source(
+        load_preparation_manifest(
+            paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
+        ),
+        paths.prepared_train("XX", 0),
+    )
+    best = persist_best_trial(
+        config=config,
+        group=selected,
+        paths=paths,
+        split=split,
+        study=study,
+        outcomes=outcomes,
+    )
+    summary = training_cli.format_training_summary(best)
+    assert "暫定探索指標=" in summary
+    assert "threshold=" in summary
+    assert "精度" not in summary and "再現率" not in summary
 
 
 def test_group_req_006_s01(tmp_path: Path) -> None:
@@ -363,21 +378,57 @@ def test_group_req_007_s01(tmp_path: Path) -> None:
     )
 
 
-def test_group_req_007_s02(tmp_path: Path) -> None:
+def test_group_artifact_paths_are_distinct(tmp_path: Path) -> None:
     config, paths = _project(tmp_path, two=True)
     assert paths.checkpoint("XX", 0) != paths.checkpoint("XX", 1)
     assert paths.study_dir("XX", 0) != paths.study_dir("XX", 1)
     assert config.part.groups[1].id == 1
 
 
-def test_group_req_007_s03(tmp_path: Path) -> None:
-    config, paths = _project(tmp_path, two=True)
-    from app.common.config import write_threshold
+def test_group_req_007_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, paths = _project(tmp_path)
+    selected, (study, outcomes) = _study(config, paths)
+    split = split_by_source(
+        load_preparation_manifest(
+            paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
+        ),
+        paths.prepared_train("XX", 0),
+    )
+    old_checkpoint = paths.checkpoint("XX", 0)
+    old_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    old_checkpoint.write_bytes(b"old checkpoint")
+    old_best = paths.study_dir("XX", 0) / "best_trial.json"
+    old_best.write_bytes(b"old best")
+    original = {
+        "checkpoint": old_checkpoint.read_bytes(),
+        "best": old_best.read_bytes(),
+        "config": paths.model_config("XX").read_bytes(),
+    }
+    from app.model_training import artifacts
 
-    write_threshold(paths.model_config("XX"), 0.3, group=1)
-    updated = load_config(tmp_path, "XX")
-    assert updated.part.groups[0].optuna_settings.threshold.value is None
-    assert updated.part.groups[1].optuna_settings.threshold.value == 0.3
+    replace = artifacts._replace_staged_artifact
+    calls = 0
+
+    def fail_second(source, target):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected write failure")
+        replace(source, target)
+
+    monkeypatch.setattr(artifacts, "_replace_staged_artifact", fail_second)
+    with pytest.raises(OSError, match="injected write failure"):
+        persist_best_trial(
+            config=config,
+            group=selected,
+            paths=paths,
+            split=split,
+            study=study,
+            outcomes=outcomes,
+        )
+    assert old_checkpoint.read_bytes() == original["checkpoint"]
+    assert old_best.read_bytes() == original["best"]
+    assert paths.model_config("XX").read_bytes() == original["config"]
 
 
 def test_group_req_007_s04(tmp_path: Path) -> None:
@@ -399,23 +450,58 @@ def test_group_req_007_s04(tmp_path: Path) -> None:
     )
     from app.model_evaluation.evaluation import validate_best_trial_contract
 
-    validate_best_trial_contract(
-        load_config(tmp_path, "XX"),
-        load_config(tmp_path, "XX").part.groups[0],
-        paths,
-        best,
-    )
+    valid = load_config(tmp_path, "XX")
+    validate_best_trial_contract(valid, valid.part.groups[0], paths, best)
+    bad = best.model_copy(update={"checkpoint": "wrong.ckpt"})
+    with pytest.raises(ValueError, match="checkpoint mismatch"):
+        validate_best_trial_contract(valid, valid.part.groups[0], paths, bad)
 
 
 def test_group_req_007_s05(tmp_path: Path) -> None:
-    config, paths = _project(tmp_path)
-    from app.common.config import write_threshold
-
-    write_threshold(paths.model_config("XX"), 0.7, group=0)
-    assert (
-        load_config(tmp_path, "XX").part.groups[0].optuna_settings.threshold.value
-        == 0.7
-    )
+    config, paths = _project(tmp_path, two=True)
+    saved = {}
+    for group_id, scores in ((0, [0.1, 0.2]), (1, [0.6, 0.9])):
+        selected, (study, outcomes) = _study(config, paths, group=group_id)
+        outcome = outcomes[study.best_trial.number]
+        outcomes[study.best_trial.number] = TrialOutcome(
+            outcome.validation_scores, scores, outcome.checkpoint
+        )
+        split = split_by_source(
+            load_preparation_manifest(
+                paths.prepared_train("XX", group_id),
+                model="XX",
+                group=group_id,
+                allowed_split_ids=set(selected.range_ids),
+            ),
+            paths.prepared_train("XX", group_id),
+        )
+        saved[group_id] = persist_best_trial(
+            config=config,
+            group=selected,
+            paths=paths,
+            split=split,
+            study=study,
+            outcomes=outcomes,
+        )
+    updated = load_config(tmp_path, "XX")
+    assert saved[0].threshold != saved[1].threshold
+    for group_id in (0, 1):
+        threshold = saved[group_id].threshold
+        assert (
+            updated.part.groups[group_id].optuna_settings.threshold.value == threshold
+        )
+        assert (
+            torch.load(paths.checkpoint("XX", group_id), weights_only=False)[
+                "visual_inspection"
+            ]["threshold"]
+            == threshold
+        )
+        assert (
+            json.loads(
+                (paths.study_dir("XX", group_id) / "best_trial.json").read_text()
+            )["threshold"]
+            == threshold
+        )
 
 
 def test_group_req_008_s01(tmp_path: Path) -> None:
@@ -486,3 +572,251 @@ def test_group_req_008_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert retried == [0, 1]
     assert paths.checkpoint("XX", 0).read_bytes() == first_checkpoint
     assert paths.checkpoint("XX", 1).is_file()
+
+
+def test_group_restart_uses_tv_backbone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.common import model_adapter
+
+    observed = {}
+
+    class FakeModel:
+        @staticmethod
+        def configure_pre_processor(size):
+            observed["size"] = size
+            return object()
+
+        def __init__(self, **kwargs):
+            observed.update(kwargs)
+
+    monkeypatch.setattr(model_adapter, "TunableSupersimplenet", FakeModel)
+    model_adapter.create_supersimplenet(
+        layers=["layer2"], image_size=256, learning_rate_multiplier=1.0
+    )
+    assert observed["backbone"] == "wide_resnet50_2.tv_in1k"
+    assert observed["post_processor"] is False
+    assert observed["size"] == (256, 256)
+
+    config, paths = _project(tmp_path)
+    from app.model_evaluation import predictor as predictor_module
+    from app.model_evaluation.predictor import (
+        CheckpointPredictor,
+        load_checkpoint_metadata,
+    )
+
+    payload = json.loads(paths.model_config("XX").read_text())
+    payload["groups"][0]["optuna_settings"]["execution"]["trials"] = 1
+    paths.model_config("XX").write_text(json.dumps(payload))
+    checkpoint = paths.checkpoint("XX", 0)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_text("previous")
+
+    class FakeRunner:
+        def __init__(self, directory, _device, _group):
+            self.directory = directory
+
+        def __call__(self, _parameters, _split, trial):
+            self.directory.mkdir(parents=True, exist_ok=True)
+            trial_checkpoint = self.directory / f"trial_{trial.number}.ckpt"
+            torch.save({"state_dict": {}}, trial_checkpoint)
+            return TrialOutcome([0.2], [0.1, 0.2], trial_checkpoint)
+
+    monkeypatch.setattr(training_cli, "AnomalibTrialRunner", FakeRunner)
+    _run_cli(monkeypatch, paths, group=0, restart=True)
+    assert not checkpoint.read_bytes().startswith(b"previous")
+    best = json.loads((paths.study_dir("XX", 0) / "best_trial.json").read_text())
+    assert best["group"] == 0
+    assert best["threshold"] == pytest.approx(0.199)
+    assert load_checkpoint_metadata(checkpoint)["threshold"] == pytest.approx(0.199)
+    reloaded = load_config(tmp_path, "XX")
+    assert reloaded.part.groups[0].optuna_settings.threshold.value == pytest.approx(
+        0.199
+    )
+
+    class InferenceModel:
+        def __call__(self, tensor):
+            return SimpleNamespace(
+                pred_score=torch.tensor([0.3]),
+                anomaly_map=torch.zeros((1, tensor.shape[-2], tensor.shape[-1])),
+            )
+
+    class LoadedModel:
+        pre_processor = SimpleNamespace(transform=lambda tensor: tensor)
+        model = InferenceModel()
+
+        def load_state_dict(self, state):
+            assert state == {}
+
+        def to(self, _device):
+            return self
+
+        def eval(self):
+            return self
+
+    monkeypatch.setattr(
+        predictor_module, "create_supersimplenet", lambda **_kw: LoadedModel()
+    )
+    prediction = CheckpointPredictor(
+        checkpoint,
+        layers=best["parameters"]["feature_layers"],
+        image_size=best["parameters"]["image_size"],
+        learning_rate_multiplier=best["parameters"]["learning_rate_multiplier"],
+        device="cpu",
+    )(np.zeros((8, 8, 3), dtype=np.uint8))
+    assert prediction.score == pytest.approx(0.3)
+    assert prediction.anomaly_map.shape == (8, 8)
+
+
+def test_group_restart_replaces_only_selected_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from group_evaluation_helpers import FakePredictor
+    from group_evaluation_helpers import project as evaluation_project
+
+    from app.common.result_index import read_current
+    from app.model_evaluation import cli as evaluation_cli
+    from app.model_evaluation.predictor import load_checkpoint_metadata
+
+    config, paths = evaluation_project(tmp_path, two=True)
+    payload = json.loads(paths.model_config("XX").read_text())
+    payload["groups"][1]["heatmap_range"] = {"min": 0.1, "max": 0.9}
+    payload["groups"][1]["optuna_settings"]["execution"]["trials"] = 1
+    paths.model_config("XX").write_text(json.dumps(payload))
+    config = load_config(tmp_path, "XX")
+    prepare_training(config, paths, aligner=_aligned)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "app.common.cli.select_device",
+        lambda: DeviceSelection("cpu", "CPU", "test"),
+    )
+    monkeypatch.setattr(
+        evaluation_cli,
+        "CheckpointPredictor",
+        lambda *_args, **_kwargs: FakePredictor(score=0.3),
+    )
+    evaluation_cli._test_command(model="XX", group=None)
+    before_results = read_current(paths, "XX", allowed_group_ids={0, 1})
+    group_zero_result = paths.results("XX") / before_results[0] / "sample.png.json"
+    previous_group_zero_result = group_zero_result.read_bytes()
+    old_group_one_result = json.loads(
+        (paths.results("XX") / before_results[1] / "sample.png.json").read_text()
+    )
+    assert old_group_one_result["threshold"] == pytest.approx(0.4)
+    assert old_group_one_result["overall_status"] == "normal"
+
+    group_zero_checkpoint = paths.checkpoint("XX", 0).read_bytes()
+    for group_id in (0, 1):
+        history = paths.study_dir("XX", group_id) / "history.txt"
+        history.parent.mkdir(parents=True, exist_ok=True)
+        history.write_text(f"history {group_id}")
+
+    class FakeRunner:
+        def __init__(self, directory, _device, _group):
+            self.directory = directory
+
+        def __call__(self, _parameters, _split, trial):
+            self.directory.mkdir(parents=True, exist_ok=True)
+            trial_checkpoint = self.directory / f"trial_{trial.number}.ckpt"
+            torch.save({"state_dict": {}}, trial_checkpoint)
+            return TrialOutcome([0.2], [0.1, 0.2], trial_checkpoint)
+
+    monkeypatch.setattr(training_cli, "AnomalibTrialRunner", FakeRunner)
+    _run_cli(monkeypatch, paths, group=1, restart=True)
+    assert paths.checkpoint("XX", 0).read_bytes() == group_zero_checkpoint
+    assert (paths.study_dir("XX", 0) / "history.txt").read_text() == "history 0"
+    assert not (paths.study_dir("XX", 1) / "history.txt").exists()
+    assert (paths.study_dir("XX", 1) / "study.db").is_file()
+    assert load_checkpoint_metadata(paths.checkpoint("XX", 1))[
+        "threshold"
+    ] == pytest.approx(0.199)
+
+    reloaded = load_config(tmp_path, "XX")
+    selected = reloaded.part.select_groups(1)[0]
+    assert selected.optuna_settings.threshold.value == pytest.approx(0.199)
+    assert selected.heatmap_range is not None
+    assert selected.heatmap_range.model_dump() == {"min": 0.1, "max": 0.9}
+    assert reloaded.part.select_groups(0)[0].optuna_settings.threshold.value == 0.4
+
+    evaluation_cli._test_command(model="XX", group=1)
+    after_results = read_current(paths, "XX", allowed_group_ids={0, 1})
+    assert after_results[0] == before_results[0]
+    assert after_results[1] != before_results[1]
+    assert group_zero_result.read_bytes() == previous_group_zero_result
+    new_group_one_result = json.loads(
+        (paths.results("XX") / after_results[1] / "sample.png.json").read_text()
+    )
+    assert new_group_one_result["threshold"] == pytest.approx(0.199)
+    assert new_group_one_result["heatmap_range"] == {"min": 0.1, "max": 0.9}
+    assert new_group_one_result["overall_status"] == "anomaly"
+
+
+def test_nreq_004_s01(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, paths = _project(tmp_path)
+    show_conditions = training_cli.show_trial_conditions
+    _stub_search(monkeypatch, paths)
+    _run_cli(monkeypatch, paths, group=0)
+    assert "バックボーン=wide_resnet50_2.tv_in1k" in capsys.readouterr().err
+    show_conditions("試行 1/3 開始条件", TrialParameters(1.0, 4, 2, ["layer2"], 256))
+    rendered = capsys.readouterr().err
+    for value in (
+        "試行 1/3",
+        "学習率倍率",
+        "バッチサイズ",
+        "エポック数",
+        "特徴層",
+        "前処理画像サイズ",
+    ):
+        assert value in rendered
+
+
+def test_nreq_004_s02(capsys: pytest.CaptureFixture[str]) -> None:
+    for state, value, label in (
+        (optuna.trial.TrialState.COMPLETE, 0.2, "完了"),
+        (optuna.trial.TrialState.PRUNED, None, "枝刈り"),
+        (optuna.trial.TrialState.FAIL, None, "失敗"),
+    ):
+        trial = optuna.create_trial(state=state, value=value, params={})
+        training_cli.show_trial_outcome(trial)
+        message = capsys.readouterr().err
+        assert label in message
+        assert ("暫定探索指標=0.2" in message) == (
+            state == optuna.trial.TrialState.COMPLETE
+        )
+
+
+def test_nreq_004_s03(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected, (study, _outcomes) = _study(config, paths, trials=1)
+    assert len(study.trials) == 1
+    selected.optuna_settings.execution.trials = 3
+    resumed = create_study(config, selected, paths.study_dir("XX", 0) / "study.db")
+    manifest = load_preparation_manifest(
+        paths.prepared_train("XX", 0),
+        model="XX",
+        group=0,
+        allowed_split_ids={0},
+        fingerprint=preparation_fingerprint(config, group=selected),
+    )
+    split = split_by_source(manifest, paths.prepared_train("XX", 0))
+    shown = []
+
+    def runner(parameters, split, trial):
+        del parameters, split
+        checkpoint = paths.study_dir("XX", 0) / f"resume_{trial.number}.ckpt"
+        torch.save({"state_dict": {}}, checkpoint)
+        return TrialOutcome([0.2], [0.1], checkpoint)
+
+    run_search(
+        selected,
+        split,
+        resumed,
+        runner,
+        on_trial_start=lambda number, _parameters: shown.append(number),
+    )
+    assert shown == [1, 2]

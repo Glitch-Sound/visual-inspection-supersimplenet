@@ -270,6 +270,7 @@ def prepare_testing(
                         alignment=AlignmentResult(
                             status="undetermined",
                             reason=error.reason,
+                            recapture_required=True,
                             matches=error.matches,
                             inlier_ratio=error.inlier_ratio,
                         ),

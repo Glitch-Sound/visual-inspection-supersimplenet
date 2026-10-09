@@ -138,6 +138,7 @@ class RunMetadata(ContractModel):
 class AlignmentResult(ContractModel):
     status: Literal["aligned", "failed", "undetermined"]
     reason: str | None = None
+    recapture_required: bool = False
     matches: int | None = None
     inlier_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
 

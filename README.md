@@ -24,6 +24,7 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | 元画像 | 学習または検査に入力する、分割前の画像 |
 | 分割画像 | 元画像を位置合わせし、設定範囲で切り出した画像 |
 | 準備manifest | 元画像と分割画像の対応、準備条件の指紋を記録するJSON |
+| 再撮影要否 / `recapture_required` | 位置合わせ結果に記録する、再撮影が原則必要な状態。試験準備結果から検査結果にも引き継ぐ |
 | 準備指紋 | 分割画像を作る設定のハッシュ。学習・検査開始時に準備結果との一致を確認する |
 | checkpoint | グループの学習済みモデルと型番・グループ・暫定閾値のメタデータ |
 | 異常スコア | SuperSimpleNetの`pred_score`。校正済み確率ではない |
@@ -236,6 +237,9 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| align-inspection-progress-and-scenario-tests | AC-001 | 未検証 | タスク4.1: 対象OSの実端末・非端末で全・単独グループ検査の元画像進捗、途中失敗、標準出力JSONを確認する。 |
+| align-inspection-progress-and-scenario-tests | AC-002 | 未検証 | タスク4.2: 対象OSの実画像と実GPU/CPUで準備、判定画像、色尺度、CLI表示を確認する。 |
+| align-inspection-progress-and-scenario-tests | AC-003 | 未検証 | タスク4.3: 実重みで指定グループを再学習し、checkpointによる検査と他グループ保持を確認する。 |
 | group-scoped-inspection-models | AC-007 | 未検証 | タスク6.7: Ubuntu 24.04 LTS・Windows 11の対象実機でCPUと利用可能なGPUを使い、全件・単独グループの5 CLIと成果物読戻しを確認する。 |
 | group-scoped-inspection-models | AC-008 | 未検証 | タスク6.8: 両OSで同一型番・別型番の同時起動、終了コード3の拒否、中断後の復旧を確認する。 |
 | organize-app-by-capability | AC-002 | 未検証 | タスク4.3: Ubuntu 24.04 LTS・Windows 11 の実機で5 CLIの名前・引数・終了コード・出力を確認する。 |
@@ -267,7 +271,8 @@ npx --no-install openspec update
 | restore-tv-backbone-and-improve-output | AC-004 | 未検証 | タスク5.4: 両OSの端末・非端末で試行条件表、終了状態、再開時の件数、標準出力JSONと終了コードを確認する。 |
 
 `show-test-progress-and-update-backbone` のAC-003にある`racm_in1k`確認は当時の未検証事項であり、現在の運用には適用しない。<br />
-現在のバックボーンと移行確認は`restore-tv-backbone-and-improve-output`で扱う。
+現在の学習は`wide_resnet50_2.tv_in1k`とグループ別の新形式設定から開始する。<br />
+運用開始前のため旧形式成果物の移行は対象外とし、上表の旧バックボーン・旧成果物に関する項目は当時の延期記録として残す。
 
 `comparable-heatmap-scale` の実機確認時は、[アーカイブ済みchangeの検証記録](openspec/changes/archive/2026-10-08-comparable-heatmap-scale/verification.md)にモデル確認方法、使用範囲、結果画像・JSON、実行コマンド、環境、日付、制約を追記する。<br />
 AC-001〜AC-004 は未検証であり、自動試験の成功やアーカイブは運用開始の承認を意味しない。

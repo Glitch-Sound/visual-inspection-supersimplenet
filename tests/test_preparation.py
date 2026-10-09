@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import typer
 from conftest import build_project, write_test_image
 
 from app.common.config import load_config, preparation_fingerprint
@@ -202,3 +203,165 @@ def test_group_req_025_s02(tmp_path: Path) -> None:
         split.split_id for source in manifest.sources for split in source.splits
     } == {0, 1}
     assert manifest.preparation_fingerprint == preparation_fingerprint(config)
+
+
+def test_req_003_s01(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path, blacklist=[{"image": "a.png", "id": [0]}])
+    _train_images(paths)
+    write_test_image(paths.original_test("XX") / "a.png", size=32)
+    manifest = prepare_testing(config, paths, aligner=aligned)
+    assert [source.source_image for source in manifest.sources] == ["a.png"]
+    assert [split.image for split in manifest.sources[0].splits] == ["a_00.png"]
+    assert (paths.prepared_test("XX") / "a_00.png").is_file()
+
+
+def test_req_003_s02(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from app.image_preparation import cli as preparation_cli
+
+    config, paths = build_project(tmp_path)
+    _train_images(paths)
+    write_test_image(paths.original_test("XX") / "sample.png", size=32)
+
+    def fail(_image, _reference, _settings):
+        raise AlignmentError("too few matches")
+
+    original = prepare_testing
+    monkeypatch.setattr(
+        preparation_cli,
+        "prepare_testing",
+        lambda config, paths, **kwargs: original(config, paths, aligner=fail, **kwargs),
+    )
+    monkeypatch.chdir(tmp_path)
+    capsys.readouterr()
+    preparation_cli._test_pre_command(model="XX")
+    captured = capsys.readouterr()
+    assert "recapture is required" in captured.err
+    assert json.loads(captured.out)["exit_code"] == 0
+    saved = json.loads((paths.prepared_test("XX") / "manifest.json").read_text())
+    source = saved["sources"][0]
+    assert source["alignment"]["recapture_required"] is True
+    assert source["source_image"] == "sample.png"
+    assert source["alignment"]["status"] == "undetermined"
+    assert source["alignment"]["reason"] == "too few matches"
+    assert source["splits"] == []
+    assert not (paths.prepared_test("XX") / "sample_00.png").exists()
+
+
+def test_req_003_s03(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path, ranges=[{"id": 0, "x": 30, "y": 0}])
+    _train_images(paths)
+    write_test_image(paths.original_test("XX") / "sample.png", size=32)
+    with pytest.raises(PreparationError, match="sample.png.*0"):
+        prepare_testing(config, paths, aligner=aligned)
+    assert not paths.prepared_test("XX").exists()
+
+
+def test_req_003_s04(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    _train_images(paths)
+    write_test_image(paths.original_test("XX") / "sample.png", size=32)
+    prepare_testing(config, paths, aligner=aligned)
+    prepared = paths.prepared_test("XX")
+    before = {path.name: path.read_bytes() for path in prepared.iterdir()}
+    (paths.original_test("XX") / "sample.png").write_bytes(b"bad image")
+    with pytest.raises(ImageReadError, match="sample.png"):
+        prepare_testing(config, paths, aligner=aligned)
+    assert {path.name: path.read_bytes() for path in prepared.iterdir()} == before
+
+
+@pytest.mark.parametrize("command", ["train-pre", "test-pre"])
+def test_req_017_s01(
+    tmp_path: Path,
+    command: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.image_preparation import cli as preparation_cli
+    from app.image_preparation import preparation
+
+    config, paths = build_project(tmp_path)
+    _train_images(paths)
+    write_test_image(paths.original_test("XX") / "sample.png", size=32)
+    write_test_image(paths.original_test("XX") / "second.png", size=32)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        preparation_cli,
+        "prepare_training",
+        lambda config, paths, **kwargs: preparation.prepare_training(
+            config, paths, aligner=aligned, **kwargs
+        ),
+    )
+    monkeypatch.setattr(
+        preparation_cli,
+        "prepare_testing",
+        lambda config, paths, **kwargs: preparation.prepare_testing(
+            config, paths, aligner=aligned, **kwargs
+        ),
+    )
+    capsys.readouterr()
+    if command == "train-pre":
+        preparation_cli._train_pre_command(model="XX", group=None)
+        total = 3
+        summary = "学習準備完了"
+    else:
+        preparation_cli._test_pre_command(model="XX")
+        total = 2
+        summary = "試験準備完了"
+    captured = capsys.readouterr()
+    stderr = captured.err
+    assert f"準備進捗 0/{total}" in stderr
+    assert f"準備進捗 1/{total}" in stderr
+    assert f"準備進捗 {total}/{total}" in stderr
+    assert summary in stderr
+    assert json.loads(captured.out)["exit_code"] == 0
+
+
+@pytest.mark.parametrize("command", ["train-pre", "test-pre"])
+def test_req_017_s02(
+    tmp_path: Path,
+    command: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.image_preparation import cli as preparation_cli
+    from app.image_preparation import preparation
+
+    config, paths = build_project(tmp_path)
+    _train_images(paths)
+    if command == "train-pre":
+        (paths.original_train("XX") / "b.png").write_bytes(b"bad image")
+    else:
+        write_test_image(paths.original_test("XX") / "a.png", size=32)
+        (paths.original_test("XX") / "b.png").write_bytes(b"bad image")
+    total = 3 if command == "train-pre" else 2
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        preparation_cli,
+        "prepare_training",
+        lambda config, paths, **kwargs: preparation.prepare_training(
+            config, paths, aligner=aligned, **kwargs
+        ),
+    )
+    monkeypatch.setattr(
+        preparation_cli,
+        "prepare_testing",
+        lambda config, paths, **kwargs: preparation.prepare_testing(
+            config, paths, aligner=aligned, **kwargs
+        ),
+    )
+    capsys.readouterr()
+    with pytest.raises(typer.Exit) as error:
+        if command == "train-pre":
+            preparation_cli._train_pre_command(model="XX", group=None)
+        else:
+            preparation_cli._test_pre_command(model="XX")
+    captured = capsys.readouterr()
+    stderr = captured.err
+    assert error.value.exit_code == 3
+    assert f"準備進捗 1/{total}" in stderr
+    assert f"準備進捗 {total}/{total}" not in stderr
+    assert "b.png" in stderr
+    assert "処理失敗" in stderr
+    assert json.loads(captured.out)["exit_code"] == 3
