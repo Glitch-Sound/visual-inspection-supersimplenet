@@ -9,7 +9,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.common.atomic import recover_directory_swap
-from app.common.config import AppConfig, CropRange, validate_blacklist_images
+from app.common.config import (
+    AppConfig,
+    CropRange,
+    preparation_fingerprint,
+    validate_blacklist_images,
+)
 from app.common.contracts import (
     AlignmentResult,
     PreparationManifest,
@@ -101,17 +106,21 @@ def create_check_image(config: AppConfig, paths: ProjectPaths) -> Path:
         scaled_crop_range(reference, crop, config.image_size, config.image_resize)
         for crop in config.part.ranges
     ]
-    output = draw_ranges(reference, ranges, config.image_size)
-    target = paths.check_image(config.model)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".tmp.png")
-    try:
-        write_image(temporary, output)
-        temporary.replace(target)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-    return target
+    selected = [(None, ranges)] + [
+        (group.id, [item for item in ranges if item.id in group.range_ids])
+        for group in config.part.select_groups()
+    ]
+    target_dir = paths.check_image(config.model).parent
+
+    def populate(stage: Path) -> None:
+        for group_id, selected_ranges in selected:
+            name = "all.png" if group_id is None else f"group_{group_id}.png"
+            write_image(
+                stage / name, draw_ranges(reference, selected_ranges, config.image_size)
+            )
+
+    _atomic_replace_directory(target_dir, populate)
+    return paths.check_image(config.model)
 
 
 def prepare_training(
@@ -120,7 +129,8 @@ def prepare_training(
     *,
     aligner: Callable[..., AlignedImage] = align_orb,
     on_progress: ProgressCallback | None = None,
-) -> PreparationManifest:
+    group: int | None = None,
+) -> dict[int, PreparationManifest]:
     source_dir = paths.original_train(config.model)
     images = list_images(source_dir)
     if on_progress is not None:
@@ -134,86 +144,99 @@ def prepare_training(
         for entry in config.part.blacklist
         for split_id in entry.id
     }
-    manifest: PreparationManifest | None = None
+    groups = config.part.select_groups(group)
+    manifests: dict[int, PreparationManifest] = {}
 
     def populate(stage: Path) -> None:
-        nonlocal manifest
-        sources: list[PreparedSource] = []
-        excluded: list[dict[str, object]] = []
-        for source_path in images:
+        sources: dict[int, list[PreparedSource]] = {item.id: [] for item in groups}
+        excluded: dict[int, list[dict[str, object]]] = {item.id: [] for item in groups}
+        targets = {
+            item.id: stage if group is not None else stage / f"group_{item.id}"
+            for item in groups
+        }
+        for target in targets.values():
+            target.mkdir(parents=True, exist_ok=True)
+        for index, source_path in enumerate(images, start=1):
             source = resize_image(read_image(source_path), config.image_resize)
             try:
                 aligned = aligner(source, reference, config.part.alignment)
             except AlignmentError as error:
-                sources.append(
+                for item in groups:
+                    sources[item.id].append(
+                        PreparedSource(
+                            source_image=source_path.name,
+                            alignment=AlignmentResult(
+                                status="failed",
+                                reason=error.reason,
+                                matches=error.matches,
+                                inlier_ratio=error.inlier_ratio,
+                            ),
+                        )
+                    )
+                    excluded[item.id].append(
+                        {"source_image": source_path.name, "reason": error.reason}
+                    )
+                if on_progress is not None:
+                    on_progress(index, len(images))
+                continue
+            for item in groups:
+                splits: list[PreparedSplit] = []
+                for crop in config.part.ranges_for(item):
+                    if (source_path.name, crop.id) in blacklist:
+                        excluded[item.id].append(
+                            {
+                                "source_image": source_path.name,
+                                "split_id": crop.id,
+                                "reason": "blacklist",
+                            }
+                        )
+                        continue
+                    split = _prepared_crop(
+                        aligned.image,
+                        crop,
+                        config.image_size,
+                        config.image_resize,
+                        source_image=source_path.name,
+                    )
+                    filename = f"{source_path.stem}_{crop.id:02d}{source_path.suffix}"
+                    write_image(targets[item.id] / filename, split)
+                    splits.append(
+                        PreparedSplit(
+                            source_image=source_path.name,
+                            split_id=crop.id,
+                            image=filename,
+                        )
+                    )
+                sources[item.id].append(
                     PreparedSource(
                         source_image=source_path.name,
                         alignment=AlignmentResult(
-                            status="failed",
-                            reason=error.reason,
-                            matches=error.matches,
-                            inlier_ratio=error.inlier_ratio,
+                            status="aligned",
+                            matches=aligned.matches,
+                            inlier_ratio=aligned.inlier_ratio,
                         ),
+                        splits=splits,
                     )
                 )
-                excluded.append(
-                    {"source_image": source_path.name, "reason": error.reason}
-                )
-                if on_progress is not None:
-                    on_progress(len(sources), len(images))
-                continue
-            splits: list[PreparedSplit] = []
-            for crop in config.part.ranges:
-                if (source_path.name, crop.id) in blacklist:
-                    excluded.append(
-                        {
-                            "source_image": source_path.name,
-                            "split_id": crop.id,
-                            "reason": "blacklist",
-                        }
-                    )
-                    continue
-                split = _prepared_crop(
-                    aligned.image,
-                    crop,
-                    config.image_size,
-                    config.image_resize,
-                    source_image=source_path.name,
-                )
-                filename = f"{source_path.stem}_{crop.id:02d}{source_path.suffix}"
-                write_image(stage / filename, split)
-                splits.append(
-                    PreparedSplit(
-                        source_image=source_path.name,
-                        split_id=crop.id,
-                        image=filename,
-                    )
-                )
-            sources.append(
-                PreparedSource(
-                    source_image=source_path.name,
-                    alignment=AlignmentResult(
-                        status="aligned",
-                        matches=aligned.matches,
-                        inlier_ratio=aligned.inlier_ratio,
-                    ),
-                    splits=splits,
-                )
-            )
             if on_progress is not None:
-                on_progress(len(sources), len(images))
-        manifest = PreparationManifest(
-            model=config.model,
-            created_at=datetime.now(UTC),
-            sources=sources,
-            excluded=excluded,
-        )
-        manifest.write_json(stage / "manifest.json")
+                on_progress(index, len(images))
+        for item in groups:
+            manifest = PreparationManifest(
+                model=config.model,
+                group=item.id,
+                range_ids=item.range_ids,
+                preparation_fingerprint=preparation_fingerprint(config, group=item),
+                created_at=datetime.now(UTC),
+                sources=sources[item.id],
+                excluded=excluded[item.id],
+            )
+            manifest.write_json(targets[item.id] / "manifest.json")
+            manifests[item.id] = manifest
 
-    _atomic_replace_directory(paths.prepared_train(config.model), populate)
-    if manifest is None:  # pragma: no cover - defensive invariant
+    _atomic_replace_directory(paths.prepared_train(config.model, group), populate)
+    if not manifests:
         raise RuntimeError("training manifest was not created")
-    return manifest
+    return manifests
 
 
 def prepare_testing(
@@ -288,6 +311,7 @@ def prepare_testing(
                 on_progress(len(sources), len(images))
         manifest = PreparationManifest(
             model=config.model,
+            preparation_fingerprint=preparation_fingerprint(config),
             created_at=datetime.now(UTC),
             sources=sources,
         )

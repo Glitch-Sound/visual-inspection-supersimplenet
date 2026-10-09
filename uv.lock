@@ -1859,6 +1859,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "anomalib" },
+    { name = "filelock" },
     { name = "loguru" },
     { name = "numpy" },
     { name = "opencv-python-headless" },
@@ -1885,6 +1886,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anomalib", specifier = "==2.6.2" },
+    { name = "filelock", specifier = ">=3.32.2" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "opencv-python-headless", specifier = ">=4.12.0.88" },

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import math
-import shutil
-import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,8 +11,7 @@ from typing import cast
 import cv2
 import numpy as np
 
-from app.common.atomic import recover_directory_swap
-from app.common.config import AppConfig
+from app.common.config import AppConfig, GroupConfig, preparation_fingerprint
 from app.common.contracts import (
     BestTrialResult,
     HeatmapRange,
@@ -38,19 +35,21 @@ def _ignore_message(_message: str) -> None:
 
 
 def validate_score_contract(
-    config: AppConfig, checkpoint_metadata: dict[str, object]
+    config: AppConfig, group: GroupConfig, checkpoint_metadata: dict[str, object]
 ) -> float:
-    threshold = config.part.optuna_settings.threshold.value
+    threshold = group.optuna_settings.threshold.value
     if threshold is None:
         raise ValueError(
             "optuna_settings.threshold.value is required before evaluation"
         )
-    expected_source = config.part.score.source
+    expected_source = group.score.source
     if checkpoint_metadata.get("model") != config.model:
         raise ValueError(
             f"checkpoint model mismatch: expected {config.model}, "
             f"got {checkpoint_metadata.get('model')}"
         )
+    if checkpoint_metadata.get("group") != group.id:
+        raise ValueError(f"checkpoint group mismatch: expected {group.id}")
     if checkpoint_metadata.get("score_source") != expected_source:
         raise ValueError("checkpoint score_source does not match model config")
     if checkpoint_metadata.get("anomalib_post_processor") is not False:
@@ -65,27 +64,31 @@ def validate_score_contract(
     return threshold
 
 
-def effective_threshold(config: AppConfig, provisional_threshold: float) -> float:
-    override = config.part.inspection_threshold
+def effective_threshold(group: GroupConfig, provisional_threshold: float) -> float:
+    override = group.inspection_threshold
     return provisional_threshold if override is None else override
 
 
-def require_heatmap_range(config: AppConfig) -> HeatmapRange:
-    heatmap_range = config.part.heatmap_range
+def require_heatmap_range(group: GroupConfig) -> HeatmapRange:
+    heatmap_range = group.heatmap_range
     if heatmap_range is None:
         raise ValueError("heatmap_range is required for evaluation")
     return heatmap_range
 
 
 def validate_best_trial_contract(
-    config: AppConfig, paths: ProjectPaths, best: BestTrialResult
+    config: AppConfig, group: GroupConfig, paths: ProjectPaths, best: BestTrialResult
 ) -> None:
-    expected_checkpoint = str(paths.checkpoint(config.model).relative_to(paths.root))
-    threshold = config.part.optuna_settings.threshold.value
+    expected_checkpoint = str(
+        paths.checkpoint(config.model, group.id).relative_to(paths.root)
+    )
+    threshold = group.optuna_settings.threshold.value
     if best.model != config.model:
         raise ValueError(
             f"best_trial model mismatch: expected {config.model}, got {best.model}"
         )
+    if best.group != group.id or set(best.range_ids) != set(group.range_ids):
+        raise ValueError(f"best_trial group or range_ids mismatch: expected {group.id}")
     if best.checkpoint != expected_checkpoint:
         raise ValueError(
             "best_trial checkpoint mismatch: "
@@ -94,7 +97,7 @@ def validate_best_trial_contract(
     if threshold is None or not np.isclose(best.threshold, threshold):
         raise ValueError("best_trial threshold does not match model config")
     parameters = best.parameters
-    search = config.part.optuna_settings.search
+    search = group.optuna_settings.search
     if not (
         search.learning_rate_multiplier.low
         <= parameters.learning_rate_multiplier
@@ -132,14 +135,13 @@ def _heatmap(
 def evaluate_split(
     *,
     image_path: Path,
+    image: ImageArray,
+    prediction: Prediction,
     split_id: int,
     threshold: float,
     heatmap_range: HeatmapRange,
-    predictor: Predictor,
     result_path: Path,
 ) -> SplitResult:
-    image = read_image(image_path)
-    prediction = predictor(image)
     status = (
         ResultStatus.ANOMALY if prediction.score >= threshold else ResultStatus.NORMAL
     )
@@ -165,9 +167,11 @@ def evaluate_split(
 
 def evaluate_model(
     config: AppConfig,
+    group: GroupConfig,
     paths: ProjectPaths,
     *,
     predictor: Predictor,
+    output_dir: Path,
     finish_runtime: Callable[[], RunMetadata],
     record_warning: Callable[[str], None] = _ignore_message,
     record_error: Callable[[str], None] = _ignore_message,
@@ -175,15 +179,15 @@ def evaluate_model(
     on_progress: Callable[[int, int], None] | None = None,
     checkpoint_metadata: dict[str, object] | None = None,
 ) -> list[InspectionResult]:
-    heatmap_range = require_heatmap_range(config)
-    checkpoint = paths.checkpoint(config.model)
+    heatmap_range = require_heatmap_range(group)
+    checkpoint = paths.checkpoint(config.model, group.id)
     metadata = (
         load_checkpoint_metadata(checkpoint)
         if checkpoint_metadata is None
         else checkpoint_metadata
     )
-    provisional_threshold = validate_score_contract(config, metadata)
-    threshold = effective_threshold(config, provisional_threshold)
+    provisional_threshold = validate_score_contract(config, group, metadata)
+    threshold = effective_threshold(group, provisional_threshold)
     if on_threshold_selected is not None:
         on_threshold_selected(threshold)
     prepared_dir = paths.prepared_test(config.model)
@@ -191,94 +195,84 @@ def evaluate_model(
         prepared_dir,
         model=config.model,
         allowed_split_ids={item.id for item in config.part.ranges},
+        fingerprint=preparation_fingerprint(config),
     )
     total_sources = len(manifest.sources)
     if on_progress is not None:
         on_progress(0, total_sources)
-    target = paths.results(config.model)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    backup = recover_directory_swap(target)
-    stage = Path(tempfile.mkdtemp(prefix=f".{target.name}-", dir=target.parent))
+    output_dir.mkdir(parents=True, exist_ok=False)
     pending_results: list[dict[str, object]] = []
-    required_ids = {item.id for item in config.part.ranges}
-    try:
-        for processed, source in enumerate(manifest.sources, start=1):
-            split_results: list[SplitResult] = []
-            errors: list[str] = []
-            warnings: list[str] = []
-            if source.alignment.status != "aligned":
-                warning = source.alignment.reason or "alignment_failed"
-                warnings.append(warning)
-                record_warning(f"{source.source_image}: {warning}")
-            for split in source.splits:
-                image_path = prepared_dir / split.image
-                result_name = f"{split.image}_result.png"
-                try:
-                    split_results.append(
-                        evaluate_split(
-                            image_path=image_path,
-                            split_id=split.split_id,
-                            threshold=threshold,
-                            heatmap_range=heatmap_range,
-                            predictor=predictor,
-                            result_path=stage / result_name,
-                        )
+    required_ids = set(group.range_ids)
+    for processed, source in enumerate(manifest.sources, start=1):
+        split_results: list[SplitResult] = []
+        errors: list[str] = []
+        warnings: list[str] = []
+        if source.alignment.status != "aligned":
+            warning = source.alignment.reason or "alignment_failed"
+            warnings.append(warning)
+            record_warning(f"group {group.id} {source.source_image}: {warning}")
+        for split in source.splits:
+            if split.split_id not in required_ids:
+                continue
+            image_path = prepared_dir / split.image
+            result_name = f"{split.image}_result.png"
+            try:
+                image = read_image(image_path)
+                prediction = predictor(image)
+            except Exception as error:
+                message = f"split {split.split_id}: {error}"
+                errors.append(message)
+                record_error(f"group {group.id} {source.source_image}: {message}")
+                split_results.append(
+                    SplitResult(
+                        split_id=split.split_id,
+                        image=split.image,
+                        score=None,
+                        status=ResultStatus.ERROR,
+                        error=message,
                     )
-                except Exception as error:  # keep remaining splits observable
-                    message = f"split {split.split_id}: {error}"
-                    errors.append(message)
-                    record_error(f"{source.source_image}: {message}")
-                    split_results.append(
-                        SplitResult(
-                            split_id=split.split_id,
-                            image=split.image,
-                            score=None,
-                            status=ResultStatus.ERROR,
-                            error=message,
-                        )
+                )
+            else:
+                split_results.append(
+                    evaluate_split(
+                        image_path=image_path,
+                        image=image,
+                        prediction=prediction,
+                        split_id=split.split_id,
+                        threshold=threshold,
+                        heatmap_range=heatmap_range,
+                        result_path=output_dir / result_name,
                     )
-            overall, next_action = aggregate_status(
-                split_results, required_split_ids=required_ids
-            )
-            pending_results.append(
-                {
-                    "source_image": source.source_image,
-                    "model": config.model,
-                    "checkpoint": str(checkpoint.relative_to(paths.root)),
-                    "score_contract": ScoreContract(),
-                    "threshold": threshold,
-                    "heatmap_range": heatmap_range,
-                    "splits": split_results,
-                    "overall_status": overall,
-                    "processed_at": datetime.now(UTC),
-                    "alignment": source.alignment,
-                    "errors": errors,
-                    "warnings": warnings,
-                    "next_action": next_action,
-                }
-            )
-            if on_progress is not None:
-                on_progress(processed, total_sources)
-        runtime = finish_runtime()
-        results = [
-            InspectionResult.model_validate({**values, "runtime": runtime})
-            for values in pending_results
-        ]
-        for result in results:
-            write_inspection_result(result, stage / f"{result.source_image}.json")
-        if target.exists():
-            target.replace(backup)
-        stage.replace(target)
-        if backup.exists():
-            shutil.rmtree(backup)
-    except Exception:
-        if stage.exists():
-            shutil.rmtree(stage)
-        if backup.exists() and not target.exists():
-            backup.replace(target)
-        raise
+                )
+        overall, next_action = aggregate_status(
+            split_results, required_split_ids=required_ids
+        )
+        pending_results.append(
+            {
+                "source_image": source.source_image,
+                "model": config.model,
+                "group": group.id,
+                "range_ids": group.range_ids,
+                "checkpoint": str(checkpoint.relative_to(paths.root)),
+                "score_contract": ScoreContract(),
+                "threshold": threshold,
+                "heatmap_range": heatmap_range,
+                "splits": split_results,
+                "overall_status": overall,
+                "processed_at": datetime.now(UTC),
+                "alignment": source.alignment,
+                "errors": errors,
+                "warnings": warnings,
+                "next_action": next_action,
+            }
+        )
+        if on_progress is not None:
+            on_progress(processed, total_sources)
+    runtime = finish_runtime()
+    results = [
+        InspectionResult.model_validate({**values, "runtime": runtime})
+        for values in pending_results
+    ]
+    for result in results:
+        write_inspection_result(result, output_dir / f"{result.source_image}.json")
     return results
-
-
-def restart_evaluation(paths: ProjectPaths, model: str) -> None:
-    paths.remove_model_artifact(paths.results(model), expected=paths.results(model))

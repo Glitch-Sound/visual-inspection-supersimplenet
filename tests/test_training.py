@@ -1,46 +1,32 @@
 from __future__ import annotations
 
 import json
-import pickle
-import shutil
-from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import optuna
 import pytest
 import torch
+import typer
 from conftest import build_project, write_test_image
 
-from app.common.artifact_transaction import (
-    _transaction_path,
-    recover_artifact_transaction,
-)
+from app.common.config import load_config, preparation_fingerprint
 from app.common.contracts import (
-    AlignmentResult,
-    BestTrialResult,
-    PreparationManifest,
-    PreparedSource,
-    PreparedSplit,
-    ScoreContract,
-    TrialParametersContract,
     load_preparation_manifest,
 )
-from app.common.model_adapter import TunableSupersimplenet
-from app.common.runtime import DeviceSelection
-from app.model_training import artifacts
-from app.model_training.artifacts import persist_best_trial, restart_training
-from app.model_training.augmentation import AugmentationPipeline
-from app.model_training.cli import (
-    _train_command,
-    format_training_summary,
-    show_trial_conditions,
-    show_trial_outcome,
+from app.common.runtime import DeviceSelection, RunRecorder
+from app.image_preparation.imaging import AlignedImage
+from app.image_preparation.preparation import prepare_training
+from app.model_training import cli as training_cli
+from app.model_training.artifacts import persist_best_trial
+from app.model_training.augmentation import (
+    AnomalibTrainingAugmentation,
+    AugmentationPipeline,
 )
+from app.model_training.cli import _train_command
 from app.model_training.search import (
-    DatasetSplit,
     TrialOutcome,
     TrialParameters,
     create_study,
@@ -49,1074 +35,454 @@ from app.model_training.search import (
 )
 from app.model_training.trainer import AnomalibTrialRunner
 
-TRIAL_PARAMETERS = {
-    "learning_rate_multiplier": 1.0,
-    "batch_size": 4,
-    "epochs": 200,
-    "feature_layers": ["layer2"],
-    "image_size": 256,
-}
+
+def _aligned(
+    image: np.ndarray, _reference: np.ndarray, _settings: object
+) -> AlignedImage:
+    return AlignedImage(image, 20, 0.8)
 
 
-@pytest.mark.parametrize(
-    ("mutation", "reason"),
-    [("image_mismatch", "split_id"), ("unknown_id", "not configured")],
-)
-def test_train_rejects_invalid_prepared_manifest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str, reason: str
-) -> None:
-    _config, paths = build_project(tmp_path)
-    prepared = paths.prepared_train("XX")
-    prepared.mkdir(parents=True)
-    image = "source_01.png" if mutation == "image_mismatch" else "source_02.png"
-    payload = {
-        "model": "XX",
-        "created_at": datetime.now(UTC).isoformat(),
-        "sources": [
-            {
-                "source_image": "source.png",
-                "alignment": {"status": "aligned"},
-                "splits": [
-                    {
-                        "source_image": "source.png",
-                        "split_id": 2 if mutation == "unknown_id" else 0,
-                        "image": image,
-                    }
-                ],
-            }
-        ],
-    }
-    (prepared / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
-    checkpoint = paths.checkpoint("XX")
-    checkpoint.parent.mkdir(parents=True)
-    checkpoint.write_bytes(b"old checkpoint")
+def _project(root: Path, *, two: bool = False):
+    config, paths = build_project(root)
+    if two:
+        path = paths.model_config("XX")
+        payload = json.loads(path.read_text())
+        second = json.loads(json.dumps(payload["groups"][0]))
+        second["id"] = 1
+        path.write_text(
+            json.dumps({**payload, "groups": [payload["groups"][0], second]})
+        )
+        config = load_config(root, "XX")
+    for name in ("base.png", "a.png", "b.png", "c.png"):
+        write_test_image(paths.original_train("XX") / name)
+    prepare_training(config, paths, aligner=_aligned)
+    return config, paths
+
+
+def _run_cli(monkeypatch: pytest.MonkeyPatch, paths, *, group=None, restart=False):
+    recorder = RunRecorder("train", "XX", DeviceSelection("cpu", "CPU", "test"))
     monkeypatch.setattr(
         "app.model_training.cli._run",
-        lambda _name, _model, action, **_kwargs: action(paths, None),
+        lambda _cmd, _model, action, **_kw: action(paths, recorder),
+    )
+    return _train_command(model="XX", group=group, restart=restart), recorder
+
+
+def _stub_search(
+    monkeypatch: pytest.MonkeyPatch, paths, *, fail_group: int | None = None
+) -> list[int]:
+    done: list[int] = []
+
+    class Study:
+        trials = []
+
+    monkeypatch.setattr("app.model_training.cli.create_study", lambda *_args: Study())
+    monkeypatch.setattr(
+        "app.model_training.cli.run_search",
+        lambda group, _split, study, _runner, **_kw: (study, {}),
     )
     monkeypatch.setattr(
-        "app.model_training.cli.split_by_source",
-        lambda *_args, **_kwargs: pytest.fail("training must not start"),
+        "app.model_training.cli.show_trial_conditions", lambda *_args: None
     )
 
-    with pytest.raises(ValueError, match=reason):
-        _train_command(model="XX", restart=True)
-    assert checkpoint.read_bytes() == b"old checkpoint"
+    def persist(*, config, group, paths, split, study, outcomes):
+        if group.id == fail_group:
+            raise RuntimeError("injected failure")
+        done.append(group.id)
+        checkpoint = paths.checkpoint(config.model, group.id)
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_text(f"group {group.id}")
+        return SimpleNamespace(
+            trial_number=0,
+            threshold=0.4,
+            objective=0.2,
+            parameters=SimpleNamespace(
+                learning_rate_multiplier=1,
+                batch_size=4,
+                epochs=1,
+                feature_layers=["layer2"],
+                image_size=256,
+            ),
+        )
+
+    monkeypatch.setattr("app.model_training.cli.persist_best_trial", persist)
+    return done
 
 
-@pytest.mark.parametrize("linked", ["manifest", "image", "directory"])
-def test_train_rejects_symlinked_prepared_input(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked: str
-) -> None:
-    _config, paths = build_project(tmp_path)
-    prepared = tmp_path / "data" / "04_train" / "XX"
-    real_prepared = tmp_path / "real_prepared"
-    real_prepared.mkdir(parents=True)
-    outside = tmp_path / "outside.png"
-    outside.write_bytes(b"outside unchanged")
-    payload = {
-        "model": "XX",
-        "created_at": datetime.now(UTC).isoformat(),
-        "sources": [
-            {
-                "source_image": "source.png",
-                "alignment": {"status": "aligned"},
-                "splits": [
-                    {
-                        "source_image": "source.png",
-                        "split_id": 0,
-                        "image": "source_00.png",
-                    }
-                ],
-            }
-        ],
-    }
-    (real_prepared / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
-    try:
-        if linked == "directory":
-            prepared.parent.mkdir(parents=True)
-            prepared.symlink_to(real_prepared, target_is_directory=True)
-        else:
-            prepared.mkdir(parents=True)
-            if linked == "manifest":
-                (prepared / "manifest.json").symlink_to(real_prepared / "manifest.json")
-            else:
-                (prepared / "manifest.json").write_text(
-                    json.dumps(payload), encoding="utf-8"
-                )
-                (prepared / "source_00.png").symlink_to(outside)
-    except OSError as error:
-        pytest.skip(f"symlinks unavailable: {error}")
-    checkpoint = paths.checkpoint("XX")
-    checkpoint.parent.mkdir(parents=True)
-    checkpoint.write_bytes(b"old checkpoint")
-    monkeypatch.setattr(
-        "app.model_training.cli._run",
-        lambda _name, _model, action, **_kwargs: action(paths, None),
-    )
-    monkeypatch.setattr(
-        "app.model_training.cli.split_by_source",
-        lambda *_args, **_kwargs: pytest.fail("training must not start"),
+def _study(config, paths, *, group=0, trials=1):
+    selected = config.part.select_groups(group)[0]
+    selected.optuna_settings.execution.trials = trials
+    study = create_study(config, selected, paths.study_dir("XX", group) / "study.db")
+
+    def runner(parameters, split, trial):
+        del parameters, split
+        checkpoint = paths.study_dir("XX", group) / f"trial_{trial.number}.ckpt"
+        torch.save({"state_dict": {}}, checkpoint)
+        return TrialOutcome([0.2 + trial.number / 10], [0.1, 0.2], checkpoint)
+
+    return selected, run_search(
+        selected,
+        split_by_source(
+            load_preparation_manifest(
+                paths.prepared_train("XX", group),
+                model="XX",
+                group=group,
+                allowed_split_ids=set(selected.range_ids),
+                fingerprint=preparation_fingerprint(config, group=selected),
+            ),
+            paths.prepared_train("XX", group),
+        ),
+        study,
+        runner,
     )
 
-    with pytest.raises(ValueError, match="symlink"):
-        _train_command(model="XX", restart=True)
-    assert checkpoint.read_bytes() == b"old checkpoint"
-    assert outside.read_bytes() == b"outside unchanged"
+
+def test_group_req_022_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = _project(tmp_path, two=True)
+    done = _stub_search(monkeypatch, paths)
+    _, recorder = _run_cli(monkeypatch, paths)
+    assert done == [0, 1]
+    assert recorder.groups == [0, 1]
 
 
-def test_valid_prepared_manifest_accepts_configured_split(tmp_path: Path) -> None:
-    config, paths = build_project(tmp_path)
-    prepared = paths.prepared_train("XX")
-    prepared.mkdir(parents=True)
-    manifest = PreparationManifest(
+def test_group_req_022_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = _project(tmp_path, two=True)
+    other = paths.checkpoint("XX", 0)
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_text("old")
+    done = _stub_search(monkeypatch, paths)
+    _run_cli(monkeypatch, paths, group=1)
+    assert done == [1]
+    assert other.read_text() == "old"
+
+
+def test_group_req_022_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = _project(tmp_path)
+    _stub_search(monkeypatch, paths)
+    with pytest.raises(ValueError, match="available groups"):
+        _run_cli(monkeypatch, paths, group=7)
+
+
+def test_group_req_004_s01(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    group = config.part.groups[0]
+    manifest = load_preparation_manifest(
+        paths.prepared_train("XX", 0),
         model="XX",
-        created_at=datetime.now(UTC),
-        sources=[
-            PreparedSource(
-                source_image="source.png",
-                alignment=AlignmentResult(status="aligned"),
-                splits=[
-                    PreparedSplit(
-                        source_image="source.png", split_id=0, image="source_00.png"
-                    )
-                ],
-            )
-        ],
+        group=0,
+        allowed_split_ids={0},
+        fingerprint=preparation_fingerprint(config, group=group),
     )
-    manifest.write_json(prepared / "manifest.json")
-    assert (
+    split = split_by_source(manifest, paths.prepared_train("XX", 0))
+    assert set(split.train_sources).isdisjoint(split.validation_sources)
+    assert all(
+        any(Path(source).stem + "_" in path.name for source in split.train_sources)
+        for path in split.train_images
+    )
+
+
+def test_group_req_004_s02(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    manifest = load_preparation_manifest(
+        paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
+    )
+    manifest.sources = manifest.sources[:1]
+    with pytest.raises(ValueError, match="at least 2"):
+        split_by_source(manifest, paths.prepared_train("XX", 0))
+
+
+def test_group_req_004_s03(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    prepared = paths.prepared_train("XX", 0)
+    payload = json.loads((prepared / "manifest.json").read_text())
+    payload["group"] = 4
+    (prepared / "manifest.json").write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="group mismatch"):
+        load_preparation_manifest(prepared, model="XX", group=0, allowed_split_ids={0})
+
+
+def test_group_req_004_s04(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    prepared = paths.prepared_train("XX", 0)
+    selected = config.part.groups[0]
+    config.image_size = 9
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
         load_preparation_manifest(
             prepared,
             model="XX",
-            allowed_split_ids={item.id for item in config.part.ranges},
+            group=0,
+            allowed_split_ids={0},
+            fingerprint=preparation_fingerprint(config, group=selected),
         )
-        == manifest
+
+
+def test_group_req_005_s01(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected, (study, outcomes) = _study(config, paths, trials=2)
+    assert len(study.trials) == 2
+    assert all(item.state == optuna.trial.TrialState.COMPLETE for item in study.trials)
+    assert study.best_trial.number in outcomes
+    assert selected.optuna_settings.pruner.name == "MedianPruner"
+
+
+def test_group_req_005_s02(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected = config.part.groups[0]
+    selected.optuna_settings.sampler.seed = 7
+    study = create_study(config, selected, paths.study_dir("XX", 0) / "study.db")
+    assert study.study_name == "visual-inspection-XX-group-0"
+
+
+def test_group_req_006_s01(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    settings = config.part.groups[0].augmentation.model_copy(deep=True)
+    settings.order = ["brightness", "gamma"]
+    settings.brightness.probability = 1.0
+    settings.brightness.factor_min = settings.brightness.factor_max = 0.5
+    settings.gamma.probability = 1.0
+    settings.gamma.factor_min = settings.gamma.factor_max = 2.0
+    prepared = paths.prepared_train("XX", 0)
+    before = {path.name: path.read_bytes() for path in prepared.iterdir()}
+    original = paths.original_train("XX") / "a.png"
+    original_bytes = original.read_bytes()
+    image = np.full((8, 8, 3), 0.8, dtype=np.float32)
+    tensor = torch.from_numpy(image.transpose(2, 0, 1).copy())
+
+    augmented = AnomalibTrainingAugmentation(settings).transform(tensor, {})
+    assert torch.allclose(augmented, torch.full_like(tensor, 0.16))
+    assert np.array_equal(image, np.full_like(image, 0.8))
+    assert {path.name: path.read_bytes() for path in prepared.iterdir()} == before
+    assert original.read_bytes() == original_bytes
+
+    reversed_settings = settings.model_copy(deep=True)
+    reversed_settings.order = ["gamma", "brightness"]
+    reversed_result = AugmentationPipeline(reversed_settings)(image, training=True)
+    assert np.allclose(reversed_result, 0.32)
+    settings.brightness.probability = 0.0
+    settings.gamma.probability = 0.0
+    assert np.array_equal(AugmentationPipeline(settings)(image, training=True), image)
+
+    settings.order = ["brightness"]
+    settings.brightness.probability = 1.0
+    settings.brightness.factor_min = 0.5
+    settings.brightness.factor_max = 0.8
+    first = AugmentationPipeline(settings)(image, training=True)
+    second = AugmentationPipeline(settings)(image, training=True)
+    assert np.array_equal(first, second)
+    assert np.all(first >= image * 0.5)
+    assert np.all(first <= image * 0.8)
+
+
+def test_group_req_006_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, paths = _project(tmp_path, two=True)
+    config.part.groups[1].augmentation.seed = 99
+    assert (
+        config.part.groups[0].augmentation.seed
+        != config.part.groups[1].augmentation.seed
+    )
+    assert paths.study_dir("XX", 0) != paths.study_dir("XX", 1)
+    group = config.part.groups[0]
+    prepared = paths.prepared_train("XX", 0)
+    manifest = load_preparation_manifest(
+        prepared,
+        model="XX",
+        group=0,
+        allowed_split_ids=set(group.range_ids),
+        fingerprint=preparation_fingerprint(config, group=group),
+    )
+    split = split_by_source(manifest, prepared)
+    observed: dict[str, Any] = {}
+
+    class FakeFolder:
+        def __init__(self, **kwargs):
+            observed["folder"] = kwargs
+
+    class FakeEngine:
+        def __init__(self, **_kwargs):
+            self.trainer = SimpleNamespace(
+                save_checkpoint=lambda path: Path(path).write_bytes(b"checkpoint")
+            )
+
+        def fit(self, _model, *, datamodule):
+            assert isinstance(datamodule, FakeFolder)
+
+        def predict(self, *, model, data_path, return_predictions):
+            del model
+            assert return_predictions
+            observed.setdefault("predicted", []).append(
+                [path.read_bytes() for path in Path(data_path).iterdir()]
+            )
+            return [{"pred_score": [0.2]}]
+
+    monkeypatch.setattr("anomalib.data.Folder", FakeFolder)
+    monkeypatch.setattr("anomalib.engine.Engine", FakeEngine)
+    monkeypatch.setattr(
+        "app.model_training.trainer.create_supersimplenet", lambda **_kwargs: object()
+    )
+    trial = optuna.create_study().ask()
+    runner = AnomalibTrialRunner(
+        tmp_path / "trials", DeviceSelection("cpu", "CPU", "test"), group
+    )
+    outcome = runner(TrialParameters(1.0, 4, 1, ["layer2"], 256), split, trial)
+    folder = observed["folder"]
+    assert isinstance(folder["train_augmentations"], AnomalibTrainingAugmentation)
+    assert folder["val_augmentations"] is None
+    assert folder["test_augmentations"] is None
+    assert observed["predicted"][0] == [
+        path.read_bytes() for path in split.validation_images
+    ]
+    assert outcome.validation_scores == [0.2]
+    image = np.full((8, 8, 3), 0.5, dtype=np.float32)
+    assert np.array_equal(
+        AugmentationPipeline(group.augmentation)(image, training=False), image
     )
 
 
-def test_train_cli_accepts_valid_prepared_images(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _config, paths = build_project(tmp_path)
-    prepared = paths.prepared_train("XX")
-    sources: list[PreparedSource] = []
-    for index in range(5):
-        source_name = f"source-{index}.png"
-        split_name = f"source-{index}_00.png"
-        write_test_image(prepared / split_name)
-        sources.append(
-            PreparedSource(
-                source_image=source_name,
-                alignment=AlignmentResult(status="aligned"),
-                splits=[
-                    PreparedSplit(
-                        source_image=source_name, split_id=0, image=split_name
-                    )
-                ],
-            )
-        )
-    PreparationManifest(
-        model="XX", created_at=datetime.now(UTC), sources=sources
-    ).write_json(prepared / "manifest.json")
+def test_group_req_007_s01(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected, (study, outcomes) = _study(config, paths)
+    split = split_by_source(
+        load_preparation_manifest(
+            paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
+        ),
+        paths.prepared_train("XX", 0),
+    )
+    best = persist_best_trial(
+        config=config,
+        group=selected,
+        paths=paths,
+        split=split,
+        study=study,
+        outcomes=outcomes,
+    )
+    assert best.group == 0 and best.range_ids == [0]
+    assert paths.checkpoint("XX", 0).exists()
+    assert (
+        load_config(tmp_path, "XX").part.groups[0].optuna_settings.threshold.value
+        == best.threshold
+    )
+
+
+def test_group_req_007_s02(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path, two=True)
+    assert paths.checkpoint("XX", 0) != paths.checkpoint("XX", 1)
+    assert paths.study_dir("XX", 0) != paths.study_dir("XX", 1)
+    assert config.part.groups[1].id == 1
+
+
+def test_group_req_007_s03(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path, two=True)
+    from app.common.config import write_threshold
+
+    write_threshold(paths.model_config("XX"), 0.3, group=1)
+    updated = load_config(tmp_path, "XX")
+    assert updated.part.groups[0].optuna_settings.threshold.value is None
+    assert updated.part.groups[1].optuna_settings.threshold.value == 0.3
+
+
+def test_group_req_007_s04(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected, (study, outcomes) = _study(config, paths)
+    split = split_by_source(
+        load_preparation_manifest(
+            paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
+        ),
+        paths.prepared_train("XX", 0),
+    )
+    best = persist_best_trial(
+        config=config,
+        group=selected,
+        paths=paths,
+        split=split,
+        study=study,
+        outcomes=outcomes,
+    )
+    from app.model_evaluation.evaluation import validate_best_trial_contract
+
+    validate_best_trial_contract(
+        load_config(tmp_path, "XX"),
+        load_config(tmp_path, "XX").part.groups[0],
+        paths,
+        best,
+    )
+
+
+def test_group_req_007_s05(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    from app.common.config import write_threshold
+
+    write_threshold(paths.model_config("XX"), 0.7, group=0)
+    assert (
+        load_config(tmp_path, "XX").part.groups[0].optuna_settings.threshold.value
+        == 0.7
+    )
+
+
+def test_group_req_008_s01(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected, (first_study, _) = _study(config, paths, trials=1)
+    assert [trial.number for trial in first_study.trials] == [0]
+    selected.optuna_settings.execution.trials = 3
+    resumed = create_study(config, selected, paths.study_dir("XX", 0) / "study.db")
+    assert [trial.number for trial in resumed.trials] == [0]
+    manifest = load_preparation_manifest(
+        paths.prepared_train("XX", 0),
+        model="XX",
+        group=0,
+        allowed_split_ids=set(selected.range_ids),
+        fingerprint=preparation_fingerprint(config, group=selected),
+    )
+    split = split_by_source(manifest, paths.prepared_train("XX", 0))
+    executed: list[int] = []
+
+    def runner(parameters, split, trial):
+        del parameters, split
+        executed.append(trial.number)
+        checkpoint = paths.study_dir("XX", 0) / f"trial_{trial.number}.ckpt"
+        torch.save({"state_dict": {}}, checkpoint)
+        return TrialOutcome([0.2 + trial.number / 10], [0.1, 0.2], checkpoint)
+
+    run_search(selected, split, resumed, runner)
+    assert executed == [1, 2]
+    assert [trial.number for trial in resumed.trials] == [0, 1, 2]
+
+
+def test_group_req_008_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = _project(tmp_path, two=True)
+    for group in (0, 1):
+        checkpoint = paths.checkpoint("XX", group)
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_text(f"old group {group}")
+        study = paths.study_dir("XX", group) / "old-study.txt"
+        study.parent.mkdir(parents=True, exist_ok=True)
+        study.write_text("old")
+    config_before = paths.model_config("XX").read_bytes()
+    _stub_search(monkeypatch, paths)
+    _run_cli(monkeypatch, paths, group=1, restart=True)
+    assert paths.checkpoint("XX", 0).read_text() == "old group 0"
+    assert (paths.study_dir("XX", 0) / "old-study.txt").read_text() == "old"
+    assert paths.checkpoint("XX", 1).read_text() == "group 1"
+    assert not (paths.study_dir("XX", 1) / "old-study.txt").exists()
+    assert paths.model_config("XX").read_bytes() == config_before
+
+
+def test_group_req_008_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = _project(tmp_path, two=True)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "app.common.cli.select_device",
         lambda: DeviceSelection("cpu", "CPU", "test"),
     )
-    study = SimpleNamespace(trials=[])
-    monkeypatch.setattr("app.model_training.cli.create_study", lambda *_args: study)
-    observed: dict[str, object] = {}
-
-    def run_search_stub(
-        _config: object,
-        split: DatasetSplit,
-        current_study: object,
-        _runner: object,
-        **_kwargs: object,
-    ) -> tuple[object, list[object]]:
-        assert current_study is study
-        observed["split"] = split
-        return study, []
-
-    monkeypatch.setattr("app.model_training.cli.run_search", run_search_stub)
-    monkeypatch.setattr(
-        "app.model_training.cli.persist_best_trial",
-        lambda **_kwargs: BestTrialResult(
-            model="XX",
-            trial_number=0,
-            parameters=TrialParametersContract.model_validate(TRIAL_PARAMETERS),
-            objective=0.1,
-            checkpoint="weights/XX.ckpt",
-            score_contract=ScoreContract(),
-            threshold=0.5,
-            train_sources=["source-0.png"],
-            validation_sources=["source-1.png"],
-            seed=42,
-            dependencies={},
-        ),
-    )
-
-    _train_command(model="XX", restart=False)
-    split = observed["split"]
-    assert isinstance(split, DatasetSplit)
-    assert len(split.train_sources) == 4
-    assert len(split.validation_sources) == 1
-    assert set(split.train_sources).isdisjoint(split.validation_sources)
-    assert all(
-        path.is_file() for path in (*split.train_images, *split.validation_images)
-    )
-    output = json.loads(capsys.readouterr().out)
-    assert output["exit_code"] == 0
-    assert output["result"] == "暫定探索指標=0.1 threshold=0.5"
-
-
-def test_model_adapter_uses_tv_backbone(monkeypatch: pytest.MonkeyPatch) -> None:
-    import timm
-
-    from app.common import model_adapter
-
-    captured: dict[str, object] = {}
-    original_create = cast(Any, timm.create_model)
-
-    def create_without_download(model_name: str, *args: Any, **kwargs: Any) -> Any:
-        captured["backbone"] = model_name
-        captured["pretrained"] = kwargs["pretrained"]
-        kwargs["pretrained"] = False
-        return original_create(model_name, *args, **kwargs)
-
-    monkeypatch.setattr(timm, "create_model", create_without_download)
-    model = model_adapter.create_supersimplenet(
-        layers=["layer2", "layer3"], image_size=256, learning_rate_multiplier=1.0
-    )
-
-    assert captured == {
-        "backbone": "wide_resnet50_2.tv_in1k",
-        "pretrained": True,
-    }
-    feature_extractor = cast(Any, model.model.feature_extractor)
-    assert feature_extractor.get_channels_dim() == 1536
-
-
-def test_trial_runner_uses_all_validation_images(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import anomalib.data
-    import anomalib.engine
-
-    folder_options: dict[str, object] = {}
-    predicted_paths: list[Path] = []
-
-    def fake_folder(**kwargs: object) -> object:
-        folder_options.update(kwargs)
-        return object()
-
-    class FakeEngine:
-        def __init__(self, **_kwargs: object) -> None:
-            self.trainer = self
-
-        def fit(self, _model: object, *, datamodule: object) -> None:
-            del datamodule
-
-        def save_checkpoint(self, path: Path) -> None:
-            path.write_bytes(b"checkpoint")
-
-        def predict(
-            self, *, model: object, data_path: Path, return_predictions: bool
-        ) -> list[dict[str, float]]:
-            del model, return_predictions
-            predicted_paths.append(data_path)
-            return [{"pred_score": 0.1}]
-
-    monkeypatch.setattr(anomalib.data, "Folder", fake_folder)
-    monkeypatch.setattr(anomalib.engine, "Engine", FakeEngine)
-    monkeypatch.setattr(
-        "app.model_training.trainer.create_supersimplenet", lambda **_kwargs: object()
-    )
-    train_image = tmp_path / "train.png"
-    validation_images = [tmp_path / f"validation-{index}.png" for index in range(2)]
-    for path in (train_image, *validation_images):
-        path.write_bytes(b"image")
-    split = DatasetSplit(
-        train_images=(train_image,),
-        validation_images=tuple(validation_images),
-        train_sources=("train.png",),
-        validation_sources=("validation.png",),
-    )
-    trial = optuna.create_study().ask()
-    parameters = TrialParameters(**TRIAL_PARAMETERS)
-    runner = AnomalibTrialRunner(
-        tmp_path / "work", DeviceSelection("cpu", "test", "test")
-    )
-    runner(parameters, split, trial)
-
-    assert folder_options["val_split_mode"] == "same_as_test"
-    assert "val_split_ratio" not in folder_options
-    validation_dir = folder_options["normal_test_dir"]
-    assert isinstance(validation_dir, Path)
-    assert len(list(validation_dir.iterdir())) == len(validation_images)
-    assert predicted_paths[0] == validation_dir
-
-
-def test_anomalib_uses_complete_validation_folder(tmp_path: Path) -> None:
-    from anomalib.data import Folder
-
-    train_dir = tmp_path / "train"
-    validation_dir = tmp_path / "validation"
-    write_test_image(train_dir / "train.png")
-    for index in range(2):
-        write_test_image(validation_dir / f"validation-{index}.png")
-
-    datamodule = Folder(
-        name="validation-contract",
-        normal_dir=train_dir,
-        normal_test_dir=validation_dir,
-        val_split_mode="same_as_test",
-        num_workers=0,
-    )
-    datamodule.setup()
-
-    assert len(datamodule.val_data) == 2
-    assert len(datamodule.test_data) == 2
-
-
-def test_tunable_model_is_pickleable_and_uses_trial_multiplier() -> None:
-    model = TunableSupersimplenet.__new__(TunableSupersimplenet)
-    from lightning.pytorch import LightningModule
-
-    LightningModule.__init__(model)
-    model.learning_rate_multiplier = 2.0
-    core = torch.nn.Module()
-    core.add_module("adaptor", torch.nn.Linear(1, 1))
-    core.add_module("segdec", torch.nn.Linear(1, 1))
-    model.model = core
-    cast(Any, model)._trainer = SimpleNamespace(max_epochs=200)
-
-    optimizers, schedulers = model.configure_optimizers()
-    serialized = pickle.dumps(model)
-
-    assert serialized
-    assert model.learning_rate_multiplier == 2.0
-    assert [group["lr"] for group in optimizers[0].param_groups] == pytest.approx(
-        [0.0002, 0.0004]
-    )
-    assert schedulers[0].milestones == {160: 1, 180: 1}
-
-
-def test_tunable_model_saves_lightning_checkpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from lightning.pytorch import Trainer
-    from torch.utils.data import DataLoader, TensorDataset
-
-    core = torch.nn.Module()
-    core.add_module("adaptor", torch.nn.Linear(1, 1))
-    core.add_module("segdec", torch.nn.Linear(1, 1))
-    monkeypatch.setattr(
-        "anomalib.models.image.supersimplenet.lightning_model.SupersimplenetModel",
-        lambda **_kwargs: core,
-    )
-
-    def train_step(
-        self: TunableSupersimplenet, batch: tuple[torch.Tensor], batch_idx: int
-    ) -> torch.Tensor:
-        del batch_idx
-        core_model = cast(Any, self.model)
-        output = core_model.segdec(core_model.adaptor(batch[0]))
-        return output.square().mean()
-
-    monkeypatch.setattr(TunableSupersimplenet, "training_step", train_step)
-    monkeypatch.setattr(TunableSupersimplenet, "configure_callbacks", lambda self: [])
-    model = TunableSupersimplenet(
-        learning_rate_multiplier=2.0,
-        pre_processor=TunableSupersimplenet.configure_pre_processor((8, 8)),
-        post_processor=False,
-        evaluator=False,
-        visualizer=False,
-    )
-    trainer = Trainer(
-        default_root_dir=tmp_path,
-        max_epochs=1,
-        limit_train_batches=1,
-        accelerator="cpu",
-        devices=1,
-        logger=False,
-        enable_checkpointing=False,
-        enable_model_summary=False,
-        enable_progress_bar=False,
-    )
-    loader = DataLoader(TensorDataset(torch.ones(2, 1)), batch_size=2)
-    trainer.fit(model, train_dataloaders=loader)
-    checkpoint = tmp_path / "model.ckpt"
-    trainer.save_checkpoint(checkpoint)
-
-    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    assert checkpoint.is_file()
-    assert payload["hyper_parameters"]["pre_processor"] is not None
-    assert "model.adaptor.weight" in payload["state_dict"]
-
-
-def set_trial_parameters(trial: optuna.Trial) -> None:
-    trial.suggest_float("learning_rate_multiplier", 1.0, 1.0)
-    trial.suggest_categorical("batch_size", [4])
-    trial.suggest_categorical("epochs", [200])
-    trial.suggest_categorical("feature_layers", ['["layer2"]'])
-    trial.suggest_categorical("image_size", [256])
-
-
-def make_manifest(count: int) -> PreparationManifest:
-    return PreparationManifest(
-        model="XX",
-        created_at=datetime.now(UTC),
-        sources=[
-            PreparedSource(
-                source_image=f"source-{index}.png",
-                alignment=AlignmentResult(status="aligned"),
-                splits=[
-                    PreparedSplit(
-                        source_image=f"source-{index}.png",
-                        split_id=split_id,
-                        image=f"source-{index}_{split_id:02d}.png",
-                    )
-                    for split_id in range(2)
-                ],
-            )
-            for index in range(count)
-        ],
-    )
-
-
-def test_split_groups_by_source_image(tmp_path: Path) -> None:
-    manifest = make_manifest(10)
-    first = split_by_source(manifest, tmp_path, seed=42)
-    second = split_by_source(manifest, tmp_path, seed=42)
-    assert first == second
-    assert len(first.train_sources) == 8
-    assert set(first.train_sources).isdisjoint(first.validation_sources)
-    assert {path.name.rsplit("_", 1)[0] + ".png" for path in first.train_images} == set(
-        first.train_sources
-    )
-
-
-def test_split_rejects_insufficient_source_images(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="current count is 1"):
-        split_by_source(make_manifest(1), tmp_path)
-
-
-def test_search_selects_lowest_validation_percentile(tmp_path: Path) -> None:
-    config, _paths = build_project(tmp_path)
-    study = create_study(config, tmp_path / "study.db")
-    assert vars(study.pruner)["_n_startup_trials"] == 5
-    assert vars(study.pruner)["_n_warmup_steps"] == 40
-    assert vars(study.pruner)["_interval_steps"] == 10
-    checkpoint = tmp_path / "candidate.ckpt"
-    torch.save({"state_dict": {}}, checkpoint)
-
-    def runner(
-        parameters: TrialParameters, split: DatasetSplit, trial: optuna.Trial
-    ) -> TrialOutcome:
-        del parameters, split
-        if trial.number == 1:
-            raise RuntimeError("simulated failure")
-        if trial.number == 2:
-            raise optuna.TrialPruned()
-        return TrialOutcome([trial.number / 100], [0.1, 0.2], checkpoint)
-
-    split = split_by_source(make_manifest(5), tmp_path)
-    study, outcomes = run_search(config, split, study, runner)
-    assert len(study.trials) == 10
-    assert study.best_trial.number == 0
-    assert 0 in outcomes
-    assert {trial.state.name for trial in study.trials} >= {
-        "COMPLETE",
-        "FAIL",
-        "PRUNED",
-    }
-
-
-def test_search_reports_trial_conditions(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    config, _paths = build_project(tmp_path)
-    study = create_study(config, tmp_path / "conditions.db")
-    split = split_by_source(make_manifest(5), tmp_path)
-    starts: list[tuple[int, TrialParameters]] = []
-
-    def on_start(number: int, parameters: TrialParameters) -> None:
-        starts.append((number, parameters))
-        show_trial_conditions(f"試行 {number + 1}/10 開始条件", parameters)
-
-    run_search(
-        config,
-        split,
-        study,
-        lambda parameters, split, trial: TrialOutcome(
-            [0.2], [0.1], tmp_path / "candidate.ckpt"
-        ),
-        on_trial_start=on_start,
-    )
-    captured = capsys.readouterr()
-    assert len(starts) == 10
-    assert [number for number, _parameters in starts] == list(range(10))
-    for label in (
-        "学習率倍率",
-        "バッチサイズ",
-        "エポック数",
-        "特徴層",
-        "前処理画像サイズ",
-    ):
-        assert label in captured.err
-    assert "条件" in captured.err
-    assert "値" in captured.err
-    first = starts[0][1]
-    for value in (
-        str(first.learning_rate_multiplier),
-        str(first.batch_size),
-        str(first.epochs),
-        ", ".join(first.feature_layers),
-        f"{first.image_size} px",
-    ):
-        assert value in captured.err
-    assert "試行 1/10 開始条件" in captured.err
-    assert captured.out == ""
-
-
-def test_search_reports_trial_outcomes(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    config, _paths = build_project(tmp_path)
-    study = create_study(config, tmp_path / "outcomes.db")
-    split = split_by_source(make_manifest(5), tmp_path)
-
-    def runner(
-        parameters: TrialParameters, split: DatasetSplit, trial: optuna.Trial
-    ) -> TrialOutcome:
-        del parameters, split
-        if trial.number == 1:
-            raise optuna.TrialPruned()
-        if trial.number == 2:
-            raise RuntimeError("simulated failure")
-        return TrialOutcome([0.2], [0.1], tmp_path / "candidate.ckpt")
-
-    run_search(config, split, study, runner, on_trial_finish=show_trial_outcome)
-    captured = capsys.readouterr()
-    assert "試行 1 完了 暫定探索指標=0.2" in captured.err
-    assert "試行 2 枝刈り" in captured.err
-    assert "試行 3 失敗" in captured.err
-    assert captured.out == ""
-
-
-def test_search_reports_resumed_trial_count(tmp_path: Path) -> None:
-    config, _paths = build_project(tmp_path)
-    study = create_study(config, tmp_path / "resume.db")
-    study.optimize(lambda _trial: 0.5, n_trials=2)
-    split = split_by_source(make_manifest(5), tmp_path)
-    started: list[int] = []
-    run_search(
-        config,
-        split,
-        study,
-        lambda parameters, split, trial: TrialOutcome(
-            [0.2], [0.1], tmp_path / "candidate.ckpt"
-        ),
-        on_trial_start=lambda number, _parameters: started.append(number),
-    )
-    assert started == list(range(2, 10))
-    assert len(study.trials) == 10
-
-
-def test_search_report_labels_objective_as_provisional() -> None:
-    result = BestTrialResult(
-        model="XX",
-        trial_number=0,
-        parameters=TrialParametersContract.model_validate(TRIAL_PARAMETERS),
-        objective=0.12,
-        checkpoint="weights/XX.ckpt",
-        score_contract=ScoreContract(),
-        threshold=0.2,
-        train_sources=["a.png"],
-        validation_sources=["b.png"],
-        seed=42,
-        dependencies={},
-    )
-    summary = format_training_summary(result)
-    assert "暫定探索指標" in summary
-    assert "accuracy" not in summary.lower()
-
-
-def test_augmentation_is_training_only_and_ephemeral(tmp_path: Path) -> None:
-    config, _paths = build_project(tmp_path)
-    settings = config.part.augmentation
-    for name in settings.order:
-        item = getattr(settings, name)
-        setattr(settings, name, item.model_copy(update={"probability": 1.0}))
-    source = np.linspace(0, 1, 16 * 16 * 3, dtype=np.float32).reshape(16, 16, 3)
-    source_before = source.copy()
-    output = AugmentationPipeline(settings)(source, training=True)
-    assert output.shape == source.shape
-    assert float(output.min()) >= 0.0 and float(output.max()) <= 1.0
-    assert np.array_equal(source, source_before)
-    assert list(tmp_path.iterdir()) == [tmp_path / "config"]
-
-
-def test_augmentation_defaults_order_and_seed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config, _paths = build_project(tmp_path)
-    settings = config.part.augmentation.model_copy(deep=True)
-    assert settings.enabled is True
-    assert settings.seed == 42
-    assert settings.order == [
-        "translation",
-        "rotation",
-        "brightness",
-        "contrast",
-        "color_temperature",
-        "gamma",
-        "sensor_noise",
-        "blur",
-    ]
-    assert settings.translation.model_dump() == {
-        "enabled": True,
-        "probability": 0.5,
-        "max_ratio": 0.02,
-        "padding_mode": "reflection",
-    }
-    assert settings.rotation.model_dump() == {
-        "enabled": True,
-        "probability": 0.5,
-        "max_degrees": 3.0,
-        "padding_mode": "reflection",
-    }
-    for name in ("brightness", "contrast", "gamma"):
-        item = getattr(settings, name)
-        assert (item.probability, item.factor_min, item.factor_max) == (0.3, 0.9, 1.1)
-    assert settings.color_temperature.model_dump() == {
-        "enabled": True,
-        "probability": 0.2,
-        "base_kelvin": 6500,
-        "max_delta_kelvin": 500,
-    }
-    assert settings.sensor_noise.model_dump() == {
-        "enabled": True,
-        "probability": 0.3,
-        "stddev_min": 0.0,
-        "stddev_max": 0.01,
-    }
-    assert settings.blur.model_dump() == {
-        "enabled": False,
-        "probability": 0.2,
-        "kernel_sizes": [3, 5],
-        "sigma_min": 0.1,
-        "sigma_max": 1.0,
-    }
-
-    image = np.linspace(0, 1, 16 * 16 * 3, dtype=np.float32).reshape(16, 16, 3)
-    assert np.array_equal(
-        AugmentationPipeline(settings)(image, training=True),
-        AugmentationPipeline(settings)(image, training=True),
-    )
-
-    calls: list[str] = []
-    for name in settings.order:
-        setting = getattr(settings, name)
-        setattr(
-            settings,
-            name,
-            setting.model_copy(update={"enabled": True, "probability": 1.0}),
-        )
-    pipeline = AugmentationPipeline(settings)
-    for name in settings.order:
-        monkeypatch.setattr(
-            pipeline,
-            f"_{name}",
-            lambda current, _setting, label=name: calls.append(label) or current,
-        )
-    pipeline(image, training=True)
-    assert calls == settings.order
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "translation",
-        "rotation",
-        "brightness",
-        "contrast",
-        "color_temperature",
-        "gamma",
-        "sensor_noise",
-        "blur",
-    ],
-)
-def test_augmentation_probability_boundary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
-) -> None:
-    config, _paths = build_project(tmp_path)
-    settings = config.part.augmentation.model_copy(deep=True)
-    for item_name in settings.order:
-        item = getattr(settings, item_name)
-        setattr(
-            settings,
-            item_name,
-            item.model_copy(update={"enabled": item_name == name, "probability": 0.5}),
-        )
-    pipeline = AugmentationPipeline(settings)
-    applied: list[bool] = []
-    monkeypatch.setattr(
-        pipeline,
-        f"_{name}",
-        lambda image, _setting: applied.append(True) or image,
-    )
-
-    class BoundaryRandom:
-        values = iter((0.4999, 0.5))
-
-        def random(self) -> float:
-            return next(self.values)
-
-    monkeypatch.setattr(pipeline, "rng", BoundaryRandom())
-    image = np.full((8, 8, 3), 0.5, dtype=np.float32)
-    pipeline(image, training=True)
-    pipeline(image, training=True)
-    assert applied == [True]
-
-
-@pytest.mark.parametrize(
-    ("name", "expected_ranges"),
-    [
-        ("translation", [(-0.02, 0.02), (-0.02, 0.02)]),
-        ("rotation", [(-3.0, 3.0)]),
-        ("brightness", [(0.9, 1.1)]),
-        ("contrast", [(0.9, 1.1)]),
-        ("color_temperature", [(6000, 7000)]),
-        ("gamma", [(0.9, 1.1)]),
-        ("sensor_noise", [(0.0, 0.01)]),
-        ("blur", [(0.1, 1.0)]),
-    ],
-)
-def test_augmentation_samples_configured_ranges(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-    expected_ranges: list[tuple[float, float]],
-) -> None:
-    config, _paths = build_project(tmp_path)
-    pipeline = AugmentationPipeline(config.part.augmentation)
-    sampled_ranges: list[tuple[float, float]] = []
-    sampled_normal: list[tuple[float, float, tuple[int, ...]]] = []
-    sampled_kernels: list[list[int]] = []
-
-    class RecordingRandom:
-        def uniform(self, low: float, high: float) -> float:
-            sampled_ranges.append((low, high))
-            return (low + high) / 2
-
-        def normal(
-            self, mean: float, stddev: float, shape: tuple[int, ...]
-        ) -> np.ndarray:
-            sampled_normal.append((mean, stddev, shape))
-            return np.zeros(shape, dtype=np.float32)
-
-        def choice(self, values: list[int]) -> int:
-            sampled_kernels.append(values)
-            return values[0]
-
-    monkeypatch.setattr(pipeline, "rng", RecordingRandom())
-    image = np.full((9, 9, 3), 0.5, dtype=np.float32)
-    transformed = getattr(pipeline, f"_{name}")(
-        image, getattr(config.part.augmentation, name)
-    )
-
-    assert transformed.shape == image.shape
-    assert sampled_ranges == expected_ranges
-    assert sampled_normal == (
-        [(0.0, 0.005, image.shape)] if name == "sensor_noise" else []
-    )
-    assert sampled_kernels == ([[3, 5]] if name == "blur" else [])
-
-
-def test_blur_template_default_and_opt_in(tmp_path: Path) -> None:
-    config, _paths = build_project(tmp_path)
-    settings = config.part.augmentation.model_copy(deep=True)
-    for name in settings.order:
-        item = getattr(settings, name)
-        setattr(settings, name, item.model_copy(update={"enabled": False}))
-    source = np.zeros((9, 9, 3), dtype=np.float32)
-    source[4, 4] = 1.0
-
-    assert settings.blur.enabled is False
-    assert np.array_equal(AugmentationPipeline(settings)(source, training=True), source)
-
-    settings.blur = settings.blur.model_copy(
-        update={"enabled": True, "probability": 1.0}
-    )
-    blurred = AugmentationPipeline(settings)(source, training=True)
-    assert not np.array_equal(blurred, source)
-    assert np.array_equal(
-        AugmentationPipeline(settings)(source, training=False), source
-    )
-
-
-def test_validation_pipeline_disables_augmentation(tmp_path: Path) -> None:
-    config, _paths = build_project(tmp_path)
-    source = np.full((8, 8, 3), 0.5, dtype=np.float32)
-    output = AugmentationPipeline(config.part.augmentation)(source, training=False)
-    assert np.array_equal(output, source)
-
-
-def test_training_persists_best_model_and_threshold(tmp_path: Path) -> None:
-    config, paths = build_project(tmp_path)
-    checkpoint = tmp_path / "trial.ckpt"
-    torch.save({"state_dict": {}}, checkpoint)
-    study = optuna.create_study(direction="minimize")
-    trial = study.ask()
-    set_trial_parameters(trial)
-    study.tell(trial, 0.1)
-    split = split_by_source(make_manifest(5), tmp_path)
-    result = persist_best_trial(
-        config=config,
-        paths=paths,
-        split=split,
-        study=study,
-        outcomes={0: TrialOutcome([0.1], [0.1, 0.2, 0.3], checkpoint)},
-    )
-    payload = torch.load(paths.checkpoint("XX"), weights_only=True)
-    saved_config = json.loads(paths.model_config("XX").read_text(encoding="utf-8"))
-    assert result.threshold == pytest.approx(float(np.percentile([0.1, 0.2, 0.3], 99)))
-    assert payload["visual_inspection"]["threshold"] == result.threshold
-    assert saved_config["optuna_settings"]["threshold"]["value"] == result.threshold
-    assert (paths.study_dir("XX") / "best_trial.json").is_file()
-
-
-def test_training_artifact_transaction_restores_previous_set(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config, paths = build_project(tmp_path)
-    checkpoint = paths.checkpoint("XX")
-    checkpoint.parent.mkdir(parents=True)
-    torch.save({"state_dict": {"old": torch.tensor([1])}}, checkpoint)
-    best = paths.study_dir("XX") / "best_trial.json"
-    best.parent.mkdir(parents=True)
-    best.write_text('{"old": true}\n', encoding="utf-8")
-    config_path = paths.model_config("XX")
-    old_bytes = {
-        "checkpoint": checkpoint.read_bytes(),
-        "config": config_path.read_bytes(),
-        "best": best.read_bytes(),
-    }
-
-    candidate = tmp_path / "candidate.ckpt"
-    torch.save({"state_dict": {"new": torch.tensor([2])}}, candidate)
-    study = optuna.create_study(direction="minimize")
-    trial = study.ask()
-    set_trial_parameters(trial)
-    study.tell(trial, 0.1)
-    split = split_by_source(make_manifest(5), tmp_path)
-    replace = artifacts._replace_staged_artifact
-    calls = 0
-
-    def fail_second(source: Path, target: Path) -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise OSError("simulated replacement failure")
-        replace(source, target)
-
-    monkeypatch.setattr(artifacts, "_replace_staged_artifact", fail_second)
-
-    with pytest.raises(OSError, match="simulated replacement failure"):
-        persist_best_trial(
-            config=config,
-            paths=paths,
-            split=split,
-            study=study,
-            outcomes={0: TrialOutcome([0.1], [0.2, 0.3], candidate)},
-        )
-
-    assert checkpoint.read_bytes() == old_bytes["checkpoint"]
-    assert config_path.read_bytes() == old_bytes["config"]
-    assert best.read_bytes() == old_bytes["best"]
-    assert not (paths.study_dir("XX") / ".artifact-transaction.json").exists()
-
-    targets = {
-        "checkpoint": checkpoint,
-        "config": config_path,
-        "best_trial": best,
-    }
-    for target in targets.values():
-        shutil.copy2(target, _transaction_path(target, "backup"))
-        target.write_bytes(b"incomplete-new-artifact")
-    artifacts._write_transaction_journal(
-        paths.study_dir("XX") / ".artifact-transaction.json",
-        {name: True for name in targets},
-    )
-
-    recover_artifact_transaction(paths, "XX")
-
-    assert checkpoint.read_bytes() == old_bytes["checkpoint"]
-    assert config_path.read_bytes() == old_bytes["config"]
-    assert best.read_bytes() == old_bytes["best"]
-
-
-def test_model_creation_reuses_cached_pretrained_weights(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import timm.models._hub as hub
-    from timm.models.resnet import ResNet
-
-    from app.common.model_adapter import create_supersimplenet
-
-    cache_file = tmp_path / "hf-cache" / "model.bin"
-    downloads: list[Path] = []
-    cache_lookups: list[tuple[str, str]] = []
-
-    def cached_download(repo_id: str, *, filename: str, **_kwargs: object) -> str:
-        cache_lookups.append((repo_id, filename))
-        if not cache_file.exists():
-            cache_file.parent.mkdir(parents=True)
-            cache_file.write_bytes(b"test weights")
-            downloads.append(cache_file)
-        return str(cache_file)
-
-    def read_cached_weights(path: str, **_kwargs: object) -> dict[str, object]:
-        assert Path(path) == cache_file
-        assert cache_file.read_bytes() == b"test weights"
-        return {}
-
-    monkeypatch.setattr(hub, "_has_safetensors", False)
-    monkeypatch.setattr(hub, "hf_hub_download", cached_download)
-    monkeypatch.setattr(hub, "_torch_load", read_cached_weights)
-    monkeypatch.setattr(
-        ResNet,
-        "load_state_dict",
-        lambda _self, _state, **_kwargs: SimpleNamespace(
-            missing_keys=[], unexpected_keys=[]
-        ),
-    )
-
-    for _ in range(2):
-        model = create_supersimplenet(
-            layers=["layer2"], image_size=256, learning_rate_multiplier=1.0
-        )
-        del model
-
-    assert cache_lookups == [
-        ("timm/wide_resnet50_2.tv_in1k", "pytorch_model.bin"),
-        ("timm/wide_resnet50_2.tv_in1k", "pytorch_model.bin"),
-    ]
-    assert downloads == [cache_file]
-
-
-def test_model_creation_uses_real_hub_cache_while_offline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import safetensors.torch as safetensors_torch
-    from huggingface_hub import constants, file_download
-    from timm.models.resnet import ResNet
-
-    from app.common.model_adapter import create_supersimplenet
-
-    cache_root = tmp_path / "hub"
-    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(cache_root))
-    storage = cache_root / file_download.repo_folder_name(
-        repo_id="timm/wide_resnet50_2.tv_in1k", repo_type="model"
-    )
-    commit = "0" * 40
-    reference = storage / "refs" / "main"
-    reference.parent.mkdir(parents=True)
-    reference.write_text(commit, encoding="utf-8")
-    cached_weights = storage / "snapshots" / commit / "model.safetensors"
-    cached_weights.parent.mkdir(parents=True)
-    cached_weights.write_bytes(b"cached test weights")
-    metadata_lookups: list[bool] = []
-
-    def offline_metadata(
-        **_kwargs: object,
-    ) -> tuple[None, None, None, None, None, OSError]:
-        metadata_lookups.append(True)
-        return None, None, None, None, None, OSError("offline")
-
-    def read_cached_weights(path: str, **_kwargs: object) -> dict[str, object]:
-        assert Path(path) == cached_weights
-        return {}
-
-    monkeypatch.setattr(file_download, "_get_metadata_or_catch_error", offline_metadata)
-    monkeypatch.setattr(safetensors_torch, "load_file", read_cached_weights)
-    monkeypatch.setattr(
-        ResNet,
-        "load_state_dict",
-        lambda _self, _state, **_kwargs: SimpleNamespace(
-            missing_keys=[], unexpected_keys=[]
-        ),
-    )
-
-    for _ in range(2):
-        model = create_supersimplenet(
-            layers=["layer2"], image_size=256, learning_rate_multiplier=1.0
-        )
-        del model
-
-    assert metadata_lookups == [True, True]
-    assert cached_weights.read_bytes() == b"cached test weights"
-
-
-def test_training_resumes_existing_study(tmp_path: Path) -> None:
-    config, _paths = build_project(tmp_path)
-    split = split_by_source(make_manifest(5), tmp_path)
-    checkpoint = tmp_path / "candidate.ckpt"
-    torch.save({}, checkpoint)
-
-    def runner(
-        parameters: TrialParameters, split: DatasetSplit, trial: optuna.Trial
-    ) -> TrialOutcome:
-        del parameters, split, trial
-        return TrialOutcome([0.1], [0.1], checkpoint)
-
-    first_config = config.model_copy(
-        update={
-            "part": config.part.model_copy(
-                update={
-                    "optuna_settings": config.part.optuna_settings.model_copy(
-                        update={
-                            "execution": config.part.optuna_settings.execution.model_copy(
-                                update={"trials": 2}
-                            )
-                        }
-                    )
-                }
-            )
-        }
-    )
-    storage = tmp_path / "resume.db"
-    study, _ = run_search(
-        first_config, split, create_study(first_config, storage), runner
-    )
-    assert len(study.trials) == 2
-    resumed, _ = run_search(config, split, create_study(config, storage), runner)
-    assert len(resumed.trials) == 10
-    assert resumed.trials[0].number == 0
-
-
-def test_training_restart_replaces_only_derived_artifacts(tmp_path: Path) -> None:
-    config, paths = build_project(tmp_path)
-    paths.study_dir("XX").mkdir(parents=True)
-    (paths.study_dir("XX") / "study.db").write_text("old", encoding="utf-8")
-    paths.checkpoint("XX").parent.mkdir(parents=True)
-    paths.checkpoint("XX").write_text("old", encoding="utf-8")
-    paths.pretrained.mkdir(parents=True)
-    cached = paths.pretrained / "cache.bin"
-    cached.write_text("keep", encoding="utf-8")
-    original = paths.original_train("XX") / "base.png"
-    original.parent.mkdir(parents=True)
-    original.write_text("keep", encoding="utf-8")
-    restart_training(paths, "XX")
-    assert not paths.study_dir("XX").exists()
-    assert not paths.checkpoint("XX").exists()
-    assert cached.read_text(encoding="utf-8") == "keep"
-    assert original.read_text(encoding="utf-8") == "keep"
-    assert paths.model_config("XX").is_file()
-    fresh_study = create_study(config, paths.study_dir("XX") / "study.db")
-    assert len(fresh_study.trials) == 0
+    done = _stub_search(monkeypatch, paths, fail_group=1)
+    with pytest.raises(typer.Exit) as error:
+        training_cli._train_command(model="XX", group=None, restart=False)
+    assert error.value.exit_code == 3
+    assert done == [0]
+    first_checkpoint = paths.checkpoint("XX", 0).read_bytes()
+    assert not paths.checkpoint("XX", 1).exists()
+
+    retried = _stub_search(monkeypatch, paths)
+    training_cli._train_command(model="XX", group=None, restart=False)
+    assert retried == [0, 1]
+    assert paths.checkpoint("XX", 0).read_bytes() == first_checkpoint
+    assert paths.checkpoint("XX", 1).is_file()

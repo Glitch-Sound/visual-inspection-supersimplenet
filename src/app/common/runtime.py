@@ -76,17 +76,15 @@ class RunRecorder:
     started_monotonic: float = field(default_factory=time.monotonic)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    groups: list[int] = field(default_factory=list)
     _finished: RunMetadata | None = field(default=None, init=False, repr=False)
 
-    def finish(self, exit_code: int) -> RunMetadata:
-        if self._finished is not None and (
-            self._finished.exit_code == exit_code or exit_code == 0
-        ):
-            return self._finished
+    def snapshot(self, exit_code: int) -> RunMetadata:
         ended_at = datetime.now(UTC)
-        self._finished = RunMetadata(
+        return RunMetadata(
             command=self.command,
             model=self.model,
+            groups=list(self.groups),
             started_at=self.started_at,
             ended_at=ended_at,
             duration_seconds=max(0.0, time.monotonic() - self.started_monotonic),
@@ -107,4 +105,11 @@ class RunRecorder:
             warnings=list(self.warnings),
             errors=list(self.errors),
         )
+
+    def finish(self, exit_code: int) -> RunMetadata:
+        if self._finished is not None and (
+            self._finished.exit_code == exit_code or exit_code == 0
+        ):
+            return self._finished
+        self._finished = self.snapshot(exit_code)
         return self._finished

@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from filelock import FileLock, Timeout
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn
 
-from app.common.paths import ProjectPaths
+from app.common.paths import ProjectPaths, validate_model_name
 from app.common.runtime import DeviceSelection, RunRecorder, select_device
 
 
@@ -78,7 +79,37 @@ def _run(
     if needs_device:
         show_stage(f"使用デバイス: {device.device} ({device.name}; {device.reason})")
     try:
-        result = action(paths, recorder)
+        validate_model_name(model)
+        lock_path = paths.model_lock(model)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(lock_path, timeout=0):
+            from app.common.artifact_transaction import recover_artifact_transaction
+            from app.common.config import load_config
+            from app.common.result_index import cleanup_generations, read_current
+
+            config = load_config(paths.root, model)
+            for group in config.part.select_groups():
+                recover_artifact_transaction(paths, model, group.id)
+            try:
+                current = read_current(
+                    paths,
+                    model,
+                    allowed_group_ids={item.id for item in config.part.groups},
+                )
+            except ValueError:
+                pass
+            else:
+                try:
+                    cleanup_generations(paths, model, current)
+                except (OSError, ValueError) as error:
+                    recorder.warnings.append(f"result cleanup deferred: {error}")
+            result = action(paths, recorder)
+    except Timeout as error:
+        recorder.errors.append(f"model {model} is already running")
+        metadata = recorder.finish(ExitCode.PROCESSING_ERROR)
+        show_stage(f"処理失敗: 型番 {model} は実行中です")
+        typer.echo(metadata.model_dump_json())
+        raise typer.Exit(ExitCode.PROCESSING_ERROR) from error
     except (ValueError, FileNotFoundError) as error:
         recorder.errors.append(str(error))
         metadata = recorder.finish(ExitCode.INPUT_ERROR)

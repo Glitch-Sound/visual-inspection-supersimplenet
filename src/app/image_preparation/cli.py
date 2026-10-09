@@ -23,9 +23,10 @@ def _check_command(
 ) -> None:
     """分割位置を確認する。"""
 
-    def action(paths: ProjectPaths, _recorder: RunRecorder) -> Path:
+    def action(paths: ProjectPaths, recorder: RunRecorder) -> Path:
         show_stage("設定読込と基準画像・分割範囲の確認")
         config = load_config(paths.root, model)
+        recorder.groups = [item.id for item in config.part.select_groups()]
         output = create_check_image(config, paths)
         show_stage(f"確認画像保存: 範囲数={len(config.part.ranges)} 保存先={output}")
         return output
@@ -35,6 +36,7 @@ def _check_command(
 
 def _train_pre_command(
     model: str = typer.Option(..., "--model", help="処理対象の型番"),
+    group: int | None = typer.Option(None, "--group", help="処理対象のグループID"),
 ) -> None:
     """学習画像を位置合わせして分割する。"""
 
@@ -42,22 +44,36 @@ def _train_pre_command(
         show_stage("設定読込と学習元画像の列挙・位置合わせ・切り出し")
         config = load_config(paths.root, model)
         with PreparationProgress() as progress:
-            manifest = prepare_training(config, paths, on_progress=progress.update)
-        recorder.warnings.extend(
-            alignment_warning(
-                str(item["source_image"]), str(item["reason"]), testing=False
+            manifests = prepare_training(
+                config, paths, group=group, on_progress=progress.update
             )
-            for item in manifest.excluded
-            if item.get("reason") != "blacklist"
+        recorder.groups = sorted(manifests)
+        for manifest in manifests.values():
+            recorder.warnings.extend(
+                alignment_warning(
+                    str(item["source_image"]), str(item["reason"]), testing=False
+                )
+                for item in manifest.excluded
+                if item.get("reason") != "blacklist"
+            )
+        prepared = sum(
+            bool(source.splits)
+            for manifest in manifests.values()
+            for source in manifest.sources
         )
-        prepared = sum(bool(source.splits) for source in manifest.sources)
-        excluded = sum(not source.splits for source in manifest.sources)
+        excluded = sum(
+            not source.splits
+            for manifest in manifests.values()
+            for source in manifest.sources
+        )
         blacklisted_splits = sum(
-            item.get("reason") == "blacklist" for item in manifest.excluded
+            item.get("reason") == "blacklist"
+            for manifest in manifests.values()
+            for item in manifest.excluded
         )
-        target = paths.prepared_train(model)
+        target = paths.prepared_train(model, group)
         show_stage(
-            f"学習準備完了: 対象={len(manifest.sources)} 準備={prepared} "
+            f"学習準備完了: 対象={sum(len(item.sources) for item in manifests.values())} 準備={prepared} "
             f"除外元画像={excluded} ブラックリスト除外分割={blacklisted_splits} "
             f"保存先={target}"
         )
@@ -74,6 +90,7 @@ def _test_pre_command(
     def action(paths: ProjectPaths, recorder: RunRecorder) -> str:
         show_stage("設定読込と試験元画像の列挙・位置合わせ・切り出し")
         config = load_config(paths.root, model)
+        recorder.groups = [item.id for item in config.part.select_groups()]
         with PreparationProgress() as progress:
             manifest = prepare_testing(config, paths, on_progress=progress.update)
         recorder.warnings.extend(

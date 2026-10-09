@@ -8,9 +8,16 @@ import re
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PureWindowsPath
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
@@ -101,6 +108,7 @@ class PlatformMetadata(ContractModel):
 class RunMetadata(ContractModel):
     command: str
     model: str
+    groups: list[Annotated[StrictInt, Field(ge=0)]]
     started_at: datetime
     ended_at: datetime
     duration_seconds: float = Field(ge=0.0)
@@ -117,6 +125,13 @@ class RunMetadata(ContractModel):
     def timestamps_require_timezone(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("run timestamps must include a timezone")
+        return value
+
+    @field_validator("groups")
+    @classmethod
+    def group_ids_are_unique(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError("run groups must be unique")
         return value
 
 
@@ -171,6 +186,9 @@ class PreparedSource(ContractModel):
 
 class PreparationManifest(ContractModel):
     model: str
+    group: Annotated[StrictInt, Field(ge=0)] | None = None
+    range_ids: list[Annotated[StrictInt, Field(ge=0, le=99)]] | None = None
+    preparation_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     created_at: datetime
     sources: list[PreparedSource]
     excluded: list[dict[str, Any]] = Field(default_factory=list)
@@ -189,6 +207,12 @@ class PreparationManifest(ContractModel):
 
     @model_validator(mode="after")
     def source_images_are_unique(self) -> PreparationManifest:
+        if self.group is None and self.range_ids is not None:
+            raise ValueError("test manifest must not have range_ids")
+        if self.group is not None and (
+            not self.range_ids or len(self.range_ids) != len(set(self.range_ids))
+        ):
+            raise ValueError("train manifest range_ids must be nonempty and unique")
         source_images = [source.source_image for source in self.sources]
         if len(source_images) != len(set(source_images)):
             raise ValueError("source_image must be unique within a manifest")
@@ -201,10 +225,17 @@ class PreparationManifest(ContractModel):
 
 
 def load_preparation_manifest(
-    prepared_dir: Path, *, model: str, allowed_split_ids: set[int]
+    prepared_dir: Path,
+    *,
+    model: str,
+    allowed_split_ids: set[int],
+    group: int | None = None,
+    fingerprint: str | None = None,
 ) -> PreparationManifest:
     """Validate a prepared input before training or inference reads any image."""
 
+    if prepared_dir.is_symlink():
+        raise ValueError(f"prepared directory must not be a symlink: {prepared_dir}")
     manifest_path = prepared_dir / "manifest.json"
     if manifest_path.is_symlink():
         raise ValueError(f"prepared manifest must not be a symlink: {manifest_path}")
@@ -212,6 +243,16 @@ def load_preparation_manifest(
     if manifest.model != model:
         raise ValueError(
             f"prepared manifest model mismatch: expected {model}, got {manifest.model}"
+        )
+    if manifest.group != group:
+        raise ValueError(
+            f"prepared manifest group mismatch: expected {group}, got {manifest.group}"
+        )
+    if group is not None and set(manifest.range_ids or []) != allowed_split_ids:
+        raise ValueError("prepared manifest range_ids do not match group")
+    if fingerprint is not None and manifest.preparation_fingerprint != fingerprint:
+        raise ValueError(
+            "prepared manifest fingerprint mismatch; rerun train-pre or test-pre"
         )
     for source in manifest.sources:
         for split in source.splits:
@@ -243,6 +284,8 @@ class TrialParametersContract(ContractModel):
 
 class BestTrialResult(ContractModel):
     model: str
+    group: Annotated[StrictInt, Field(ge=0)]
+    range_ids: list[Annotated[StrictInt, Field(ge=0, le=99)]] = Field(min_length=1)
     trial_number: int = Field(ge=0)
     parameters: TrialParametersContract
     objective: float
@@ -270,6 +313,8 @@ class BestTrialResult(ContractModel):
 
     @model_validator(mode="after")
     def datasets_are_disjoint(self) -> BestTrialResult:
+        if len(self.range_ids) != len(set(self.range_ids)):
+            raise ValueError("best_trial range_ids must be unique")
         if set(self.train_sources) & set(self.validation_sources):
             raise ValueError("train_sources and validation_sources must be disjoint")
         return self
@@ -302,6 +347,8 @@ class SplitResult(ContractModel):
 class InspectionResult(ContractModel):
     source_image: str
     model: str
+    group: Annotated[StrictInt, Field(ge=0)]
+    range_ids: list[Annotated[StrictInt, Field(ge=0, le=99)]] = Field(min_length=1)
     checkpoint: str
     score_contract: ScoreContract
     threshold: float = Field(ge=0.0, le=1.0)
@@ -334,6 +381,8 @@ class InspectionResult(ContractModel):
 
     @model_validator(mode="after")
     def split_identifiers_are_unique(self) -> InspectionResult:
+        if len(self.range_ids) != len(set(self.range_ids)):
+            raise ValueError("inspection range_ids must be unique")
         split_ids = [split.split_id for split in self.splits]
         if len(split_ids) != len(set(split_ids)):
             raise ValueError("split_id must be unique within an inspection result")

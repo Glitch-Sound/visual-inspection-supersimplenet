@@ -52,7 +52,9 @@ class ProjectPaths:
 
     def model_config(self, model: str) -> Path:
         validate_model_name(model)
-        return ensure_within(self.root, self.root / "config" / f"part_{model}.json")
+        candidate = self.root / "config" / f"part_{model}.json"
+        ensure_no_symlink_components(self.root, candidate)
+        return ensure_within(self.root, candidate)
 
     @property
     def global_config(self) -> Path:
@@ -69,15 +71,23 @@ class ProjectPaths:
             self.original_train(model), self.original_train(model) / filename
         )
 
-    def check_image(self, model: str) -> Path:
+    def check_image(self, model: str, group: int | None = None) -> Path:
         validate_model_name(model)
-        return ensure_within(self.root, self.root / "data/03_check" / f"{model}.png")
+        name = "all.png" if group is None else f"group_{self._group(group)}.png"
+        candidate = self.root / "data/03_check" / model / name
+        ensure_no_symlink_components(self.root, candidate)
+        return ensure_within(self.root, candidate)
 
-    def prepared_train(self, model: str) -> Path:
+    def prepared_train(self, model: str, group: int | None = None) -> Path:
         ensure_no_symlink_components(
             self.root, self.root / "data/04_train" / validate_model_name(model)
         )
-        return self._model_dir("data/04_train", model)
+        model_dir = self._model_dir("data/04_train", model)
+        if group is None:
+            return model_dir
+        target = model_dir / f"group_{self._group(group)}"
+        ensure_no_symlink_components(self.root, target)
+        return ensure_within(model_dir, target)
 
     def prepared_test(self, model: str) -> Path:
         ensure_no_symlink_components(
@@ -86,14 +96,35 @@ class ProjectPaths:
         return self._model_dir("data/05_test", model)
 
     def results(self, model: str) -> Path:
-        return self._model_dir("data/06_result", model)
+        candidate = self.root / "data/06_result" / validate_model_name(model)
+        ensure_no_symlink_components(self.root, candidate)
+        return ensure_within(self.root, candidate)
 
-    def study_dir(self, model: str) -> Path:
-        return self._model_dir("optuna", model)
+    def study_dir(self, model: str, group: int | None = None) -> Path:
+        model_dir = self._model_dir("optuna", model)
+        if group is None:
+            return model_dir
+        target = model_dir / f"group_{self._group(group)}"
+        ensure_no_symlink_components(self.root, target)
+        return ensure_within(model_dir, target)
 
-    def checkpoint(self, model: str) -> Path:
+    def checkpoint(self, model: str, group: int) -> Path:
         validate_model_name(model)
-        return ensure_within(self.root, self.root / "weights" / f"{model}.ckpt")
+        target = self.root / "weights" / model / f"group_{self._group(group)}.ckpt"
+        ensure_no_symlink_components(self.root, target)
+        return ensure_within(self.root, target)
+
+    def result_generations(self, model: str) -> Path:
+        return self.results(model) / "generations"
+
+    def result_current(self, model: str) -> Path:
+        return self.results(model) / "current.json"
+
+    def model_lock(self, model: str) -> Path:
+        validate_model_name(model)
+        target = self.root / ".locks" / f"{model}.lock"
+        ensure_no_symlink_components(self.root, target)
+        return ensure_within(self.root, target)
 
     @property
     def pretrained(self) -> Path:
@@ -101,7 +132,15 @@ class ProjectPaths:
 
     def _model_dir(self, parent: str, model: str) -> Path:
         validate_model_name(model)
-        return ensure_within(self.root, self.root / parent / model)
+        target = self.root / parent / model
+        ensure_no_symlink_components(self.root, target)
+        return ensure_within(self.root, target)
+
+    @staticmethod
+    def _group(group: int) -> int:
+        if isinstance(group, bool) or not isinstance(group, int) or group < 0:
+            raise ValueError(f"group must be a nonnegative integer: {group!r}")
+        return group
 
     def remove_model_artifact(self, path: Path, *, expected: Path) -> None:
         """Remove only an explicitly resolved model artifact."""

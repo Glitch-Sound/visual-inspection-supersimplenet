@@ -3,7 +3,7 @@
 SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデルの学習、外観検査をローカルCLIで実行するプロジェクトである。
 
 大容量の元画像を基準画像へ位置合わせして分割し、正常画像中心のデータから評価用モデルと暫定閾値を生成する。<br />
-検査では分割画像ごとの異常スコアと可視化画像を保存し、元画像単位の判定へ集約する。
+検査では分割画像ごとの異常スコアと可視化画像を保存し、元画像・グループ単位の判定へ集約する。
 
 > [!IMPORTANT]
 > 現在のモデルと閾値は初期評価用である。<br />
@@ -12,297 +12,149 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 
 ## よく使う用語
 
-初めて参加する開発者向けの短い説明である。<br />
-振る舞いと受け入れ条件の正本は[正式仕様](openspec/specs/visual-inspection/README.md)と該当する change に置く。
+初めて参加する開発者向けの説明である。<br />
+振る舞いと受け入れ条件の正本は[外観検査仕様](openspec/specs/visual-inspection/README.md)と[group-scoped-inspection-models change](openspec/changes/archive/2026-10-09-group-scoped-inspection-models/proposal.md)に置く。
 
 | 用語 | 意味 |
 | --- | --- |
-| 型番 | 設定、入力画像、モデル、結果をひも付ける対象製品の識別子 |
-| `model` | CLI の `--model` や設定・成果物の `model` が示す処理対象の型番。<br />学習済みモデルそのものは指さない |
-| 基準画像 | 型番ごとの分割範囲を定め、元画像の位置合わせ先となる画像 |
-| 元画像 | 学習または検査のために入力する、分割前の画像 |
-| 分割画像 | 元画像を基準画像へ位置合わせし、設定された範囲で切り出した画像 |
-| 準備manifest | 元画像と分割画像の対応、および準備結果を後続処理へ引き渡す記録 |
-| checkpoint | 学習したモデルと、対応する型番・スコア契約・暫定閾値を保存した成果物 |
-| バックボーン | 分割画像から特徴を取り出す事前学習済みのモデル部分。<br />学習開始時の重みを指定する |
-| 異常スコア | SuperSimpleNet の `pred_score`。校正済み確率ではない |
-| 異常マップ | 分割画像の画素ごとの `anomaly_map`。ヒートマップ表示に使い、画像全体の異常スコアとは別の値 |
-| ヒートマップ表示範囲 | 型番設定の `heatmap_range.min/max`。異常マップの値を共通の色尺度へ割り当てる範囲 |
-| 暫定閾値 | 学習データの異常スコアから算出する、初期評価用の判定境界 |
-| 検査用閾値 | 型番設定の `inspection_threshold`。<br />指定時に検査判定へ使用する値 |
-| `undetermined` (未判定) | 位置合わせ失敗や分割不足などで、元画像を正常と確定できない判定 |
-| capability (仕様上の能力) | 継続して管理する機能・責務の単位。<br />このプロジェクトでは画像準備、モデル学習、モデル評価の3つ |
-| OpenSpec change | 一回の変更を計画・実装・検証する単位。<br />capabilityとは別に管理する |
+| 型番 / `model` | CLI の `--model` で指定する対象製品の識別子。学習済みモデルそのものは指さない |
+| 分割 / `range` | 基準画像上の左上座標と分割IDで定義する切り出し範囲 |
+| グループ / `group` | 共通の分割IDを参照し、学習・検査条件と学習済みモデルを独立して持つ単位 |
+| 基準画像 | 元画像の位置合わせ先となる画像 |
+| 元画像 | 学習または検査に入力する、分割前の画像 |
+| 分割画像 | 元画像を位置合わせし、設定範囲で切り出した画像 |
+| 準備manifest | 元画像と分割画像の対応、準備条件の指紋を記録するJSON |
+| 準備指紋 | 分割画像を作る設定のハッシュ。学習・検査開始時に準備結果との一致を確認する |
+| checkpoint | グループの学習済みモデルと型番・グループ・暫定閾値のメタデータ |
+| 異常スコア | SuperSimpleNetの`pred_score`。校正済み確率ではない |
+| 異常マップ | 分割画像の画素ごとの`anomaly_map`。ヒートマップ表示に使う |
+| 暫定閾値 | 学習集合の異常スコアから算出する、初期評価用の判定境界 |
+| 検査用閾値 | グループの`inspection_threshold`。指定時に暫定閾値に代えて使う |
+| `undetermined` | 位置合わせ失敗や分割不足などで正常と確定できないグループ内判定 |
+| 結果世代 | 1回の`test`で完成させる、グループ別の結果画像とJSONの一式 |
+| 現行参照 | `current.json`に記録する、各グループで現在使用する結果世代の相対パス |
+| capability | 継続して管理する機能・責務の単位。このプロジェクトでは画像準備、モデル学習、モデル評価の3つ |
+| OpenSpec change | 一回の変更を計画・実装・検証する単位 |
 
 ## 動作環境
 
-- Python 3.13
-- `uv`
-- Ubuntu 24.04 LTS または Windows 11 (x86-64)
-- 対応GPUは任意。CUDAを利用できない場合はCPUへ切り替える
-- Node.js 22とnpm (OpenSpecの操作および開発時の品質検査に使用)
+- Python 3.13と`uv`
+- Ubuntu 24.04 LTSまたはWindows 11 (x86-64)
+- CUDA対応GPUは任意。利用できない場合はCPUを使う
+- Node.js 22とnpm (OpenSpec操作と開発時の品質検査)
 
-Dev Containerを使わずに開発する場合は、依存関係を同期する。
+依存関係を同期する。
 
 ```bash
 uv sync --locked
 npm ci
 ```
 
-Dev Containerを利用する場合は、Docker EngineとDev Containers対応エディターを用意し、このリポジトリをコンテナで開く。<br />
-コンテナ作成時に`uv sync --locked`と`npm ci`が自動実行されるため、初回起動後に同じコマンドを手動で実行する必要はない。
-
 ## 外観検査ワークフロー
 
-ワークフローは、画像準備、モデル学習、モデル評価の3つの能力で構成される。
+### 1. 入力と設定
 
-```mermaid
-flowchart LR
-    trainSource["学習元画像"] -->|位置合わせ・分割| trainImages["学習用分割画像"]
-    trainImages -->|探索・学習| model["モデル・暫定閾値"]
-    testSource["試験元画像"] -->|位置合わせ・分割| testImages["試験用分割画像"]
-    model --> evaluation["検査"]
-    testImages --> evaluation
-    evaluation --> results["分割・元画像の検査結果"]
-```
+`<model>`には英数字から始まる英数字・`_`・`-`を使用する。<br />
+`config/setting.ini`の`IMAGE.SIZE`に分割画像の一辺、`IMAGE.RESIZE`に位置合わせ前の縮小倍率を指定する。<br />
+`RESIZE`を省略した場合は1を使用する。<br />
+`range`の`x`と`y`は縮小前の基準画像で指定し、縮小後も分割画像の一辺には`SIZE`を使用する。
 
-仕様の分割理由、責務境界、仕様間の関係は[外観検査仕様ガイド](openspec/specs/visual-inspection/README.md)を参照する。
+型番ごとに[part_XX.json](config/part_XX.json)をひな形として`config/part_<model>.json`を用意する。<br />
+基準画像と学習元画像を`data/01_original_train/<model>/`、試験元画像を`data/02_original_test/<model>/`に置く。
 
-### 1. 入力を用意する
-
-対象型番ごとに設定と画像を配置する。<br />
-`<model>`には、英数字から始まる英数字・`_`・`-`だけを使用できる。
-
-| 入力 | 内容 |
+| 設定項目 | 内容 |
 | --- | --- |
-| `config/setting.ini` | 全型番共通の元画像縮小倍率と分割画像サイズ |
-| `config/part_<model>.json` | 型番別の分割、位置合わせ、探索、拡張、閾値設定 |
-| `data/01_original_train/<model>/` | 基準画像と正常中心の学習元画像 |
-| `data/02_original_test/<model>/` | 検査対象の試験元画像 |
+| `base` | 学習元画像領域直下の基準画像名 |
+| `range` | 一意な分割IDと縮小前の開始座標の配列 |
+| `blacklist` | 学習準備だけで除外する元画像名と分割ID |
+| `alignment` | 型番内で共通のORB位置合わせ条件 |
+| `groups` | 必須の非空配列。グループIDは型番内で一意な非負整数 |
+| `groups[].range_ids` | 非空・重複なしの既存分割ID。同じ分割IDを複数グループで参照できる |
+| `groups[].optuna_settings` | グループ別の探索、学習・検証分離、暫定閾値 |
+| `groups[].score` | `supersimplenet.pred_score`と無効化したPostProcessor |
+| `groups[].augmentation` | 学習入力だけに適用する拡張条件 |
+| `groups[].inspection_threshold` | `null`なら暫定閾値。0以上1以下の数値なら検査で使用 |
+| `groups[].heatmap_range` | 検査時に必須の有限な下限・上限。`min < max` |
 
-`data/` はリポジトリに含まれない。<br />
-開発者または運用者が対象型番の `data/01_original_train/<model>/` と `data/02_original_test/<model>/` を事前に作成し、元画像を配置する。<br />
-確認画像・分割画像・検査結果の出力先は、各CLIが必要に応じて作成する。
+`blacklist`と`alignment`は型番共通である。<br />
+暫定閾値の`groups[].optuna_settings.threshold.value`は学習完了時に対象グループだけ更新される。<br />
+checkpointと最良試行にも同じ値を保存するため、暫定閾値だけを手動で変更しない。<br />
+切り出し位置、サイズ、縮小倍率、位置合わせなどを変更したら、該当する`train-pre`または`test-pre`を再実行する。<br />
+準備指紋が一致しない入力は学習・検査の前に拒否される。
 
-#### 全体設定：`config/setting.ini`
-
-[setting.ini](config/setting.ini)の`[IMAGE] SIZE`に、切り出す正方形の一辺をピクセル単位の正の整数で指定する。<br />
-`[IMAGE] RESIZE`には、位置合わせ前に基準画像と元画像の縦横へ適用する倍率を0より大きく1以下で指定する。<br />
-`RESIZE = 0.5`なら縦横の画素数は半分になり、縮小には画質劣化を抑える面積補間を使用する。<br />
-`RESIZE`を省略した既存設定は倍率1として扱う。<br />
-設定値は全型番に適用される。<br />
-`SIZE = 500`なら各分割範囲は500×500ピクセルとなる。<br />
-`SIZE`は縮小後も変わらず、`range`の座標は縮小前の基準画像を基準とする。<br />
-例えば`RESIZE = 0.5`で元画像上の`x = 400`を指定すると、縮小後の`x = 200`から`SIZE`ピクセル四方を切り出す。<br />
-座標に倍率を掛けた値は、小数部が0.5以上なら切り上げる。<br />
-値と同じ行にコメントを記載しない。
-
-#### 型番別設定：`config/part_<model>.json`
-
-[part_XX.json](config/part_XX.json)をひな形として型番ごとに用意する。<br />
-例えば型番`AB-01`には`config/part_AB-01.json`を配置し、`--model AB-01`で読み込む。<br />
-主な項目は次のとおり。
-
-| 項目 | 設定内容 |
-| --- | --- |
-| `base` | `data/01_original_train/<model>/`直下にある基準画像のファイル名。<br />ディレクトリを含むパスは指定できない |
-| `range` | 分割範囲の配列。<br />各要素の`id`は0〜99の一意な分割ID、`x`・`y`は縮小前の基準画像の左上を原点とする切り出し開始座標。<br />範囲の一辺には縮小後も`SIZE`を使用する |
-| `blacklist` | 学習準備から除外する元画像名`image`と分割IDの配列`id`。試験準備には適用しない |
-| `inspection_threshold` | 任意の検査用閾値。<br />未指定または`null`なら暫定閾値を使い、0〜1の数値ならその値を`test`の判定に使う |
-| `heatmap_range` | 検査時に必須のヒートマップ表示範囲。<br />`min`と`max`に有限の数値を指定し、`min < max`とする。学習・画像準備では省略できる |
-| `alignment` | ORB位置合わせのKNN近傍候補数`knn_k` (2)、比率判定閾値`ratio_threshold` (0.75)、最低対応点数 (10)、RANSAC再投影誤差 (8.0px)・信頼確率 (0.95)、最低インライア比率 (0.2) |
-| `optuna_settings.search` | 学習率倍率、バッチサイズ、エポック数、特徴層、前処理画像サイズの探索候補。正規化・補間・antialiasの設定も含む |
-| `optuna_settings.sampler`・`pruner` | Optunaの乱数seedと枝刈り条件 |
-| `optuna_settings.normal_only` | 元画像単位の学習・検証比率、乱数seed、探索目的値に使用する検証スコアのパーセンタイル |
-| `optuna_settings.execution` | 探索試行回数、乱数seed、探索再開の設定 |
-| `optuna_settings.threshold` | 学習集合のスコアから暫定閾値を算出する方法・パーセンタイル・スコア源。<br />`value`は初回学習前に`null`とし、学習完了時に更新される |
-| `score` | 異常スコア源。<br />`supersimplenet.pred_score`を使用し、Anomalib PostProcessorを無効にする |
-| `augmentation` | 学習入力だけに適用するデータ拡張。<br />`enabled`で全体を切り替え、`order`と各変換の`enabled`・`probability`・強度で内容を指定する |
-
-`blacklist`の指定例は`{"image": "sample.png", "id": [0, 1]}`である。<br />
-`image`には学習元画像の拡張子付きファイル名を指定する。<br />
-`range`に存在しない分割IDや、学習元画像に存在しないファイル名は指定できない。
-
-`score.source`と`optuna_settings.threshold.score_source`は一致させ、PostProcessorを有効にしない。<br />
-学習後の`threshold.value`はcheckpointと`best_trial.json`にも同じ値が保存されるため、設定ファイルだけを手動で変更しない。<br />
-検査用閾値を変えるときは`inspection_threshold`を編集し、`test`を再実行する。<br />
-学習時に更新されるのは暫定閾値であり、検査用閾値は保持される。<br />
-`heatmap_range`は`anomaly_map`の尺度で指定し、異常スコアの0〜1の範囲とは独立に決める。<br />
-ひな形の0〜1は設定形式の例であり、対象の学習済みモデルの異常マップ値を評価してから範囲を決める。<br />
-モデルを再学習・更新した場合も表示範囲を見直す。<br />
-設定値の規範的な条件は[画像準備仕様](openspec/specs/visual-inspection/image-preparation/spec.md)と[モデル学習仕様](openspec/specs/visual-inspection/model-training/spec.md)を参照する。
-
-### 2. 分割範囲を確認する
+### 2. 確認・学習・検査
 
 ```bash
 uv run --locked check --model XX
-```
-
-基準画像へ分割範囲と分割IDを重ねた`data/03_check/XX.png`を確認し、全ての範囲が意図した検査対象を覆っていることを目視で確認する。
-`RESIZE`を変更した場合は縮小後の確認画像で`range`座標を見直し、学習・試験の分割画像を再生成する。
-
-### 3. 学習画像を準備する
-
-```bash
 uv run --locked train-pre --model XX
-```
-
-学習元画像を基準画像へ位置合わせし、ブラックリストを除外して分割画像とmanifestを`data/04_train/XX/`へ保存する。<br />
-位置合わせに失敗した元画像は理由付きで学習対象から除外される。
-
-### 4. モデルを学習する
-
-```bash
 uv run --locked train --model XX
-```
-
-元画像単位で学習用と検証用へ分離し、Optunaによる探索を実行する。<br />
-事前学習バックボーンには`wide_resnet50_2.tv_in1k`を使用する。<br />
-探索開始時に学習・検証画像数、既存試行数、今回の試行数を標準エラーへ表示する。<br />
-各試行の開始時には学習率倍率、バッチサイズ、エポック数、特徴層、前処理画像サイズを表で示し、終了時には完了・枝刈り・失敗と、完了した試行の暫定探索指標を示す。<br />
-学習終了時には最良試行の条件も表で示し、標準出力の実行記録JSONは一件のまま維持する。<br />
-通常の再実行では`optuna/XX/study.db`にある探索履歴を使用して未完了試行から再開する。
-
-探索履歴とモデルを破棄して最初から実行する場合だけ、`--restart`を指定する。
-
-```bash
-uv run --locked train --model XX --restart
-```
-
-旧`wide_resnet50_2.racm_in1k`から戻す際は、対象の全型番で`train --restart`を実行し、旧探索履歴とcheckpointを破棄して再学習する。<br />
-通常の`train`による探索再開や旧checkpointを使った`test`は行わない。<br />
-新しい暫定閾値を確認し、必要に応じて`inspection_threshold`を見直す。<br />
-異常マップの値に合わせて`heatmap_range`も見直し、試験結果は`test --restart`で再生成する。<br />
-元画像と準備済み画像は、この再学習で削除しない。
-
-### 5. 試験画像を準備する
-
-```bash
 uv run --locked test-pre --model XX
-```
-
-試験元画像を位置合わせ・分割し、分割画像とmanifestを`data/05_test/XX/`へ保存する。<br />
-試験画像には学習用ブラックリストを適用しない。<br />
-位置合わせに失敗した画像は正常とせず、後続の検査へ`undetermined`として引き継ぐ。
-
-### 6. 検査する
-
-```bash
 uv run --locked test --model XX
 ```
 
-型番別モデルと有効な判定閾値を全分割画像へ適用し、結果画像と元画像単位のJSONを`data/06_result/XX/`へ保存する。<br />
-検査中は元画像単位の処理済み件数と総件数を標準エラーへ表示する。<br />
-端末では進捗バー、それ以外では`検査進捗 1/10`のような件数表示になり、未判定や個別分割エラーの元画像も集約後に一件として数える。<br />
-標準出力には従来どおり一件の実行記録JSONを出す。<br />
-結果JSONの`threshold`には実際に判定に使用した値を、`heatmap_range`には表示に使用した下限・上限を記録する。<br />
-異常と判定した分割画像だけ、同じ型番設定の範囲で`anomaly_map`を色付けし、範囲外の値には端の色を使う。<br />
-その結果画像は左に元の分割画像、右にヒートマップ付き画像を同じ高さで並べる。<br />
-正常と判定した分割の結果画像は従来どおり元の分割画像を保存する。<br />
-同じ学習済みモデルと表示範囲の結果は同じ異常マップ値に同じヒートマップ色を割り当てるが、元画像へ重ねた最終画素の色は元画像によって異なる。<br />
-比較前に、使用した学習済みモデルの同一性を運用で確認し、各結果JSONの表示範囲も照合する。<br />
-表示範囲の変更は`pred_score`、判定閾値、判定結果を変えず、正常と判定した画像にはヒートマップを適用しない。<br />
-検査に使うcheckpointには、このアプリで生成し、出所を確認できるものだけを配置する。<br />
-読込時にはモデルの前処理を含むオブジェクトを復元する。
-
-既存の検査結果だけを削除して再生成する場合は、`--restart`を指定する。
+`check`は全分割と各グループの確認画像を作る。<br />
+`train-pre`と`train`は省略時に全グループをID昇順で処理する。<br />
+`test-pre`は常に全分割を一度準備し、`test`は省略時に全グループを検査する。<br />
+単独グループを操作する場合は次のように指定する。
 
 ```bash
-uv run --locked test --model XX --restart
+uv run --locked train-pre --model XX --group 1
+uv run --locked train --model XX --group 1
+uv run --locked test --model XX --group 1
 ```
 
-表示範囲を変更した場合は`test --restart`で旧結果を削除して再生成する。<br />
-このコマンドは成果物の整合を確認する前に旧検査結果を削除するため、旧結果が必要なら実行前に退避する。<br />
-異なる表示範囲で生成した画像を色だけで直接比較しない。
+学習探索履歴とcheckpointを対象グループで作り直す場合は`train --restart`を使う。<br />
+`test`は実行のたびに対象グループの結果を新しく作るため、`--restart`は受け付けない。<br />
+全件学習で後続グループが失敗した場合、コマンドはエラー終了し、失敗グループIDを表示する。<br />
+完了済みグループの成果物は保持する。<br />
+全件検査では対象グループのモデル一式を推論前に照合し、一つでも欠ければ結果を更新しない。<br />
+検査中に失敗した場合も`current.json`を切り替えず、旧結果を保持する。
 
-### 既存の分割座標と成果物を移す
+元画像の判定はグループごとに、`anomaly`が一つでもあれば`anomaly`、必要な全分割が`normal`なら`normal`、それ以外は`undetermined`とする。<br />
+グループ間の総合判定は作らない。
 
-旧`range`は縮小後の座標なので、設定と準備画像、checkpoint、最良試行、検査結果を先に退避する。<br />
-旧座標と一致するように縮小前の整数座標へ書き換え、`floor(新座標 × RESIZE + 0.5)`が旧座標になることを確認する。<br />
-`SIZE`と`RESIZE`が同じであることを確認し、`check`の確認画像で各範囲を目視確認する。<br />
-`train-pre`と`test-pre`を再実行し、旧分割画像と新分割画像の画素、manifestの元画像名と分割IDを比較する。<br />
-一致する場合は既存モデルを使えるか確認して記録し、異なる場合や確認できない場合は`train --restart`で学習し直して`test`を再実行する。<br />
-結果が必要なら再実行前に退避し、ロールバック時は旧コード、旧設定、旧準備画像、checkpoint、最良試行、検査結果を一式で戻す。<br />
-準備済み画像と設定の対応は自動照合しないため、旧成果物と新成果物を混用しないよう運用で確認する。
-
-## 判定とエラーの扱い
-
-元画像の判定は、分割画像の結果から次の優先順位で集約する。
-
-| 条件 | 元画像の判定 |
-| --- | --- |
-| 1つ以上の分割が`anomaly` | `anomaly` |
-| 必要な全分割が`normal` | `normal` |
-| 上記以外。位置合わせ失敗、分割不足、推論失敗などを含む | `undetermined` |
-
-`undetermined`は正常を意味しない。<br />
-結果JSONの理由と案内を確認し、原則として再撮影する。<br />
-異なる扱いが必要な場合は評価者が判断する。
-
-全CLIは共通の終了コードを使用する。
-
-| 終了コード | 意味 |
-| --- | --- |
-| `0` | 成功 |
-| `2` | 設定、入力、成果物契約の不備 |
-| `3` | 画像I/Oや学習・推論などの処理失敗 |
-
-各コマンドの標準出力は終了時に1件の機械可読JSONを出す。<br />
-人向けの処理段階、警告、エラー、終了要約は標準エラー出力に表示する。<br />
-`train-pre`と`test-pre`は端末上でRichによる進捗バーを表示し、端末以外では対象元画像の処理済み件数を行単位で表示する。<br />
-その他の処理段階と終了要約は読みやすいテキストで表示する。<br />
-終了JSONには開始・終了日時、処理時間、終了状態、OS、Python・主要依存関係、使用デバイス、警告、エラーを記録する。
-
-## 成果物
+### 成果物と読戻し
 
 | 成果物 | 保存先 |
 | --- | --- |
-| 分割位置の確認画像 | `data/03_check/<model>.png` |
-| 学習用分割画像とmanifest | `data/04_train/<model>/` |
-| 試験用分割画像とmanifest | `data/05_test/<model>/` |
-| Optuna studyと最良試行 | `optuna/<model>/study.db`、`optuna/<model>/best_trial.json` |
-| 学習済みcheckpoint | `weights/<model>.ckpt` |
-| 分割結果画像と元画像単位のJSON | `data/06_result/<model>/` |
-| 事前学習重みキャッシュ | `pretrained/` |
+| 全分割と各グループの確認画像 | `data/03_check/<model>/all.png`、`group_<id>.png` |
+| グループ別学習準備 | `data/04_train/<model>/group_<id>/` |
+| 全分割の試験準備 | `data/05_test/<model>/` |
+| グループ別探索と最良試行 | `optuna/<model>/group_<id>/` |
+| グループ別checkpoint | `weights/<model>/group_<id>.ckpt` |
+| 現行結果参照 | `data/06_result/<model>/current.json` |
+| 検査結果画像と元画像・グループ別JSON | `data/06_result/<model>/generations/<実行ID>/group_<id>/` |
 
-`--restart`は対象型番の派生成果物を削除してから再生成する。<br />
-旧成果物が必要な場合は、実行前にリポジトリ外などの任意の場所へ退避する。<br />
-元画像、型番設定、事前学習重みキャッシュは削除されない。
+`current.json`の`groups`は、グループIDをキーとして`generations/<実行ID>/group_<id>`への相対パスを示す。<br />
+結果を読む側は、同じ型番の`test`が動いていない時に`current.json`を一度読み、示されたJSONと画像を読む。<br />
+単独検査では他グループの参照を保持する。<br />
+参照の切替後、参照されなくなったグループ結果と空の世代を整理し、現在の各グループ結果だけを残す。<br />
+整理に失敗した場合は警告を記録し、次の型番コマンドで再試行する。<br />
+現行参照が壊れている場合、単独検査と読戻しは拒否されるが、全件`test`で新しい結果一式を作って参照を再生成できる。
+
+同じ型番の5コマンドは同時実行できない。<br />
+後から起動したコマンドは型番を示して終了コード3で拒否する。<br />
+異なる型番は並行して処理できる。<br />
+各コマンドは標準出力に実行記録JSONを1件出し、処理段階、警告、失敗理由は標準エラーへ表示する。<br />
+終了コード0は成功、2は設定や入力の不備、3は処理失敗や同じ型番の同時実行を示す。
 
 ## 実機スモーク試験
 
-運用受け入れ前に、Ubuntu 24.04 LTSとWindows 11の実機で、GPUを利用する経路とGPUを利用できない場合のCPU経路を確認する。<br />
-少量の評価用データを配置し、各OSでGPU利用可能時とGPU無効化時にそれぞれ次を実行する。<br />
-証跡が上書きされないよう、`--output`には実行ごとに異なるパスを指定する。
+Ubuntu 24.04 LTSとWindows 11の対象実機で、CPUと利用可能なGPUによる全件・単独グループの実行と成果物読戻しを確認する。<br />
+`--output`には実行ごとに異なるパスを指定する。
 
 ```bash
-uv run --locked python scripts/run_visual_inspection_smoke.py \
-  --model XX \
-  --output smoke/visual-inspection-XX.json
+uv run --locked python scripts/run_visual_inspection_smoke.py --model XX --output smoke/all.json
+uv run --locked python scripts/run_visual_inspection_smoke.py --model XX --group 1 --output smoke/group-1.json
 ```
 
-生成したJSONは試験証跡として保存する。<br />
-本番利用の性能・誤検出基準は、このスモーク試験とは別に評価する。
+結果JSONは対象OS、Python、依存版、使用デバイス、実行状態、保存先の読戻し結果を記録する。<br />
+本番利用の性能・誤検出基準は別途評価する。
 
 ## 仕様
 
-正式仕様は`openspec/specs/`で管理する。<br />
-外観検査は、主な責務と成果物が異なる次の3能力に分割されている。
-
-| 能力 | 対象 |
-| --- | --- |
-| [`visual-inspection/image-preparation`](openspec/specs/visual-inspection/image-preparation/spec.md) | 基準画像、位置合わせ、分割、ブラックリスト、準備manifest |
-| [`visual-inspection/model-training`](openspec/specs/visual-inspection/model-training/spec.md) | 学習・検証分離、探索、データ拡張、モデル・閾値、再開 |
-| [`visual-inspection/model-evaluation`](openspec/specs/visual-inspection/model-evaluation/spec.md) | デバイス選択、推論、可視化、判定集約、結果契約、再検査 |
-
-`openspec/specs/visual-inspection/`は能力を整理する名前空間であり、親specではない。<br />
-詳細は[外観検査仕様ガイド](openspec/specs/visual-inspection/README.md)を参照する。
-
-`src/app/` は3能力の処理と共通契約を分けている。<br />
-責務の境界、依存方向、配置を決める際の確認項目と、このプロジェクトでの仕様・パッケージの対応は[アプリケーションの責務と配置](openspec/structure.md#アプリケーションの責務と配置)を参照する。
-
-利用者や外部システムから観測できる振る舞いを変更する場合は、実装前にOpenSpec changeを作成する。<br />
-共通方針は[AGENTS.md](AGENTS.md)、プロダクト・技術・配置の前提は[product.md](openspec/product.md)、[tech.md](openspec/tech.md)、[structure.md](openspec/structure.md)を参照する。
+正式仕様は`openspec/specs/`で管理し、今回のグループ単位の変更は[group-scoped-inspection-models](openspec/changes/archive/2026-10-09-group-scoped-inspection-models/proposal.md)で追跡する。<br />
+画像準備、モデル学習、モデル評価の責務・共有契約・依存方向は[配置案内](openspec/structure.md)を参照する。
 
 ## 開発
 
@@ -384,6 +236,8 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| group-scoped-inspection-models | AC-007 | 未検証 | タスク6.7: Ubuntu 24.04 LTS・Windows 11の対象実機でCPUと利用可能なGPUを使い、全件・単独グループの5 CLIと成果物読戻しを確認する。 |
+| group-scoped-inspection-models | AC-008 | 未検証 | タスク6.8: 両OSで同一型番・別型番の同時起動、終了コード3の拒否、中断後の復旧を確認する。 |
 | organize-app-by-capability | AC-002 | 未検証 | タスク4.3: Ubuntu 24.04 LTS・Windows 11 の実機で5 CLIの名前・引数・終了コード・出力を確認する。 |
 | organize-app-by-capability | AC-003 | 未検証 | タスク4.4: 両OSの実機でmanifest・checkpoint・検査結果の形式、保存先、読戻しを確認する。 |
 | organize-app-by-capability | AC-004 | 未検証 | タスク4.5: 両OSでGPU有効・無効の計4条件を実行し、学習・推論で実際に使用したデバイスを確認する。 |
@@ -401,14 +255,14 @@ npx --no-install openspec update
 | improve-inspection-configuration-and-cli | AC-006 | 未検証 | タスク4.5: 対象型番の旧座標と分割画像を比較し、必要な再学習・検査結果再生成と旧成果物の退避を確認する。 |
 | comparable-heatmap-scale | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11で同一学習済みモデルと表示範囲を確認し、異なる異常マップの同値同色をヒートマップ層で確認する。 |
 | comparable-heatmap-scale | AC-002 | 未検証 | タスク4.3: 両OSで正常画像の非着色、異常画像の着色、スコア・閾値・判定の独立性を確認する。 |
-| comparable-heatmap-scale | AC-003 | 未検証 | タスク4.4: 両OSで表示範囲変更後の`test --restart`と結果JSONの表示範囲を確認する。 |
+| comparable-heatmap-scale | AC-003 | 未検証 | タスク4.4: 両OSで表示範囲変更後の`test`と結果JSONの表示範囲を確認する。 |
 | comparable-heatmap-scale | AC-004 | 未検証 | タスク4.5: 両OSで未指定・不正な表示範囲のCLI拒否と新結果が作られないことを確認する。 |
 | show-test-progress-and-update-backbone | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTS・Windows 11の端末・非端末で`test`の元画像進捗、標準出力JSONと終了コードを確認する。 |
 | show-test-progress-and-update-backbone | AC-002 | 未検証 | タスク4.2: 両OSの実画像で未判定・個別分割エラー・全体失敗時の進捗と終了状態を確認する。 |
 | show-test-progress-and-update-backbone | AC-003 | 未検証 | タスク4.3: 対象型番で`racm_in1k`実重みの取得、再学習、checkpointによる検査を確認する。 |
 | show-test-progress-and-update-backbone | AC-004 | 未検証 | タスク4.4: 全型番で旧探索履歴・checkpointの破棄、閾値・表示範囲の見直し、旧検査結果の再生成を確認する。 |
 | restore-tv-backbone-and-improve-output | AC-001 | 未検証 | タスク5.1: Ubuntu 24.04 LTSとWindows 11で`tv_in1k`の実重みを取得して学習し、checkpointによる検査を確認する。 |
-| restore-tv-backbone-and-improve-output | AC-002 | 未検証 | タスク5.2: 対象の全型番で旧成果物を退避し、`train --restart`、閾値と表示範囲の確認、`test --restart`を実施する。 |
+| restore-tv-backbone-and-improve-output | AC-002 | 未検証 | タスク5.2: 対象の全型番で旧成果物を退避し、`train --restart`、閾値と表示範囲の確認、`test`を実施する。 |
 | restore-tv-backbone-and-improve-output | AC-003 | 未検証 | タスク5.3: 両OSの実画像で正常分割と、異常分割の左原画像・右ヒートマップ付き画像を結果JSONと照合する。 |
 | restore-tv-backbone-and-improve-output | AC-004 | 未検証 | タスク5.4: 両OSの端末・非端末で試行条件表、終了状態、再開時の件数、標準出力JSONと終了コードを確認する。 |
 

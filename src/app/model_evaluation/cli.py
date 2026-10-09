@@ -9,16 +9,20 @@ import typer
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn
 
-from app.common.artifact_transaction import recover_artifact_transaction
 from app.common.cli import ExitCode, _run, show_stage
-from app.common.config import load_config
+from app.common.config import load_config, preparation_fingerprint
 from app.common.contracts import BestTrialResult, load_preparation_manifest
 from app.common.paths import ProjectPaths
+from app.common.result_index import (
+    cleanup_generations,
+    create_generation,
+    publish_current,
+    read_current,
+)
 from app.common.runtime import RunRecorder
 from app.model_evaluation.evaluation import (
     evaluate_model,
     require_heatmap_range,
-    restart_evaluation,
     validate_best_trial_contract,
     validate_score_contract,
 )
@@ -58,63 +62,116 @@ class EvaluationProgress:
 
 def _test_command(
     model: str = typer.Option(..., "--model", help="処理対象の型番"),
-    restart: bool = typer.Option(False, "--restart", help="検査結果を再生成する"),
+    group: int | None = typer.Option(None, "--group", help="処理対象のグループID"),
 ) -> None:
-    """型番別モデルで試験画像を検査する。"""
+    """型番別・グループ別モデルで試験画像を検査する。"""
 
     def action(paths: ProjectPaths, recorder: RunRecorder) -> str:
-        recover_artifact_transaction(paths, model)
-        show_stage("設定読込と学習成果物の照合")
+        show_stage("設定読込と全対象グループの学習成果物照合")
         config = load_config(paths.root, model)
-        require_heatmap_range(config)
-        best = BestTrialResult.read_json(paths.study_dir(model) / "best_trial.json")
-        validate_best_trial_contract(config, paths, best)
-        checkpoint_metadata = load_checkpoint_metadata(paths.checkpoint(model))
-        validate_score_contract(config, checkpoint_metadata)
+        groups = config.part.select_groups(group)
+        recorder.groups = [item.id for item in groups]
         load_preparation_manifest(
             paths.prepared_test(model),
             model=config.model,
             allowed_split_ids={item.id for item in config.part.ranges},
+            fingerprint=preparation_fingerprint(config),
         )
-        if restart:
-            restart_evaluation(paths, model)
-        params = best.parameters
-        predictor = CheckpointPredictor(
-            paths.checkpoint(model),
-            layers=list(params.feature_layers),
-            image_size=params.image_size,
-            learning_rate_multiplier=params.learning_rate_multiplier,
-            device=recorder.device.device,
+        validated: dict[int, tuple[BestTrialResult, dict[str, object]]] = {}
+        problems: list[str] = []
+        for selected in groups:
+            try:
+                require_heatmap_range(selected)
+                best = BestTrialResult.read_json(
+                    paths.study_dir(model, selected.id) / "best_trial.json"
+                )
+                validate_best_trial_contract(config, selected, paths, best)
+                metadata = load_checkpoint_metadata(
+                    paths.checkpoint(model, selected.id)
+                )
+                validate_score_contract(config, selected, metadata)
+                validated[selected.id] = (best, metadata)
+            except (ValueError, FileNotFoundError) as error:
+                problems.append(f"group {selected.id}: {error}")
+        if problems:
+            raise ValueError("training artifacts invalid: " + "; ".join(problems))
+        old_current = (
+            read_current(
+                paths, model, allowed_group_ids={item.id for item in config.part.groups}
+            )
+            if group is not None
+            else {}
         )
+        generation = create_generation(paths, model)
+        all_results = []
+        for selected in groups:
+            try:
+                best, metadata = validated[selected.id]
+                params = best.parameters
+                predictor = CheckpointPredictor(
+                    paths.checkpoint(model, selected.id),
+                    layers=list(params.feature_layers),
+                    image_size=params.image_size,
+                    learning_rate_multiplier=params.learning_rate_multiplier,
+                    device=recorder.device.device,
+                )
+                source = (
+                    "暫定閾値"
+                    if selected.inspection_threshold is None
+                    else "検査用設定"
+                )
 
-        def show_selected_threshold(threshold: float) -> None:
-            source = (
-                "暫定閾値" if config.part.inspection_threshold is None else "検査用設定"
-            )
-            show_stage(f"判定閾値: {threshold} ({source})")
-            show_stage("分割画像を推論し、元画像単位の結果を保存")
+                def show_threshold(
+                    threshold: float,
+                    *,
+                    group_id: int = selected.id,
+                    threshold_source: str = source,
+                ) -> None:
+                    show_stage(
+                        f"グループ {group_id} 判定閾値: {threshold} ({threshold_source})"
+                    )
 
-        with EvaluationProgress() as progress:
-            results = evaluate_model(
-                config,
-                paths,
-                predictor=predictor,
-                finish_runtime=lambda: recorder.finish(ExitCode.SUCCESS),
-                record_warning=recorder.warnings.append,
-                record_error=recorder.errors.append,
-                on_threshold_selected=show_selected_threshold,
-                on_progress=progress.update,
-                checkpoint_metadata=checkpoint_metadata,
+                with EvaluationProgress() as progress:
+                    results = evaluate_model(
+                        config,
+                        selected,
+                        paths,
+                        predictor=predictor,
+                        output_dir=generation / f"group_{selected.id}",
+                        finish_runtime=lambda: recorder.snapshot(ExitCode.SUCCESS),
+                        record_warning=recorder.warnings.append,
+                        record_error=recorder.errors.append,
+                        on_threshold_selected=show_threshold,
+                        on_progress=progress.update,
+                        checkpoint_metadata=metadata,
+                    )
+                all_results.extend(results)
+            except Exception as error:
+                raise RuntimeError(f"group {selected.id} failed: {error}") from error
+        final_runtime = recorder.snapshot(ExitCode.SUCCESS)
+        for result in all_results:
+            result.runtime = final_runtime
+            result.write_json(
+                generation / f"group_{result.group}" / f"{result.source_image}.json"
             )
+        new_paths = {
+            item.id: f"generations/{generation.name}/group_{item.id}" for item in groups
+        }
+        current = {**old_current, **new_paths}
+        publish_current(paths, model, current)
+        try:
+            cleanup_generations(paths, model, current)
+        except (OSError, ValueError) as error:
+            recorder.warnings.append(f"result cleanup deferred: {error}")
         counts = {
-            status: sum(result.overall_status == status for result in results)
+            status: sum(result.overall_status == status for result in all_results)
             for status in ("normal", "anomaly", "undetermined")
         }
         show_stage(
             f"検査完了: 正常={counts['normal']} 異常={counts['anomaly']} "
-            f"未判定={counts['undetermined']} 保存先={paths.results(model)}"
+            f"未判定={counts['undetermined']} 現行参照={paths.result_current(model)}"
         )
-        return f"{len(results)} source images"
+        return f"{len(all_results)} group-source results"
 
     _run("test", model, action, needs_device=True)
 

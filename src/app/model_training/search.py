@@ -11,7 +11,7 @@ from typing import Protocol
 import numpy as np
 import optuna
 
-from app.common.config import AppConfig
+from app.common.config import AppConfig, GroupConfig
 from app.common.contracts import PreparationManifest
 
 
@@ -90,8 +90,8 @@ class TrialRunner(Protocol):
     ) -> TrialOutcome: ...
 
 
-def suggest_parameters(trial: optuna.Trial, config: AppConfig) -> TrialParameters:
-    search = config.part.optuna_settings.search
+def suggest_parameters(trial: optuna.Trial, group: GroupConfig) -> TrialParameters:
+    search = group.optuna_settings.search
     feature_layers = json.loads(
         trial.suggest_categorical(
             "feature_layers",
@@ -114,8 +114,8 @@ def suggest_parameters(trial: optuna.Trial, config: AppConfig) -> TrialParameter
     )
 
 
-def create_study(config: AppConfig, storage: Path) -> optuna.Study:
-    settings = config.part.optuna_settings
+def create_study(config: AppConfig, group: GroupConfig, storage: Path) -> optuna.Study:
+    settings = group.optuna_settings
     storage.parent.mkdir(parents=True, exist_ok=True)
     sampler = optuna.samplers.TPESampler(seed=settings.sampler.seed)
     pruner = optuna.pruners.MedianPruner(
@@ -124,7 +124,7 @@ def create_study(config: AppConfig, storage: Path) -> optuna.Study:
         interval_steps=settings.pruner.interval_epochs,
     )
     return optuna.create_study(
-        study_name=f"visual-inspection-{config.model}",
+        study_name=f"visual-inspection-{config.model}-group-{group.id}",
         storage=f"sqlite:///{storage}",
         load_if_exists=settings.execution.resume,
         direction="minimize",
@@ -134,7 +134,7 @@ def create_study(config: AppConfig, storage: Path) -> optuna.Study:
 
 
 def run_search(
-    config: AppConfig,
+    group: GroupConfig,
     split: DatasetSplit,
     study: optuna.Study,
     runner: TrialRunner,
@@ -142,11 +142,11 @@ def run_search(
     on_trial_start: Callable[[int, TrialParameters], None] | None = None,
     on_trial_finish: Callable[[optuna.trial.FrozenTrial], None] | None = None,
 ) -> tuple[optuna.Study, dict[int, TrialOutcome]]:
-    settings = config.part.optuna_settings
+    settings = group.optuna_settings
     outcomes: dict[int, TrialOutcome] = {}
 
     def objective(trial: optuna.Trial) -> float:
-        parameters = suggest_parameters(trial, config)
+        parameters = suggest_parameters(trial, group)
         if on_trial_start is not None:
             on_trial_start(trial.number, parameters)
         outcome = runner(parameters, split, trial)

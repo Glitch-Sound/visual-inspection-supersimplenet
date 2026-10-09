@@ -15,19 +15,27 @@ from typing import Any
 import cv2
 import torch
 
+from app.common.config import load_config
 from app.common.contracts import (
     BestTrialResult,
     InspectionResult,
     PreparationManifest,
     RunMetadata,
 )
+from app.common.paths import ProjectPaths
+from app.common.result_index import read_current
 
 COMMANDS = ["check", "train-pre", "train", "test-pre", "test"]
 
 
-def run_command(root: Path, command: str, model: str) -> dict[str, Any]:
+def run_command(
+    root: Path, command: str, model: str, group: int | None = None
+) -> dict[str, Any]:
+    arguments = [command, "--model", model]
+    if group is not None and command in {"train-pre", "train", "test"}:
+        arguments.extend(["--group", str(group)])
     completed = subprocess.run(  # noqa: S603 - fixed allow-list supplied by main
-        [command, "--model", model],
+        arguments,
         cwd=root,
         check=False,
         capture_output=True,
@@ -91,27 +99,58 @@ def _read_results(path: Path) -> dict[str, int]:
     return {"results": len(json_paths), "images": image_count}
 
 
-def inspect_artifacts(root: Path, model: str) -> list[dict[str, Any]]:
+def inspect_artifacts(
+    root: Path, model: str, group: int | None = None
+) -> list[dict[str, Any]]:
+    paths = ProjectPaths(root)
+    config = load_config(root, model)
+    groups = config.part.select_groups(group)
     checks: list[tuple[str, Path, Any]] = [
-        ("check_image", root / "data/03_check" / f"{model}.png", _read_image),
-        (
-            "train_manifest",
-            root / "data/04_train" / model / "manifest.json",
-            _read_manifest,
-        ),
-        ("checkpoint", root / "weights" / f"{model}.ckpt", _read_checkpoint),
-        (
-            "best_trial",
-            root / "optuna" / model / "best_trial.json",
-            BestTrialResult.read_json,
-        ),
-        (
-            "test_manifest",
-            root / "data/05_test" / model / "manifest.json",
-            _read_manifest,
-        ),
-        ("results", root / "data/06_result" / model, _read_results),
+        ("check_image", paths.check_image(model), _read_image),
+        ("test_manifest", paths.prepared_test(model) / "manifest.json", _read_manifest),
     ]
+    for selected in config.part.select_groups():
+        checks.append(
+            (
+                f"check_group_{selected.id}",
+                paths.check_image(model, selected.id),
+                _read_image,
+            )
+        )
+    for selected in groups:
+        checks.extend(
+            [
+                (
+                    f"train_manifest_{selected.id}",
+                    paths.prepared_train(model, selected.id) / "manifest.json",
+                    _read_manifest,
+                ),
+                (
+                    f"checkpoint_{selected.id}",
+                    paths.checkpoint(model, selected.id),
+                    _read_checkpoint,
+                ),
+                (
+                    f"best_trial_{selected.id}",
+                    paths.study_dir(model, selected.id) / "best_trial.json",
+                    BestTrialResult.read_json,
+                ),
+            ]
+        )
+    current = read_current(
+        paths, model, allowed_group_ids={item.id for item in config.part.groups}
+    )
+    for selected in groups:
+        relative = current.get(selected.id)
+        checks.append(
+            (
+                f"results_{selected.id}",
+                paths.results(model) / relative
+                if relative
+                else paths.results(model) / "missing",
+                _read_results,
+            )
+        )
     artifacts: list[dict[str, Any]] = []
     for name, path, reader in checks:
         record: dict[str, Any] = {
@@ -159,12 +198,13 @@ def nvidia_driver_versions() -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
+    parser.add_argument("--group", type=int)
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     root = args.root.resolve()
-    runs = [run_command(root, command, args.model) for command in COMMANDS]
-    artifacts = inspect_artifacts(root, args.model)
+    runs = [run_command(root, command, args.model, args.group) for command in COMMANDS]
+    artifacts = inspect_artifacts(root, args.model, args.group)
     report = {
         "recorded_at": datetime.now(UTC).isoformat(),
         "model": args.model,

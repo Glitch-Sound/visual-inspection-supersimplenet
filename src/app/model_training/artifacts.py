@@ -15,7 +15,7 @@ from app.common.artifact_transaction import (
     _transaction_path,
     recover_artifact_transaction,
 )
-from app.common.config import AppConfig, write_threshold
+from app.common.config import AppConfig, GroupConfig, write_threshold
 from app.common.contracts import BestTrialResult, ScoreContract, TrialParametersContract
 from app.common.paths import ProjectPaths
 from app.common.runtime import package_versions
@@ -25,12 +25,13 @@ from app.model_training.search import DatasetSplit, TrialOutcome
 def persist_best_trial(
     *,
     config: AppConfig,
+    group: GroupConfig,
     paths: ProjectPaths,
     split: DatasetSplit,
     study: optuna.Study,
     outcomes: dict[int, TrialOutcome],
 ) -> BestTrialResult:
-    recover_artifact_transaction(paths, config.model)
+    recover_artifact_transaction(paths, config.model, group.id)
     best = study.best_trial
     if best.value is None:
         raise RuntimeError("best trial does not have an objective value")
@@ -48,12 +49,12 @@ def persist_best_trial(
     threshold = float(
         np.percentile(
             outcome.training_scores,
-            config.part.optuna_settings.threshold.percentile,
+            group.optuna_settings.threshold.percentile,
         )
     )
-    target_checkpoint = paths.checkpoint(config.model)
+    target_checkpoint = paths.checkpoint(config.model, group.id)
     target_config = paths.model_config(config.model)
-    target_best = paths.study_dir(config.model) / "best_trial.json"
+    target_best = paths.study_dir(config.model, group.id) / "best_trial.json"
     targets = {
         "checkpoint": target_checkpoint,
         "config": target_config,
@@ -74,11 +75,16 @@ def persist_best_trial(
         _attach_checkpoint_metadata(
             stages["checkpoint"],
             model=config.model,
+            group=group.id,
             threshold=threshold,
         )
-        write_threshold(target_config, threshold, destination=stages["config"])
+        write_threshold(
+            target_config, threshold, group=group.id, destination=stages["config"]
+        )
         result = BestTrialResult(
             model=config.model,
+            group=group.id,
+            range_ids=group.range_ids,
             trial_number=best.number,
             parameters=_trial_parameters_contract(best.params),
             objective=float(best.value),
@@ -87,7 +93,7 @@ def persist_best_trial(
             threshold=threshold,
             train_sources=list(split.train_sources),
             validation_sources=list(split.validation_sources),
-            seed=config.part.optuna_settings.execution.seed,
+            seed=group.optuna_settings.execution.seed,
             dependencies=package_versions(),
         )
         result.write_json(stages["best_trial"])
@@ -96,7 +102,7 @@ def persist_best_trial(
         raise
 
     existed = {name: path.exists() for name, path in targets.items()}
-    journal = _transaction_journal(paths, config.model)
+    journal = _transaction_journal(paths, config.model, group.id)
     try:
         for name, path in targets.items():
             if existed[name]:
@@ -107,7 +113,7 @@ def persist_best_trial(
         journal.unlink()
     except Exception:
         if journal.exists():
-            recover_artifact_transaction(paths, config.model)
+            recover_artifact_transaction(paths, config.model, group.id)
         else:
             _remove_transaction_files((*stages.values(), *backups.values()))
         raise
@@ -146,12 +152,15 @@ def _replace_staged_artifact(source: Path, target: Path) -> None:
     source.replace(target)
 
 
-def _attach_checkpoint_metadata(path: Path, *, model: str, threshold: float) -> None:
+def _attach_checkpoint_metadata(
+    path: Path, *, model: str, group: int, threshold: float
+) -> None:
     import torch
 
     payload = torch.load(path, map_location="cpu", weights_only=False)
     payload["visual_inspection"] = {
         "model": model,
+        "group": group,
         "score_source": "supersimplenet.pred_score",
         "anomalib_post_processor": False,
         "threshold": threshold,
@@ -159,8 +168,10 @@ def _attach_checkpoint_metadata(path: Path, *, model: str, threshold: float) -> 
     torch.save(payload, path)
 
 
-def restart_training(paths: ProjectPaths, model: str) -> None:
-    paths.remove_model_artifact(paths.study_dir(model), expected=paths.study_dir(model))
+def restart_training(paths: ProjectPaths, model: str, group: int) -> None:
     paths.remove_model_artifact(
-        paths.checkpoint(model), expected=paths.checkpoint(model)
+        paths.study_dir(model, group), expected=paths.study_dir(model, group)
+    )
+    paths.remove_model_artifact(
+        paths.checkpoint(model, group), expected=paths.checkpoint(model, group)
     )

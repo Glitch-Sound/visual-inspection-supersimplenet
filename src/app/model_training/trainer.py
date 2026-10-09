@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import optuna
 
-from app.common.config import AppConfig
+from app.common.config import GroupConfig
 from app.common.model_adapter import create_supersimplenet
 from app.common.runtime import DeviceSelection
 from app.model_training.augmentation import AnomalibTrainingAugmentation
@@ -78,11 +78,11 @@ class AnomalibTrialRunner:
     """Actual Anomalib runner; tests replace this boundary with a lightweight double."""
 
     def __init__(
-        self, work_dir: Path, device: DeviceSelection, config: AppConfig | None = None
+        self, work_dir: Path, device: DeviceSelection, group: GroupConfig | None = None
     ):
         self.work_dir = work_dir
         self.device = device
-        self.config = config
+        self.group = group
 
     def __call__(
         self,
@@ -108,8 +108,8 @@ class AnomalibTrialRunner:
             eval_batch_size=parameters.batch_size,
             num_workers=0,
             train_augmentations=(
-                AnomalibTrainingAugmentation(self.config.part.augmentation)
-                if self.config is not None
+                AnomalibTrainingAugmentation(self.group.augmentation)
+                if self.group is not None
                 else None
             ),
             val_augmentations=None,
@@ -122,7 +122,7 @@ class AnomalibTrialRunner:
             image_size=parameters.image_size,
             learning_rate_multiplier=parameters.learning_rate_multiplier,
         )
-        pruning = self.config.part.optuna_settings if self.config is not None else None
+        pruning = self.group.optuna_settings if self.group is not None else None
         engine = Engine(
             callbacks=(
                 [

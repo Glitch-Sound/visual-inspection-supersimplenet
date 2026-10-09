@@ -19,6 +19,7 @@ def build_project(
     image_size: int = 8,
     ranges: list[dict[str, int]] | None = None,
     blacklist: list[dict[str, Any]] | None = None,
+    groups: list[dict[str, Any]] | None = None,
 ) -> tuple[AppConfig, ProjectPaths]:
     config_dir = root / "config"
     config_dir.mkdir(parents=True)
@@ -32,6 +33,9 @@ def build_project(
     )
     payload["range"] = ranges or [{"id": 0, "x": 0, "y": 0}]
     payload["blacklist"] = blacklist or []
+    payload["groups"][0]["range_ids"] = [item["id"] for item in payload["range"]]
+    if groups is not None:
+        payload["groups"] = groups
     (config_dir / "part_XX.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )

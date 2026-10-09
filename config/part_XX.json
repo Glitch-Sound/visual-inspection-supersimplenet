@@ -8,144 +8,6 @@
         }
     ],
     "blacklist": [],
-    "inspection_threshold": null,
-    "heatmap_range": {
-        "min": 0.0,
-        "max": 1.0
-    },
-    "optuna_settings": {
-        "search": {
-            "learning_rate_multiplier": {
-                "type": "float",
-                "low": 0.25,
-                "high": 4.0,
-                "log": true,
-                "base_adaptor": 0.0001,
-                "base_segmentation_detection": 0.0002
-            },
-            "batch_size": {
-                "type": "categorical",
-                "choices": [4, 8, 16]
-            },
-            "epochs": {
-                "type": "categorical",
-                "choices": [200]
-            },
-            "feature_layers": {
-                "type": "categorical",
-                "choices": [
-                    ["layer2"],
-                    ["layer2", "layer3"],
-                    ["layer3"]
-                ]
-            },
-            "preprocessing": {
-                "image_size": {
-                    "type": "categorical",
-                    "choices": [256, 384, 500]
-                },
-                "normalization": "imagenet",
-                "interpolation": "bilinear",
-                "antialias": true
-            }
-        },
-        "sampler": {
-            "name": "TPESampler",
-            "seed": 42
-        },
-        "pruner": {
-            "name": "MedianPruner",
-            "startup_trials": 5,
-            "warmup_epochs": 40,
-            "interval_epochs": 10
-        },
-        "threshold": {
-            "method": "training_percentile",
-            "percentile": 99,
-            "score_source": "supersimplenet.pred_score",
-            "value": null
-        },
-        "normal_only": {
-            "percentile": 99,
-            "train_ratio": 0.8,
-            "validation_ratio": 0.2,
-            "seed": 42
-        },
-        "execution": {
-            "trials": 10,
-            "seed": 42,
-            "resume": true
-        }
-    },
-    "score": {
-        "source": "supersimplenet.pred_score",
-        "anomalib_post_processor": false,
-        "anomalib_evaluator": false,
-        "anomalib_visualizer": false
-    },
-    "augmentation": {
-        "enabled": true,
-        "seed": 42,
-        "order": [
-            "translation",
-            "rotation",
-            "brightness",
-            "contrast",
-            "color_temperature",
-            "gamma",
-            "sensor_noise",
-            "blur"
-        ],
-        "translation": {
-            "enabled": true,
-            "probability": 0.5,
-            "max_ratio": 0.02,
-            "padding_mode": "reflection"
-        },
-        "rotation": {
-            "enabled": true,
-            "probability": 0.5,
-            "max_degrees": 3.0,
-            "padding_mode": "reflection"
-        },
-        "brightness": {
-            "enabled": true,
-            "probability": 0.3,
-            "factor_min": 0.9,
-            "factor_max": 1.1
-        },
-        "contrast": {
-            "enabled": true,
-            "probability": 0.3,
-            "factor_min": 0.9,
-            "factor_max": 1.1
-        },
-        "color_temperature": {
-            "enabled": true,
-            "probability": 0.2,
-            "base_kelvin": 6500,
-            "max_delta_kelvin": 500
-        },
-        "gamma": {
-            "enabled": true,
-            "probability": 0.3,
-            "factor_min": 0.9,
-            "factor_max": 1.1
-        },
-        "sensor_noise": {
-            "enabled": true,
-            "probability": 0.3,
-            "stddev_min": 0.0,
-            "stddev_max": 0.01
-        },
-        "blur": {
-            "enabled": false,
-            "probability": 0.2,
-            "kernel_sizes": [3, 5],
-            "sigma_min": 0.1,
-            "sigma_max": 1.0
-        }
-    },
     "alignment": {
         "method": "ORB",
         "knn_k": 2,
@@ -154,5 +16,171 @@
         "ransac_reprojection_threshold_px": 8.0,
         "ransac_confidence": 0.95,
         "minimum_inlier_ratio": 0.2
-    }
+    },
+    "groups": [
+        {
+            "id": 0,
+            "range_ids": [
+                0
+            ],
+            "inspection_threshold": null,
+            "heatmap_range": {
+                "min": 0.0,
+                "max": 1.0
+            },
+            "optuna_settings": {
+                "search": {
+                    "learning_rate_multiplier": {
+                        "type": "float",
+                        "low": 0.25,
+                        "high": 4.0,
+                        "log": true,
+                        "base_adaptor": 0.0001,
+                        "base_segmentation_detection": 0.0002
+                    },
+                    "batch_size": {
+                        "type": "categorical",
+                        "choices": [
+                            4,
+                            8,
+                            16
+                        ]
+                    },
+                    "epochs": {
+                        "type": "categorical",
+                        "choices": [
+                            200
+                        ]
+                    },
+                    "feature_layers": {
+                        "type": "categorical",
+                        "choices": [
+                            [
+                                "layer2"
+                            ],
+                            [
+                                "layer2",
+                                "layer3"
+                            ],
+                            [
+                                "layer3"
+                            ]
+                        ]
+                    },
+                    "preprocessing": {
+                        "image_size": {
+                            "type": "categorical",
+                            "choices": [
+                                256,
+                                384,
+                                500
+                            ]
+                        },
+                        "normalization": "imagenet",
+                        "interpolation": "bilinear",
+                        "antialias": true
+                    }
+                },
+                "sampler": {
+                    "name": "TPESampler",
+                    "seed": 42
+                },
+                "pruner": {
+                    "name": "MedianPruner",
+                    "startup_trials": 5,
+                    "warmup_epochs": 40,
+                    "interval_epochs": 10
+                },
+                "threshold": {
+                    "method": "training_percentile",
+                    "percentile": 99,
+                    "score_source": "supersimplenet.pred_score",
+                    "value": null
+                },
+                "normal_only": {
+                    "percentile": 99,
+                    "train_ratio": 0.8,
+                    "validation_ratio": 0.2,
+                    "seed": 42
+                },
+                "execution": {
+                    "trials": 10,
+                    "seed": 42,
+                    "resume": true
+                }
+            },
+            "score": {
+                "source": "supersimplenet.pred_score",
+                "anomalib_post_processor": false,
+                "anomalib_evaluator": false,
+                "anomalib_visualizer": false
+            },
+            "augmentation": {
+                "enabled": true,
+                "seed": 42,
+                "order": [
+                    "translation",
+                    "rotation",
+                    "brightness",
+                    "contrast",
+                    "color_temperature",
+                    "gamma",
+                    "sensor_noise",
+                    "blur"
+                ],
+                "translation": {
+                    "enabled": true,
+                    "probability": 0.5,
+                    "max_ratio": 0.02,
+                    "padding_mode": "reflection"
+                },
+                "rotation": {
+                    "enabled": true,
+                    "probability": 0.5,
+                    "max_degrees": 3.0,
+                    "padding_mode": "reflection"
+                },
+                "brightness": {
+                    "enabled": true,
+                    "probability": 0.3,
+                    "factor_min": 0.9,
+                    "factor_max": 1.1
+                },
+                "contrast": {
+                    "enabled": true,
+                    "probability": 0.3,
+                    "factor_min": 0.9,
+                    "factor_max": 1.1
+                },
+                "color_temperature": {
+                    "enabled": true,
+                    "probability": 0.2,
+                    "base_kelvin": 6500,
+                    "max_delta_kelvin": 500
+                },
+                "gamma": {
+                    "enabled": true,
+                    "probability": 0.3,
+                    "factor_min": 0.9,
+                    "factor_max": 1.1
+                },
+                "sensor_noise": {
+                    "enabled": true,
+                    "probability": 0.3,
+                    "stddev_min": 0.0,
+                    "stddev_max": 0.01
+                },
+                "blur": {
+                    "enabled": false,
+                    "probability": 0.2,
+                    "kernel_sizes": [
+                        3,
+                        5
+                    ],
+                    "sigma_min": 0.1,
+                    "sigma_max": 1.0
+                }
+            }
+        }
+    ]
 }

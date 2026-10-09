@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import configparser
+import hashlib
 import json
 import math
 import warnings
 from pathlib import Path, PureWindowsPath
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from app.common.contracts import HeatmapRange
 from app.common.paths import ProjectPaths, validate_model_name
@@ -23,14 +31,14 @@ class StrictModel(BaseModel):
 
 
 class CropRange(StrictModel):
-    id: Annotated[int, Field(ge=0, le=99)]
-    x: Annotated[int, Field(ge=0)]
-    y: Annotated[int, Field(ge=0)]
+    id: Annotated[StrictInt, Field(ge=0, le=99)]
+    x: Annotated[StrictInt, Field(ge=0)]
+    y: Annotated[StrictInt, Field(ge=0)]
 
 
 class BlacklistEntry(StrictModel):
     image: str
-    id: list[Annotated[int, Field(ge=0, le=99)]]
+    id: list[Annotated[StrictInt, Field(ge=0, le=99)]]
 
 
 class FloatSearch(StrictModel):
@@ -236,16 +244,14 @@ class AlignmentSettings(StrictModel):
     minimum_inlier_ratio: Probability = 0.2
 
 
-class ModelConfig(StrictModel):
-    base: str
-    ranges: list[CropRange] = Field(alias="range")
-    blacklist: list[BlacklistEntry]
+class GroupConfig(StrictModel):
+    id: Annotated[StrictInt, Field(ge=0)]
+    range_ids: list[Annotated[StrictInt, Field(ge=0, le=99)]] = Field(min_length=1)
     inspection_threshold: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
     heatmap_range: HeatmapRange | None = None
     optuna_settings: OptunaSettings
     score: ScoreSettings
     augmentation: AugmentationSettings
-    alignment: AlignmentSettings
 
     @field_validator("inspection_threshold", mode="before")
     @classmethod
@@ -259,6 +265,24 @@ class ModelConfig(StrictModel):
                 "inspection_threshold must be a finite JSON number or null"
             )
         return value
+
+    @model_validator(mode="after")
+    def validate_group(self) -> GroupConfig:
+        if len(self.range_ids) != len(set(self.range_ids)):
+            raise ValueError(f"group {self.id} range_ids must be unique")
+        if self.score.source != self.optuna_settings.threshold.score_source:
+            raise ValueError(
+                f"group {self.id} score.source must equal threshold.score_source"
+            )
+        return self
+
+
+class ModelConfig(StrictModel):
+    base: str
+    ranges: list[CropRange] = Field(alias="range")
+    blacklist: list[BlacklistEntry]
+    alignment: AlignmentSettings
+    groups: list[GroupConfig] = Field(min_length=1)
 
     @field_validator("base")
     @classmethod
@@ -284,10 +308,31 @@ class ModelConfig(StrictModel):
             unknown = set(entry.id) - valid_ids
             if unknown:
                 raise ValueError(f"blacklist references unknown range ids: {unknown}")
-        threshold = self.optuna_settings.threshold
-        if self.score.source != threshold.score_source:
-            raise ValueError("score.source must equal threshold.score_source")
+        group_ids = [group.id for group in self.groups]
+        if len(group_ids) != len(set(group_ids)):
+            raise ValueError("groups.id must be unique")
+        for group in self.groups:
+            unknown = set(group.range_ids) - valid_ids
+            if unknown:
+                raise ValueError(
+                    f"group {group.id} references unknown range ids: {sorted(unknown)}"
+                )
         return self
+
+    def select_groups(self, group: int | None = None) -> list[GroupConfig]:
+        selected = sorted(self.groups, key=lambda item: item.id)
+        if group is None:
+            return selected
+        for item in selected:
+            if item.id == group:
+                return [item]
+        raise ValueError(
+            f"unknown group {group}; available groups: {[item.id for item in selected]}"
+        )
+
+    def ranges_for(self, group: GroupConfig) -> list[CropRange]:
+        selected = set(group.range_ids)
+        return [item for item in self.ranges if item.id in selected]
 
 
 class AppConfig(StrictModel):
@@ -374,13 +419,36 @@ def validate_blacklist_images(config: AppConfig, available_images: set[str]) -> 
         raise ValueError(f"blacklist references unknown images: {sorted(unknown)}")
 
 
+def preparation_fingerprint(
+    config: AppConfig, *, group: GroupConfig | None = None
+) -> str:
+    """Hash only settings that determine prepared image pixels and membership."""
+    part = config.part
+    payload: dict[str, object] = {
+        "base": part.base,
+        "range": [item.model_dump() for item in part.ranges],
+        "alignment": part.alignment.model_dump(),
+        "image_size": config.image_size,
+        "image_resize": config.image_resize,
+    }
+    if group is not None:
+        payload["blacklist"] = [item.model_dump() for item in part.blacklist]
+        payload["group"] = group.id
+        payload["range_ids"] = group.range_ids
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def write_threshold(
-    path: Path, value: float, *, destination: Path | None = None
+    path: Path, value: float, *, group: int, destination: Path | None = None
 ) -> None:
     """Write a threshold-updated configuration without mutating other fields."""
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["optuna_settings"]["threshold"]["value"] = value
+    selected = next((item for item in payload["groups"] if item["id"] == group), None)
+    if selected is None:
+        raise ValueError(f"unknown group {group} in {path}")
+    selected["optuna_settings"]["threshold"]["value"] = value
     target = destination or path
     temporary = target.with_suffix(target.suffix + ".tmp")
     try:

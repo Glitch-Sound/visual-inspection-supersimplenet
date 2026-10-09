@@ -16,8 +16,8 @@ def _transaction_path(path: Path, kind: str) -> Path:
     return path.with_name(f".{path.name}.artifact-{kind}")
 
 
-def _transaction_journal(paths: ProjectPaths, model: str) -> Path:
-    return paths.study_dir(model) / _TRANSACTION_FILENAME
+def _transaction_journal(paths: ProjectPaths, model: str, group: int) -> Path:
+    return paths.study_dir(model, group) / _TRANSACTION_FILENAME
 
 
 def _remove_transaction_files(paths: Iterable[Path]) -> None:
@@ -26,19 +26,19 @@ def _remove_transaction_files(paths: Iterable[Path]) -> None:
             path.unlink()
 
 
-def recover_artifact_transaction(paths: ProjectPaths, model: str) -> None:
+def recover_artifact_transaction(paths: ProjectPaths, model: str, group: int) -> None:
     """Restore the previous complete training artifact set after interruption."""
 
     targets = {
-        "checkpoint": paths.checkpoint(model),
+        "checkpoint": paths.checkpoint(model, group),
         "config": paths.model_config(model),
-        "best_trial": paths.study_dir(model) / "best_trial.json",
+        "best_trial": paths.study_dir(model, group) / "best_trial.json",
     }
     stages = {name: _transaction_path(path, "stage") for name, path in targets.items()}
     backups = {
         name: _transaction_path(path, "backup") for name, path in targets.items()
     }
-    journal = _transaction_journal(paths, model)
+    journal = _transaction_journal(paths, model, group)
     if not journal.exists():
         _remove_transaction_files(
             (

@@ -1,1432 +1,386 @@
 from __future__ import annotations
 
 import json
-import shutil
-from collections.abc import Iterable
-from copy import deepcopy
-from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 
-import cv2
 import numpy as np
 import pytest
 import torch
 import typer
-from conftest import build_project, write_test_image
+from group_evaluation_helpers import FakePredictor, project, recorder
+from typer.testing import CliRunner
 
-from app.common.artifact_transaction import _transaction_path
 from app.common.config import load_config
-from app.common.contracts import (
-    AlignmentResult,
-    BestTrialResult,
-    HeatmapRange,
-    InspectionResult,
-    PreparationManifest,
-    PreparedSource,
-    PreparedSplit,
-    RunMetadata,
-    ScoreContract,
-    SplitResult,
-    TrialParametersContract,
+from app.common.result_index import (
+    create_generation,
+    read_current,
 )
-from app.common.paths import ProjectPaths
-from app.common.runtime import DeviceSelection, RunRecorder
+from app.model_evaluation import cli as evaluation_cli
+from app.model_evaluation import evaluation
+from app.model_evaluation.cli import _test_command
 from app.model_evaluation.evaluation import (
     _heatmap,
     effective_threshold,
-    evaluate_model,
-    evaluate_split,
-    restart_evaluation,
-    validate_best_trial_contract,
+    require_heatmap_range,
     validate_score_contract,
 )
-from app.model_evaluation.predictor import (
-    CheckpointPredictor,
-    Prediction,
-    load_checkpoint_metadata,
-)
-from app.model_training.artifacts import _write_transaction_journal
+from app.model_evaluation.predictor import load_checkpoint_metadata
 
 
-def test_load_checkpoint_metadata_with_preprocessor(tmp_path: Path) -> None:
-    from app.common.model_adapter import TunableSupersimplenet
-
-    checkpoint = tmp_path / "model.ckpt"
-    metadata = {
-        "model": "XX",
-        "score_source": "supersimplenet.pred_score",
-        "anomalib_post_processor": False,
-        "threshold": 0.5,
-    }
-    torch.save(
-        {
-            "state_dict": {},
-            "pre_processor": TunableSupersimplenet.configure_pre_processor((256, 256)),
-            "visual_inspection": metadata,
-        },
-        checkpoint,
-    )
-
-    assert load_checkpoint_metadata(checkpoint) == metadata
-
-
-def test_evaluation_starts_with_preprocessor_checkpoint(tmp_path: Path) -> None:
-    from app.common.model_adapter import TunableSupersimplenet
-
-    config, paths = build_project(tmp_path)
-    config = config.model_copy(
-        update={
-            "part": config.part.model_copy(
-                update={
-                    "optuna_settings": config.part.optuna_settings.model_copy(
-                        update={
-                            "threshold": config.part.optuna_settings.threshold.model_copy(
-                                update={"value": 0.5}
-                            )
-                        }
-                    )
-                }
-            )
-        }
-    )
-    checkpoint = paths.checkpoint("XX")
-    checkpoint.parent.mkdir(parents=True)
-    torch.save(
-        {
-            "state_dict": {},
-            "hyper_parameters": {
-                "pre_processor": TunableSupersimplenet.configure_pre_processor(
-                    (256, 256)
-                )
-            },
-            "visual_inspection": {
-                "model": "XX",
-                "score_source": "supersimplenet.pred_score",
-                "anomalib_post_processor": False,
-                "threshold": 0.5,
-            },
-        },
-        checkpoint,
-    )
-    prepared_dir = paths.prepared_test("XX")
-    image_path = prepared_dir / "source_00.png"
-    write_test_image(image_path)
-    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
-    PreparationManifest(
-        model="XX",
-        created_at=recorder.started_at,
-        sources=[
-            PreparedSource(
-                source_image="source.png",
-                alignment=AlignmentResult(status="aligned"),
-                splits=[
-                    PreparedSplit(
-                        source_image="source.png", split_id=0, image=image_path.name
-                    )
-                ],
-            )
-        ],
-    ).write_json(prepared_dir / "manifest.json")
-    predictions = 0
-
-    def predictor(image: np.ndarray) -> Prediction:
-        nonlocal predictions
-        predictions += 1
-        return Prediction(0.2, np.zeros(image.shape[:2], dtype=np.float32))
-
-    results = evaluate_model(
-        config,
-        paths,
-        predictor=predictor,
-        finish_runtime=lambda: recorder.finish(0),
-    )
-
-    assert predictions == 1
-    assert len(results) == 1
-    assert results[0].overall_status == "normal"
-    assert (paths.results("XX") / "source.png.json").is_file()
-
-
-def test_load_checkpoint_metadata_rejects_missing_metadata(tmp_path: Path) -> None:
-    checkpoint = tmp_path / "model.ckpt"
-    torch.save({"state_dict": {}}, checkpoint)
-
-    with pytest.raises(ValueError, match="lacks visual_inspection metadata"):
-        load_checkpoint_metadata(checkpoint)
-
-
-def _prepare_test_cli_checkpoint(tmp_path: Path, metadata: object) -> Path:
-    _config, paths = build_project(tmp_path)
-    config_path = paths.model_config("XX")
-    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
-    config_payload["optuna_settings"]["threshold"]["value"] = 0.5
-    config_path.write_text(json.dumps(config_payload) + "\n", encoding="utf-8")
-    checkpoint = paths.checkpoint("XX")
-    checkpoint.parent.mkdir(parents=True)
-    torch.save({"state_dict": {}, "visual_inspection": metadata}, checkpoint)
-    BestTrialResult(
-        model="XX",
-        trial_number=0,
-        parameters=TrialParametersContract(
-            learning_rate_multiplier=1.0,
-            batch_size=4,
-            epochs=200,
-            feature_layers=["layer2"],
-            image_size=256,
-        ),
-        objective=0.1,
-        checkpoint="weights/XX.ckpt",
-        score_contract=ScoreContract(),
-        threshold=0.5,
-        train_sources=["train.png"],
-        validation_sources=["validation.png"],
-        seed=42,
-        dependencies={},
-    ).write_json(paths.study_dir("XX") / "best_trial.json")
-    PreparationManifest(
-        model="XX", created_at=datetime.now(UTC), sources=[]
-    ).write_json(paths.prepared_test("XX") / "manifest.json")
-    return checkpoint
-
-
-@pytest.mark.parametrize(
-    ("metadata", "reason"),
-    [
-        (None, "lacks visual_inspection metadata"),
-        (
-            {
-                "model": "XX",
-                "score_source": "supersimplenet.pred_score",
-                "anomalib_post_processor": False,
-                "threshold": 0.6,
-            },
-            "checkpoint threshold does not match model config",
-        ),
-    ],
-)
-def test_test_cli_rejects_checkpoint_contract_before_model_construction(
-    tmp_path: Path,
+def _run(
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    metadata: object,
-    reason: str,
-) -> None:
-    _prepare_test_cli_checkpoint(tmp_path, metadata)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        "app.common.cli.select_device",
-        lambda: DeviceSelection("cpu", "CPU", "test"),
-    )
-    monkeypatch.setattr(
-        "app.model_evaluation.cli.CheckpointPredictor",
-        lambda *_args, **_kwargs: pytest.fail("model construction must not start"),
-    )
-    from app.model_evaluation.cli import _test_command
-
-    with pytest.raises(typer.Exit) as caught:
-        _test_command("XX", restart=False)
-    assert caught.value.exit_code == 2
-    output = json.loads(capsys.readouterr().out)
-    assert reason in output["errors"][0]
-    assert output["status"] == "error"
-
-
-def test_test_cli_validates_checkpoint_before_model_construction(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    metadata = {
-        "model": "XX",
-        "score_source": "supersimplenet.pred_score",
-        "anomalib_post_processor": False,
-        "threshold": 0.5,
-    }
-    checkpoint = _prepare_test_cli_checkpoint(tmp_path, metadata)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        "app.common.cli.select_device",
-        lambda: DeviceSelection("cpu", "CPU", "test"),
-    )
-    events: list[str] = []
-
-    def make_predictor(path: Path, **_kwargs: object) -> object:
-        assert path == checkpoint
-        events.append("predictor")
-        return object()
-
-    def evaluate(_config: object, _paths: object, **kwargs: object) -> list[object]:
-        assert kwargs["checkpoint_metadata"] == metadata
-        events.append("evaluate")
-        return []
-
-    monkeypatch.setattr("app.model_evaluation.cli.CheckpointPredictor", make_predictor)
-    monkeypatch.setattr("app.model_evaluation.cli.evaluate_model", evaluate)
-    from app.model_evaluation.cli import _test_command
-
-    _test_command("XX", restart=False)
-    output = json.loads(capsys.readouterr().out)
-    assert events == ["predictor", "evaluate"]
-    assert output["exit_code"] == 0
-    assert output["result"] == "0 source images"
-
-
-@pytest.mark.parametrize("invalid", ["name", "symlink"])
-def test_test_cli_restart_preserves_results_for_invalid_manifest(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    invalid: str,
-) -> None:
-    metadata = {
-        "model": "XX",
-        "score_source": "supersimplenet.pred_score",
-        "anomalib_post_processor": False,
-        "threshold": 0.5,
-    }
-    _prepare_test_cli_checkpoint(tmp_path, metadata)
-    paths = ProjectPaths(tmp_path)
-    manifest_path = paths.prepared_test("XX") / "manifest.json"
-    manifest = PreparationManifest(
-        model="XX",
-        created_at=datetime.now(UTC),
-        sources=[
-            PreparedSource(
-                source_image="source.png",
-                alignment=AlignmentResult(status="aligned"),
-                splits=[
-                    PreparedSplit(
-                        source_image="source.png", split_id=0, image="source_00.png"
-                    )
-                ],
-            )
-        ],
-    )
-    if invalid == "name":
-        payload = manifest.model_dump(mode="json")
-        payload["sources"][0]["splits"][0]["image"] = "source_01.png"
-        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
-    else:
-        outside_manifest = tmp_path / "outside_manifest.json"
-        manifest.write_json(outside_manifest)
-        manifest_path.unlink()
-        try:
-            manifest_path.symlink_to(outside_manifest)
-        except OSError as error:
-            pytest.skip(f"symlinks unavailable: {error}")
-    results_dir = paths.results("XX")
-    results_dir.mkdir(parents=True)
-    old = results_dir / "old.json"
-    old.write_bytes(b"old unchanged")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        "app.common.cli.select_device",
-        lambda: DeviceSelection("cpu", "CPU", "test"),
-    )
-    monkeypatch.setattr(
-        "app.model_evaluation.cli.CheckpointPredictor",
-        lambda *_args, **_kwargs: pytest.fail("model construction must not start"),
-    )
-    from app.model_evaluation.cli import _test_command
-
-    with pytest.raises(typer.Exit) as caught:
-        _test_command("XX", restart=True)
-    assert caught.value.exit_code == 2
-    output = json.loads(capsys.readouterr().out)
-    assert ("split_id" if invalid == "name" else "symlink") in output["errors"][0]
-    assert old.read_bytes() == b"old unchanged"
-
-
-def test_evaluation_progress_counts_undetermined_and_split_errors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config, paths = build_project(tmp_path)
-    config = config.model_copy(
-        update={
-            "part": config.part.model_copy(
-                update={
-                    "optuna_settings": config.part.optuna_settings.model_copy(
-                        update={
-                            "threshold": config.part.optuna_settings.threshold.model_copy(
-                                update={"value": 0.5}
-                            )
-                        }
-                    )
-                }
-            )
-        }
-    )
-    prepared = paths.prepared_test("XX")
-    PreparationManifest(
-        model="XX",
-        created_at=datetime.now(UTC),
-        sources=[
-            PreparedSource(
-                source_image="unaligned.png",
-                alignment=AlignmentResult(status="undetermined", reason="no_match"),
-                splits=[],
-            ),
-            PreparedSource(
-                source_image="missing.png",
-                alignment=AlignmentResult(status="aligned"),
-                splits=[
-                    PreparedSplit(
-                        source_image="missing.png", split_id=0, image="missing_00.png"
-                    )
-                ],
-            ),
-        ],
-    ).write_json(prepared / "manifest.json")
-    monkeypatch.setattr(
-        "app.model_evaluation.evaluation.load_checkpoint_metadata",
-        lambda _path: {
-            "model": "XX",
-            "score_source": "supersimplenet.pred_score",
-            "anomalib_post_processor": False,
-            "threshold": 0.5,
-        },
-    )
-    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
-    progress: list[tuple[int, int]] = []
-    results = evaluate_model(
-        config,
-        paths,
-        predictor=lambda _image: pytest.fail("missing split must not be inferred"),
-        finish_runtime=lambda: recorder.finish(0),
-        on_progress=lambda processed, total: progress.append((processed, total)),
-    )
-    assert progress == [(0, 2), (1, 2), (2, 2)]
-    assert [result.overall_status for result in results] == [
-        "undetermined",
-        "undetermined",
-    ]
-    assert results[1].splits[0].status == "error"
-
-
-def test_evaluation_progress_stops_on_fatal_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config, paths = build_project(tmp_path)
-    config = config.model_copy(
-        update={
-            "part": config.part.model_copy(
-                update={
-                    "optuna_settings": config.part.optuna_settings.model_copy(
-                        update={
-                            "threshold": config.part.optuna_settings.threshold.model_copy(
-                                update={"value": 0.5}
-                            )
-                        }
-                    )
-                }
-            )
-        }
-    )
-    PreparationManifest(
-        model="XX",
-        created_at=datetime.now(UTC),
-        sources=[
-            PreparedSource(
-                source_image="first.png",
-                alignment=AlignmentResult(status="undetermined", reason="no_match"),
-                splits=[],
-            ),
-            PreparedSource(
-                source_image="second.png",
-                alignment=AlignmentResult(status="undetermined", reason="no_match"),
-                splits=[],
-            ),
-        ],
-    ).write_json(paths.prepared_test("XX") / "manifest.json")
-    monkeypatch.setattr(
-        "app.model_evaluation.evaluation.load_checkpoint_metadata",
-        lambda _path: {
-            "model": "XX",
-            "score_source": "supersimplenet.pred_score",
-            "anomalib_post_processor": False,
-            "threshold": 0.5,
-        },
-    )
-    from app.model_evaluation import evaluation
-
-    original_aggregate = evaluation.aggregate_status
-    calls = 0
-
-    def fail_on_second(
-        splits: Iterable[SplitResult], *, required_split_ids: set[int]
-    ) -> tuple[object, str | None]:
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise RuntimeError("fatal aggregation error")
-        return original_aggregate(splits, required_split_ids=required_split_ids)
-
-    monkeypatch.setattr(evaluation, "aggregate_status", fail_on_second)
-    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
-    progress: list[tuple[int, int]] = []
-    with pytest.raises(RuntimeError, match="fatal aggregation error"):
-        evaluate_model(
-            config,
-            paths,
-            predictor=lambda _image: pytest.fail("no splits expected"),
-            finish_runtime=lambda: recorder.finish(0),
-            on_progress=lambda processed, total: progress.append((processed, total)),
-        )
-    assert progress == [(0, 2), (1, 2)]
-    assert not paths.results("XX").exists()
-
-
-def test_test_cli_recovers_interrupted_training_artifacts(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _config, paths = build_project(tmp_path)
-    config_path = paths.model_config("XX")
-    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
-    config_payload["optuna_settings"]["threshold"]["value"] = 0.5
-    config_path.write_text(json.dumps(config_payload) + "\n", encoding="utf-8")
-
-    checkpoint = paths.checkpoint("XX")
-    checkpoint.parent.mkdir(parents=True)
-    torch.save(
-        {
-            "state_dict": {},
-            "visual_inspection": {
-                "model": "XX",
-                "score_source": "supersimplenet.pred_score",
-                "anomalib_post_processor": False,
-                "threshold": 0.5,
-            },
-        },
-        checkpoint,
-    )
-    best_path = paths.study_dir("XX") / "best_trial.json"
-    best_path.parent.mkdir(parents=True)
-    BestTrialResult(
-        model="XX",
-        trial_number=0,
-        parameters=TrialParametersContract(
-            learning_rate_multiplier=1.0,
-            batch_size=4,
-            epochs=200,
-            feature_layers=["layer2"],
-            image_size=256,
-        ),
-        objective=0.1,
-        checkpoint="weights/XX.ckpt",
-        score_contract=ScoreContract(),
-        threshold=0.5,
-        train_sources=["train.png"],
-        validation_sources=["validation.png"],
-        seed=42,
-        dependencies={},
-    ).write_json(best_path)
-    PreparationManifest(
-        model="XX", created_at=datetime.now(UTC), sources=[]
-    ).write_json(paths.prepared_test("XX") / "manifest.json")
-    targets = {"checkpoint": checkpoint, "config": config_path, "best_trial": best_path}
-    previous = {name: path.read_bytes() for name, path in targets.items()}
-    for path in targets.values():
-        shutil.copy2(path, _transaction_path(path, "backup"))
-        path.write_bytes(b"interrupted replacement")
-    journal = paths.study_dir("XX") / ".artifact-transaction.json"
-    _write_transaction_journal(journal, dict.fromkeys(targets, True))
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        "app.common.cli.select_device",
-        lambda: DeviceSelection("cpu", "CPU", "test"),
-    )
-
-    def make_predictor(path: Path, **_kwargs: object) -> object:
-        assert path == checkpoint
-        assert {name: item.read_bytes() for name, item in targets.items()} == previous
-        assert not journal.exists()
-        return object()
-
-    monkeypatch.setattr("app.model_evaluation.cli.CheckpointPredictor", make_predictor)
-    monkeypatch.setattr("app.model_evaluation.cli.evaluate_model", lambda *_a, **_k: [])
-
-    from app.model_evaluation.cli import _test_command
-
-    _test_command("XX", restart=False)
-    output = json.loads(capsys.readouterr().out)
-    assert output["exit_code"] == 0
-    assert output["result"] == "0 source images"
-    assert {name: path.read_bytes() for name, path in targets.items()} == previous
-
-
-@pytest.mark.parametrize(
-    "range_value",
-    [
-        None,
-        {"min": 0},
-        {"max": 1},
-        {"min": "0", "max": 1},
-        {"min": False, "max": 1},
-        {"min": 0, "max": float("inf")},
-        {"min": float("nan"), "max": 1},
-        {"min": 1, "max": 1},
-        {"min": 2, "max": 1},
-    ],
-)
-def test_evaluation_rejects_invalid_heatmap_range_before_prediction(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    range_value: object,
-) -> None:
-    _config, paths = build_project(tmp_path)
-    path = paths.model_config("XX")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if range_value is None:
-        payload.pop("heatmap_range")
-    else:
-        payload["heatmap_range"] = range_value
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        "app.common.cli.select_device",
-        lambda: DeviceSelection("cpu", "CPU", "test"),
-    )
-    monkeypatch.setattr(
-        "app.model_evaluation.cli.CheckpointPredictor",
-        lambda *_args, **_kwargs: pytest.fail("prediction must not start"),
-    )
-    from app.model_evaluation.cli import _test_command
-
-    with pytest.raises(typer.Exit) as caught:
-        _test_command("XX", restart=False)
-    assert caught.value.exit_code == 2
-    output = json.loads(capsys.readouterr().out)
-    assert "heatmap_range" in output["errors"][0]
-    assert not paths.results("XX").exists()
-
-
-def test_evaluation_records_normal_split(tmp_path: Path) -> None:
-    image_path = tmp_path / "split.png"
-    original = write_test_image(image_path)
-    result_path = tmp_path / "result.png"
-    result = evaluate_split(
-        image_path=image_path,
-        split_id=0,
-        threshold=0.5,
-        heatmap_range=HeatmapRange(min=0.0, max=1.0),
-        predictor=lambda image: Prediction(0.2, np.zeros(image.shape[:2], np.float32)),
-        result_path=result_path,
-    )
-    assert result.status == "normal"
-    assert result.score == 0.2
-    written = cv2.imread(str(result_path))
-    assert written is not None
-    assert np.array_equal(written, original)
-
-
-@pytest.mark.parametrize("score", [0.5, 0.8])
-def test_evaluation_visualizes_anomalous_split(tmp_path: Path, score: float) -> None:
-    image_path = tmp_path / "split.png"
-    original = write_test_image(image_path)
-    anomaly_map = np.linspace(
-        0, 1, original.shape[0] * original.shape[1], dtype=np.float32
-    )
-    anomaly_map = anomaly_map.reshape(original.shape[:2])
-    result_path = tmp_path / "result.png"
-    result = evaluate_split(
-        image_path=image_path,
-        split_id=0,
-        threshold=0.5,
-        heatmap_range=HeatmapRange(min=0.0, max=1.0),
-        predictor=lambda _image: Prediction(score, anomaly_map),
-        result_path=result_path,
-    )
-    assert result.status == "anomaly"
-    assert result.score == score
-    written = cv2.imread(str(result_path))
-    assert written is not None
-    height, width = original.shape[:2]
-    assert written.shape == (height, width * 2, 3)
-    assert np.array_equal(written[:, :width], original)
-    assert np.array_equal(
-        written[:, width:],
-        _heatmap(original, anomaly_map, HeatmapRange(min=0.0, max=1.0)),
-    )
-
-
-def test_heatmap_uses_shared_range_across_images(tmp_path: Path) -> None:
-    image = np.full((2, 2, 3), 80, dtype=np.uint8)
-    display_range = HeatmapRange(min=-2.0, max=2.0)
-    first = np.array([[-3.0, 0.0], [3.0, 1.0]], dtype=np.float32)
-    second = np.array([[0.0, -20.0], [20.0, 1.0]], dtype=np.float32)
-    first_overlay = _heatmap(image, first, display_range)
-    second_overlay = _heatmap(image, second, display_range)
-    assert np.array_equal(first_overlay[0, 1], second_overlay[0, 0])
-    assert np.array_equal(first_overlay[1, 1], second_overlay[1, 1])
-    expected_indices = np.array([[0, 127], [255, 191]], dtype=np.uint8)
-    expected_layer = cv2.applyColorMap(expected_indices, cv2.COLORMAP_JET)
-    assert np.array_equal(
-        first_overlay, cv2.addWeighted(image, 0.55, expected_layer, 0.45, 0)
-    )
-    assert np.array_equal(first_overlay[0, 0], second_overlay[0, 1])
-    assert np.array_equal(first_overlay[1, 0], second_overlay[1, 0])
-
-    image_path = tmp_path / "source.png"
-    assert cv2.imwrite(str(image_path), image)
-    statuses = []
-    for bounds in (display_range, HeatmapRange(min=-10.0, max=10.0)):
-        result = evaluate_split(
-            image_path=image_path,
-            split_id=0,
-            threshold=0.5,
-            heatmap_range=bounds,
-            predictor=lambda _image: Prediction(0.7, first),
-            result_path=tmp_path / f"result-{bounds.max}.png",
-        )
-        statuses.append((result.score, result.status))
-    assert statuses == [(0.7, "anomaly"), (0.7, "anomaly")]
-    wide_range = HeatmapRange(min=-1e308, max=1e308)
-    wide_output = _heatmap(image, np.zeros((2, 2), dtype=np.float32), wide_range)
-    middle = cv2.applyColorMap(np.full((2, 2), 127, dtype=np.uint8), cv2.COLORMAP_JET)
-    assert np.array_equal(wide_output, cv2.addWeighted(image, 0.55, middle, 0.45, 0))
-
-
-def test_evaluation_records_heatmap_range_in_results(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config, paths = build_project(tmp_path)
-    display_range = HeatmapRange(min=-2.5, max=3.25)
-    config = config.model_copy(
-        update={
-            "part": config.part.model_copy(
-                update={
-                    "heatmap_range": display_range,
-                    "optuna_settings": config.part.optuna_settings.model_copy(
-                        update={
-                            "threshold": config.part.optuna_settings.threshold.model_copy(
-                                update={"value": 0.5}
-                            )
-                        }
-                    ),
-                }
-            )
-        }
-    )
-    prepared = paths.prepared_test("XX")
-    sources = []
-    for name, value in (("normal", 20), ("anomaly", 200)):
-        filename = f"{name}_00.png"
-        write_test_image(prepared / filename, value=value)
-        sources.append(
-            PreparedSource(
-                source_image=f"{name}.png",
-                alignment=AlignmentResult(status="aligned"),
-                splits=[
-                    PreparedSplit(
-                        source_image=f"{name}.png", split_id=0, image=filename
-                    )
-                ],
-            )
-        )
-    sources.append(
-        PreparedSource(
-            source_image="undetermined.png",
-            alignment=AlignmentResult(status="undetermined", reason="no_match"),
-            splits=[],
-        )
-    )
-    sources.append(
-        PreparedSource(
-            source_image="split_error.png",
-            alignment=AlignmentResult(status="aligned"),
-            splits=[
-                PreparedSplit(
-                    source_image="split_error.png",
-                    split_id=0,
-                    image="split_error_00.png",
-                )
-            ],
-        )
-    )
-    PreparationManifest(
-        model="XX", created_at=datetime.now(UTC), sources=sources
-    ).write_json(prepared / "manifest.json")
-    monkeypatch.setattr(
-        "app.model_evaluation.evaluation.load_checkpoint_metadata",
-        lambda _path: {
-            "model": "XX",
-            "score_source": "supersimplenet.pred_score",
-            "anomalib_post_processor": False,
-            "threshold": 0.5,
-        },
-    )
-    scores = iter((0.2, 0.8))
-    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
-    results = evaluate_model(
-        config,
-        paths,
-        predictor=lambda image: Prediction(
-            next(scores), np.zeros(image.shape[:2], dtype=np.float32)
-        ),
-        finish_runtime=lambda: recorder.finish(0),
-    )
-    assert {item.overall_status for item in results} == {
-        "normal",
-        "anomaly",
-        "undetermined",
-    }
-    assert results[-1].splits[0].status == "error"
-    for result in results:
-        path = paths.results("XX") / f"{result.source_image}.json"
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        assert raw["heatmap_range"] == {"min": -2.5, "max": 3.25}
-        assert InspectionResult.read_json(path).heatmap_range == display_range
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        "model",
-        "unsafe_path",
-        "duplicate",
-        "reference_mismatch",
-        "image_mismatch",
-        "unknown_id",
-    ],
-)
-def test_evaluation_rejects_invalid_manifest_before_prediction(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
-) -> None:
-    config, paths = build_project(tmp_path)
-    config = config.model_copy(
-        update={
-            "part": config.part.model_copy(
-                update={
-                    "optuna_settings": config.part.optuna_settings.model_copy(
-                        update={
-                            "threshold": config.part.optuna_settings.threshold.model_copy(
-                                update={"value": 0.5}
-                            )
-                        }
-                    )
-                }
-            )
-        }
-    )
-    prepared = paths.prepared_test("XX")
-    prepared.mkdir(parents=True)
-    manifest = {
-        "model": "XX",
-        "created_at": datetime.now(UTC).isoformat(),
-        "sources": [
-            {
-                "source_image": "source.png",
-                "alignment": {"status": "aligned"},
-                "splits": [
-                    {
-                        "source_image": "source.png",
-                        "split_id": 0,
-                        "image": "source_00.png",
-                    }
-                ],
-            }
-        ],
-        "excluded": [],
-    }
-    if mutation == "model":
-        manifest["model"] = "YY"
-    elif mutation == "unsafe_path":
-        manifest["sources"][0]["splits"][0]["image"] = "../../outside.png"
-    elif mutation == "duplicate":
-        manifest["sources"].append(deepcopy(manifest["sources"][0]))
-    elif mutation == "image_mismatch":
-        manifest["sources"][0]["splits"][0]["image"] = "source_01.png"
-    elif mutation == "unknown_id":
-        manifest["sources"][0]["splits"][0]["split_id"] = 2
-        manifest["sources"][0]["splits"][0]["image"] = "source_02.png"
-    else:
-        manifest["sources"][0]["splits"][0]["source_image"] = "other.png"
-    (prepared / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    outside = tmp_path / "outside.png"
-    outside.write_bytes(b"outside unchanged")
-    results_dir = paths.results("XX")
-    results_dir.mkdir(parents=True)
-    old = results_dir / "old.json"
-    old.write_bytes(b"old unchanged")
-    monkeypatch.setattr(
-        "app.model_evaluation.evaluation.load_checkpoint_metadata",
-        lambda _path: {
-            "model": "XX",
-            "score_source": "supersimplenet.pred_score",
-            "anomalib_post_processor": False,
-            "threshold": 0.5,
-        },
-    )
-    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
-
-    def predict(_image: np.ndarray) -> Prediction:
-        pytest.fail("prediction must not start")
-
-    with pytest.raises(ValueError):
-        evaluate_model(
-            config,
-            paths,
-            predictor=predict,
-            finish_runtime=lambda: recorder.finish(0),
-        )
-    assert old.read_bytes() == b"old unchanged"
-    assert {item.name for item in results_dir.iterdir()} == {"old.json"}
-    assert outside.read_bytes() == b"outside unchanged"
-
-
-@pytest.mark.parametrize("linked", ["manifest", "image", "directory"])
-def test_evaluation_rejects_symlinked_prepared_input(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked: str
-) -> None:
-    config, paths = build_project(tmp_path)
-    config = config.model_copy(
-        update={
-            "part": config.part.model_copy(
-                update={
-                    "optuna_settings": config.part.optuna_settings.model_copy(
-                        update={
-                            "threshold": config.part.optuna_settings.threshold.model_copy(
-                                update={"value": 0.5}
-                            )
-                        }
-                    )
-                }
-            )
-        }
-    )
-    prepared = tmp_path / "data" / "05_test" / "XX"
-    real_prepared = tmp_path / "real_prepared"
-    real_prepared.mkdir(parents=True)
-    payload = {
-        "model": "XX",
-        "created_at": datetime.now(UTC).isoformat(),
-        "sources": [
-            {
-                "source_image": "source.png",
-                "alignment": {"status": "aligned"},
-                "splits": [
-                    {
-                        "source_image": "source.png",
-                        "split_id": 0,
-                        "image": "source_00.png",
-                    }
-                ],
-            }
-        ],
-    }
-    (real_prepared / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
-    outside = tmp_path / "outside.png"
-    outside.write_bytes(b"outside unchanged")
-    try:
-        if linked == "directory":
-            prepared.parent.mkdir(parents=True)
-            prepared.symlink_to(real_prepared, target_is_directory=True)
-        else:
-            prepared.mkdir(parents=True)
-            if linked == "manifest":
-                (prepared / "manifest.json").symlink_to(real_prepared / "manifest.json")
-            else:
-                (prepared / "manifest.json").write_text(
-                    json.dumps(payload), encoding="utf-8"
-                )
-                (prepared / "source_00.png").symlink_to(outside)
-    except OSError as error:
-        pytest.skip(f"symlinks unavailable: {error}")
-    results_dir = paths.results("XX")
-    results_dir.mkdir(parents=True)
-    old = results_dir / "old.json"
-    old.write_bytes(b"old unchanged")
-    monkeypatch.setattr(
-        "app.model_evaluation.evaluation.load_checkpoint_metadata",
-        lambda _path: {
-            "model": "XX",
-            "score_source": "supersimplenet.pred_score",
-            "anomalib_post_processor": False,
-            "threshold": 0.5,
-        },
-    )
-    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
-
-    def predict(_image: np.ndarray) -> Prediction:
-        pytest.fail("prediction must not start")
-
-    with pytest.raises(ValueError, match="symlink"):
-        evaluate_model(
-            config,
-            paths,
-            predictor=predict,
-            finish_runtime=lambda: recorder.finish(0),
-        )
-    assert old.read_bytes() == b"old unchanged"
-    assert outside.read_bytes() == b"outside unchanged"
-
-
-@pytest.mark.parametrize(
-    ("metadata_update", "message"),
-    [
-        ({"model": "YY"}, "model mismatch"),
-        ({"score_source": "other.score"}, "score_source"),
-        ({"anomalib_post_processor": True}, "anomalib_post_processor"),
-        ({"threshold": 0.6}, "threshold"),
-    ],
-)
-def test_evaluation_rejects_mismatched_checkpoint_contract(
-    tmp_path: Path, metadata_update: dict[str, object], message: str
-) -> None:
-    config, _paths = build_project(tmp_path)
-    config = config.model_copy(
-        update={
-            "part": config.part.model_copy(
-                update={
-                    "optuna_settings": config.part.optuna_settings.model_copy(
-                        update={
-                            "threshold": config.part.optuna_settings.threshold.model_copy(
-                                update={"value": 0.5}
-                            )
-                        }
-                    )
-                }
-            )
-        }
-    )
-    metadata: dict[str, object] = {
-        "model": "XX",
-        "score_source": "supersimplenet.pred_score",
-        "anomalib_post_processor": False,
-        "threshold": 0.5,
-    }
-    metadata.update(metadata_update)
-
-    with pytest.raises(ValueError, match=message):
-        validate_score_contract(config, metadata)
-
-
-def test_evaluation_rejects_invalid_best_trial_contract(tmp_path: Path) -> None:
-    config, paths = build_project(tmp_path)
-    config = config.model_copy(
-        update={
-            "part": config.part.model_copy(
-                update={
-                    "optuna_settings": config.part.optuna_settings.model_copy(
-                        update={
-                            "threshold": config.part.optuna_settings.threshold.model_copy(
-                                update={"value": 0.5}
-                            )
-                        }
-                    )
-                }
-            )
-        }
-    )
-    best = BestTrialResult(
-        model="XX",
-        trial_number=0,
-        parameters=TrialParametersContract(
-            learning_rate_multiplier=1.0,
-            batch_size=4,
-            epochs=200,
-            feature_layers=["layer2"],
-            image_size=256,
-        ),
-        objective=0.1,
-        checkpoint="weights/XX.ckpt",
-        score_contract=ScoreContract(),
-        threshold=0.5,
-        train_sources=["train.png"],
-        validation_sources=["validation.png"],
-        seed=42,
-        dependencies={},
-    )
-    validate_best_trial_contract(config, paths, best)
-
-    for update, message in (
-        ({"model": "YY"}, "model mismatch"),
-        ({"checkpoint": "weights/YY.ckpt"}, "checkpoint mismatch"),
-        ({"threshold": 0.6}, "threshold"),
-        (
-            {"parameters": best.parameters.model_copy(update={"image_size": 999})},
-            "image_size",
-        ),
-    ):
-        with pytest.raises(ValueError, match=message):
-            validate_best_trial_contract(config, paths, best.model_copy(update=update))
-
-    with pytest.raises(ValueError, match="parameters"):
-        BestTrialResult.model_validate(
-            {
-                **best.model_dump(mode="json"),
-                "parameters": {"learning_rate_multiplier": "invalid"},
-            }
-        )
-
-
-def test_evaluation_restart_replaces_only_results(tmp_path: Path) -> None:
-    _config, paths = build_project(tmp_path)
-    results = paths.results("XX")
-    results.mkdir(parents=True)
-    (results / "old.json").write_text("{}", encoding="utf-8")
-    checkpoint = paths.checkpoint("XX")
-    checkpoint.parent.mkdir(parents=True)
-    checkpoint.write_text("keep", encoding="utf-8")
-    prepared = paths.prepared_test("XX")
-    prepared.mkdir(parents=True)
-    (prepared / "manifest.json").write_text("keep", encoding="utf-8")
-    restart_evaluation(paths, "XX")
-    assert not results.exists()
-    assert checkpoint.read_text(encoding="utf-8") == "keep"
-    assert (prepared / "manifest.json").read_text(encoding="utf-8") == "keep"
-
-
-def _change_evaluation_case(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    paths,
     *,
-    override: float | None,
-    present: bool = True,
-    score: float = 0.3,
-) -> InspectionResult:
-    _config, paths = build_project(tmp_path)
-    payload = json.loads(paths.model_config("XX").read_text(encoding="utf-8"))
-    payload["optuna_settings"]["threshold"]["value"] = 0.5
-    if present:
-        payload["inspection_threshold"] = override
-    else:
-        payload.pop("inspection_threshold", None)
-    paths.model_config("XX").write_text(json.dumps(payload), encoding="utf-8")
-    config = load_config(tmp_path, "XX")
-    prepared = paths.prepared_test("XX")
-    write_test_image(prepared / "source_00.png")
-    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
-    PreparationManifest(
-        model="XX",
-        created_at=recorder.started_at,
-        sources=[
-            PreparedSource(
-                source_image="source.png",
-                alignment=AlignmentResult(status="aligned"),
-                splits=[
-                    PreparedSplit(
-                        source_image="source.png", split_id=0, image="source_00.png"
-                    )
-                ],
-            )
-        ],
-    ).write_json(prepared / "manifest.json")
+    group=None,
+    score=0.5,
+    predictor_factory=None,
+):
+    run = recorder()
     monkeypatch.setattr(
-        "app.model_evaluation.evaluation.load_checkpoint_metadata",
-        lambda _path: {
-            "model": "XX",
-            "score_source": "supersimplenet.pred_score",
-            "anomalib_post_processor": False,
-            "threshold": 0.5,
-        },
+        evaluation_cli, "_run", lambda _cmd, _model, action, **_kw: action(paths, run)
     )
-    selected_thresholds: list[float] = []
-
-    def predict(image: np.ndarray) -> Prediction:
-        assert selected_thresholds == [0.5 if override is None else override]
-        return Prediction(score, np.zeros(image.shape[:2], dtype=np.float32))
-
-    result = evaluate_model(
-        config,
-        paths,
-        predictor=predict,
-        finish_runtime=lambda: recorder.finish(0),
-        on_threshold_selected=selected_thresholds.append,
-    )[0]
-    assert selected_thresholds == [result.threshold]
-    saved = InspectionResult.read_json(paths.results("XX") / "source.png.json")
-    assert saved.threshold == result.threshold
-    return result
-
-
-def test_change_req_018_01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    result = _change_evaluation_case(
-        tmp_path, monkeypatch, override=None, present=False
+    monkeypatch.setattr(
+        evaluation_cli,
+        "CheckpointPredictor",
+        predictor_factory or (lambda *_a, **_kw: FakePredictor(score=score)),
     )
-    assert result.threshold == 0.5
-    assert result.overall_status == "normal"
+    return _test_command(model="XX", group=group), run
 
 
-def test_change_req_018_02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    result = _change_evaluation_case(tmp_path, monkeypatch, override=None)
-    assert result.threshold == 0.5
+def _current(paths) -> dict[int, str]:
+    return read_current(paths, "XX", allowed_group_ids={0, 1})
 
 
-def test_change_req_018_03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    result = _change_evaluation_case(tmp_path, monkeypatch, override=0.2)
-    assert result.threshold == 0.2
-    assert result.overall_status == "anomaly"
-    payload = json.loads((tmp_path / "config" / "part_XX.json").read_text())
-    assert payload["optuna_settings"]["threshold"]["value"] == 0.5
+def test_group_req_023_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path, two=True)
+    _run(monkeypatch, paths)
+    assert set(_current(paths)) == {0, 1}
 
 
-@pytest.mark.parametrize("override,score", [(0.0, 0.0), (1.0, 1.0)])
-def test_change_req_018_04(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: float, score: float
+def test_group_req_023_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path, two=True)
+    _run(monkeypatch, paths, group=1)
+    assert set(_current(paths)) == {1}
+
+
+def test_group_req_023_s04(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path)
+    with pytest.raises(ValueError, match="available groups"):
+        _run(monkeypatch, paths, group=9)
+
+
+def test_group_req_023_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path, two=True)
+    _run(monkeypatch, paths)
+    before = _current(paths)
+    old_result = paths.results("XX") / before[1] / "sample.png.json"
+    old_contents = old_result.read_bytes()
+    paths.checkpoint("XX", 1).unlink()
+    with pytest.raises(ValueError, match="group 1"):
+        _run(
+            monkeypatch,
+            paths,
+            predictor_factory=lambda *_a, **_kw: pytest.fail("predictor started"),
+        )
+    assert _current(paths) == before
+    assert old_result.read_bytes() == old_contents
+
+
+@pytest.mark.parametrize("failure", ["evaluation", "result_image_write"])
+def test_group_req_023_s05(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    result = _change_evaluation_case(
-        tmp_path, monkeypatch, override=override, score=score
+    _, paths = project(tmp_path, two=True)
+    _run(monkeypatch, paths)
+    before = _current(paths)
+    old_result = paths.results("XX") / before[1] / "sample.png.json"
+    old_contents = old_result.read_bytes()
+    if failure == "evaluation":
+        original = evaluation_cli.evaluate_model
+
+        def fail_second(config, group, *args, **kwargs):
+            if group.id == 1:
+                raise RuntimeError("injected failure")
+            return original(config, group, *args, **kwargs)
+
+        monkeypatch.setattr(evaluation_cli, "evaluate_model", fail_second)
+    else:
+        original_write = evaluation.write_image
+
+        def fail_image_write(path, image):
+            if path.parent.name == "group_1":
+                raise OSError("injected image write failure")
+            return original_write(path, image)
+
+        monkeypatch.setattr(evaluation, "write_image", fail_image_write)
+    with pytest.raises(RuntimeError, match="group 1 failed"):
+        _run(monkeypatch, paths)
+    assert _current(paths) == before
+    assert old_result.read_bytes() == old_contents
+
+
+def test_group_req_010_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path, two=True)
+    _run(monkeypatch, paths)
+    current = _current(paths)
+    first = paths.results("XX") / current[0] / "sample.png.json"
+    second = paths.results("XX") / current[1] / "sample.png.json"
+    assert {item["split_id"] for item in json.loads(first.read_text())["splits"]} == {
+        0,
+        1,
+    }
+    assert {item["split_id"] for item in json.loads(second.read_text())["splits"]} == {
+        0
+    }
+
+
+def test_group_req_010_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path, two=True)
+    _run(monkeypatch, paths, group=1)
+    assert set(_current(paths)) == {1}
+
+
+def test_group_req_010_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path, two=True)
+    _run(monkeypatch, paths)
+    before = _current(paths)
+    _run(monkeypatch, paths, group=1)
+    after = _current(paths)
+    assert before[0] == after[0]
+    assert before[1] != after[1]
+
+
+def test_group_req_010_s04(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path, two=True)
+    paths.study_dir("XX", 0).joinpath("best_trial.json").unlink()
+    with pytest.raises(ValueError, match="group 0"):
+        _run(monkeypatch, paths)
+
+
+def test_group_req_013_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path, two=True)
+    _run(monkeypatch, paths)
+    before = _current(paths)
+    _run(monkeypatch, paths)
+    after = _current(paths)
+    assert all(before[key] != after[key] for key in before)
+    assert all((paths.results("XX") / value).is_dir() for value in after.values())
+
+
+def test_group_req_013_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path, two=True)
+    _run(monkeypatch, paths)
+    before = _current(paths)
+    _run(monkeypatch, paths, group=0)
+    after = _current(paths)
+    assert before[1] == after[1]
+    assert before[0] != after[0]
+
+
+def test_group_req_013_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path)
+    _run(monkeypatch, paths)
+    before = _current(paths)
+    monkeypatch.setattr(
+        evaluation_cli,
+        "publish_current",
+        lambda *_args: (_ for _ in ()).throw(OSError("interrupted")),
     )
-    assert result.threshold == override
-    assert result.overall_status == "anomaly"
+    with pytest.raises(OSError):
+        _run(monkeypatch, paths)
+    assert _current(paths) == before
 
 
-@pytest.mark.parametrize("invalid", [-0.1, 1.1, True, "0.5", float("inf")])
-def test_change_req_018_05(tmp_path: Path, invalid: object) -> None:
-    _config, paths = build_project(tmp_path)
+def test_group_req_013_s04(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path)
+    _run(monkeypatch, paths)
+    before = _current(paths)
+    monkeypatch.setattr(
+        evaluation_cli,
+        "cleanup_generations",
+        lambda *_args: (_ for _ in ()).throw(OSError("interrupted")),
+    )
+    _, run = _run(monkeypatch, paths)
+    assert _current(paths) != before
+    assert any("cleanup deferred" in item for item in run.warnings)
+
+
+@pytest.mark.parametrize("bad", ["version", "path", "missing", "symlink", "group"])
+def test_group_req_013_s05(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    _, paths = project(tmp_path, two=True)
+    _run(monkeypatch, paths)
+    current = paths.result_current("XX")
+    payload = json.loads(current.read_text())
+    if bad == "version":
+        payload["version"] = 2
+    elif bad == "path":
+        payload["groups"]["0"] = "../outside"
+    elif bad == "missing":
+        payload["groups"]["0"] = "generations/" + "0" * 32 + "/group_0"
+    elif bad == "group":
+        payload["groups"]["9"] = payload["groups"].pop("0")
+    else:
+        current.unlink()
+        outside = tmp_path / "outside.json"
+        outside.write_text("outside")
+        current.symlink_to(outside)
+    if bad != "symlink":
+        current.write_text(json.dumps(payload))
+    with pytest.raises(ValueError):
+        read_current(paths, "XX", allowed_group_ids={0, 1})
+    with pytest.raises(ValueError):
+        _run(monkeypatch, paths, group=0)
+
+
+def test_group_req_013_s06() -> None:
+    app = typer.Typer()
+    app.command()(_test_command)
+    result = CliRunner().invoke(app, ["--model", "XX", "--restart"])
+    assert result.exit_code != 0
+    assert "restart" in result.output
+
+
+def test_group_req_013_s07(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path, two=True)
+    current = paths.result_current("XX")
+    current.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text("safe")
+    current.symlink_to(outside)
+    _run(monkeypatch, paths)
+    assert not current.is_symlink()
+    assert outside.read_text() == "safe"
+    assert set(_current(paths)) == {0, 1}
+
+
+def test_group_req_013_s08(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path)
+    current = paths.result_current("XX")
+    current.parent.mkdir(parents=True)
+    current.write_text("invalid")
+    monkeypatch.chdir(tmp_path)
+    from app.common.cli import _run as execute
+
+    execute("check", "XX", lambda _paths, _recorder: "ok")
+    assert current.read_text() == "invalid"
+
+
+def test_group_req_013_s09(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path, two=True)
+    _run(monkeypatch, paths)
+    before = _current(paths)
+    _run(monkeypatch, paths, group=0)
+    after = _current(paths)
+    assert not (paths.results("XX") / before[0]).exists()
+    assert (paths.results("XX") / before[1]).exists()
+    assert sorted(
+        path.name for path in paths.result_generations("XX").iterdir()
+    ) == sorted({Path(value).parts[1] for value in after.values()})
+
+
+def test_group_req_013_s10(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path)
+    _run(monkeypatch, paths)
+    orphan = create_generation(paths, "XX") / "group_0"
+    orphan.mkdir()
+    monkeypatch.chdir(tmp_path)
+    from app.common.cli import _run as execute
+
+    execute("check", "XX", lambda _paths, _recorder: "ok")
+    assert not orphan.exists()
+
+
+def test_group_req_016_s01(tmp_path: Path) -> None:
+    config, paths = project(tmp_path)
+    group = config.part.groups[0]
+    metadata = load_checkpoint_metadata(paths.checkpoint("XX", 0))
+    assert validate_score_contract(config, group, metadata) == 0.4
+
+
+def test_group_req_016_s02(tmp_path: Path) -> None:
+    _, paths = project(tmp_path)
+    torch.save({"state_dict": {}}, paths.checkpoint("XX", 0))
+    with pytest.raises(ValueError, match="metadata"):
+        load_checkpoint_metadata(paths.checkpoint("XX", 0))
+
+
+def test_group_req_016_s03(tmp_path: Path) -> None:
+    config, paths = project(tmp_path)
+    metadata = load_checkpoint_metadata(paths.checkpoint("XX", 0))
+    metadata["group"] = 1
+    with pytest.raises(ValueError, match="group mismatch"):
+        validate_score_contract(config, config.part.groups[0], metadata)
+
+
+def test_group_req_018_s01(tmp_path: Path) -> None:
+    config, _ = project(tmp_path)
+    group = config.part.groups[0]
+    assert effective_threshold(group, 0.4) == 0.4
+
+
+def test_group_req_018_s02(tmp_path: Path) -> None:
+    config, _ = project(tmp_path)
+    assert config.part.groups[0].inspection_threshold is None
+    assert effective_threshold(config.part.groups[0], 0.4) == 0.4
+
+
+def test_group_req_018_s03(tmp_path: Path) -> None:
+    config, _ = project(tmp_path)
+    group = config.part.groups[0]
+    group.inspection_threshold = 0.7
+    assert effective_threshold(group, 0.4) == 0.7
+    assert group.optuna_settings.threshold.value == 0.4
+
+
+@pytest.mark.parametrize("value", [0.0, 1.0])
+def test_group_req_018_s04(tmp_path: Path, value: float) -> None:
+    config, _ = project(tmp_path)
+    group = config.part.groups[0]
+    group.inspection_threshold = value
+    assert effective_threshold(group, 0.4) == value
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, "bad", True])
+def test_group_req_018_s05(tmp_path: Path, value: object) -> None:
+    _, paths = project(tmp_path)
     payload = json.loads(paths.model_config("XX").read_text())
-    payload["inspection_threshold"] = invalid
+    payload["groups"][0]["inspection_threshold"] = value
     paths.model_config("XX").write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="inspection_threshold"):
         load_config(tmp_path, "XX")
-    assert not paths.results("XX").exists()
 
 
-def test_change_req_018_06(tmp_path: Path) -> None:
-    config, paths = build_project(tmp_path)
-    config = config.model_copy(
-        update={
-            "part": config.part.model_copy(
-                update={
-                    "inspection_threshold": 0.2,
-                    "optuna_settings": config.part.optuna_settings.model_copy(
-                        update={
-                            "threshold": config.part.optuna_settings.threshold.model_copy(
-                                update={"value": 0.5}
-                            )
-                        }
-                    ),
-                }
-            )
-        }
-    )
-    assert effective_threshold(config, 0.5) == 0.2
+def test_group_req_018_s06(tmp_path: Path) -> None:
+    config, paths = project(tmp_path)
+    group = config.part.groups[0]
+    group.optuna_settings.threshold.value = 0.6
+    metadata = load_checkpoint_metadata(paths.checkpoint("XX", 0))
     with pytest.raises(ValueError, match="threshold"):
-        validate_score_contract(
-            config,
-            {
-                "model": "XX",
-                "score_source": "supersimplenet.pred_score",
-                "anomalib_post_processor": False,
-                "threshold": 0.6,
-            },
-        )
-    assert not paths.results("XX").exists()
+        validate_score_contract(config, group, metadata)
 
 
-def test_predictor_uses_model_preprocessor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[torch.Tensor] = []
-
-    class Preprocess:
-        def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
-            calls.append(tensor.clone())
-            return torch.nn.functional.interpolate(
-                tensor, size=(7, 7), mode="bilinear", antialias=True
-            )
-
-    class Core:
-        def __call__(self, tensor: torch.Tensor) -> SimpleNamespace:
-            assert tuple(tensor.shape) == (1, 3, 7, 7)
-            return SimpleNamespace(
-                pred_score=torch.tensor([0.2]),
-                anomaly_map=torch.zeros((1, 1, 7, 7)),
-            )
-
-    class Model:
-        pre_processor = SimpleNamespace(transform=Preprocess())
-        model = Core()
-
-        def load_state_dict(self, _state: dict[str, object]) -> None:
-            pass
-
-        def to(self, _device: torch.device) -> None:
-            pass
-
-        def eval(self) -> None:
-            pass
-
-    monkeypatch.setattr(
-        "app.model_evaluation.predictor.create_supersimplenet",
-        lambda **_kwargs: Model(),
+def test_group_req_019_s01(tmp_path: Path) -> None:
+    config, _ = project(tmp_path)
+    group = config.part.groups[0]
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    heatmap = _heatmap(
+        image, np.ones((8, 8), dtype=np.float32), require_heatmap_range(group)
     )
-    checkpoint = tmp_path / "model.ckpt"
-    torch.save({"state_dict": {}}, checkpoint)
-    predictor = CheckpointPredictor(
-        checkpoint,
-        layers=["layer2"],
-        image_size=7,
-        learning_rate_multiplier=1.0,
-        device="cpu",
-    )
-
-    image = np.zeros((9, 13, 3), dtype=np.uint8)
-    prediction = predictor(image)
-
-    assert prediction.score == pytest.approx(0.2)
-    assert len(calls) == 1
-    assert tuple(calls[0].shape) == (1, 3, 9, 13)
+    assert heatmap.shape == image.shape
+    assert heatmap.any()
 
 
-def test_evaluation_keeps_same_stem_different_extensions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config, paths = build_project(tmp_path)
-    config = config.model_copy(
-        update={
-            "part": config.part.model_copy(
-                update={
-                    "optuna_settings": config.part.optuna_settings.model_copy(
-                        update={
-                            "threshold": config.part.optuna_settings.threshold.model_copy(
-                                update={"value": 0.5}
-                            )
-                        }
-                    )
-                }
-            )
-        }
-    )
-    prepared = paths.prepared_test("XX")
-    sources: list[PreparedSource] = []
-    for suffix in ("png", "jpg"):
-        split_name = f"sample_00.{suffix}"
-        write_test_image(prepared / split_name)
-        sources.append(
-            PreparedSource(
-                source_image=f"sample.{suffix}",
-                alignment=AlignmentResult(status="aligned"),
-                splits=[
-                    PreparedSplit(
-                        source_image=f"sample.{suffix}",
-                        split_id=0,
-                        image=split_name,
-                    )
-                ],
-            )
-        )
-    PreparationManifest(
-        model="XX",
-        created_at=RunRecorder(
-            "test", "XX", DeviceSelection("cpu", "CPU", "test")
-        ).started_at,
-        sources=sources,
-    ).write_json(prepared / "manifest.json")
-    monkeypatch.setattr(
-        "app.model_evaluation.evaluation.load_checkpoint_metadata",
-        lambda _path: {
-            "model": "XX",
-            "score_source": "supersimplenet.pred_score",
-            "anomalib_post_processor": False,
-            "threshold": 0.5,
-        },
-    )
-    recorder = RunRecorder("test", "XX", DeviceSelection("cpu", "CPU", "test"))
-
-    evaluate_model(
-        config,
-        paths,
-        predictor=lambda image: Prediction(
-            0.2, np.zeros(image.shape[:2], dtype=np.float32)
-        ),
-        finish_runtime=lambda: recorder.finish(0),
-    )
-
-    result_names = {path.name for path in paths.results("XX").iterdir()}
-    assert result_names == {
-        "sample.png.json",
-        "sample.jpg.json",
-        "sample_00.png_result.png",
-        "sample_00.jpg_result.png",
-    }
-
-
-def test_evaluation_persists_final_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config, paths = build_project(tmp_path)
-    config = config.model_copy(
-        update={
-            "part": config.part.model_copy(
-                update={
-                    "optuna_settings": config.part.optuna_settings.model_copy(
-                        update={
-                            "threshold": config.part.optuna_settings.threshold.model_copy(
-                                update={"value": 0.5}
-                            )
-                        }
-                    )
-                }
-            )
-        }
-    )
-    prepared = paths.prepared_test("XX")
-    image_path = prepared / "source_00.png"
-    write_test_image(image_path)
-    PreparationManifest(
-        model="XX",
-        created_at=RunRecorder(
-            "test", "XX", DeviceSelection("cpu", "CPU", "test")
-        ).started_at,
-        sources=[
-            PreparedSource(
-                source_image="source.png",
-                alignment=AlignmentResult(
-                    status="undetermined", reason="homography_failed"
-                ),
-                splits=[
-                    PreparedSplit(
-                        source_image="source.png",
-                        split_id=0,
-                        image=image_path.name,
-                    )
-                ],
-            )
-        ],
-    ).write_json(prepared / "manifest.json")
-    monkeypatch.setattr(
-        "app.model_evaluation.evaluation.load_checkpoint_metadata",
-        lambda _path: {
-            "model": "XX",
-            "score_source": "supersimplenet.pred_score",
-            "anomalib_post_processor": False,
-            "threshold": 0.5,
-        },
-    )
-    recorder = RunRecorder(
-        "test", "XX", DeviceSelection("cpu", "CPU", "CUDA is unavailable")
-    )
-    prediction_completed = False
-
-    def predictor(image: np.ndarray) -> Prediction:
-        nonlocal prediction_completed
-        prediction_completed = True
-        raise RuntimeError("prediction failed")
-
-    def finish_runtime() -> RunMetadata:
-        assert prediction_completed
-        return recorder.finish(0)
-
-    results = evaluate_model(
-        config,
-        paths,
-        predictor=predictor,
-        finish_runtime=finish_runtime,
-        record_warning=recorder.warnings.append,
-        record_error=recorder.errors.append,
-    )
-    final_runtime = recorder.finish(0)
-    restored = InspectionResult.read_json(paths.results("XX") / "source.png.json")
-
-    assert results[0].runtime == final_runtime
-    assert restored.runtime == final_runtime
-    assert restored.runtime.duration_seconds >= 0
-    assert restored.runtime.warnings == ["source.png: homography_failed"]
-    assert restored.runtime.errors == ["source.png: split 0: prediction failed"]
+@pytest.mark.parametrize("value", [None, {"min": 1, "max": 1}, {"min": True, "max": 2}])
+def test_group_req_019_s02(tmp_path: Path, value: object) -> None:
+    _, paths = project(tmp_path)
+    payload = json.loads(paths.model_config("XX").read_text())
+    payload["groups"][0]["heatmap_range"] = value
+    paths.model_config("XX").write_text(json.dumps(payload))
+    if value is None:
+        with pytest.raises(ValueError, match="heatmap_range"):
+            require_heatmap_range(load_config(tmp_path, "XX").part.groups[0])
+    else:
+        with pytest.raises(ValueError, match="heatmap_range"):
+            load_config(tmp_path, "XX")

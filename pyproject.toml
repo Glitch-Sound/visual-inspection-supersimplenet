@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "anomalib==2.6.2",
+    "filelock>=3.32.2",
     "loguru>=0.7.3",
     "numpy>=2.0.0",
     "opencv-python-headless>=4.12.0.88",
