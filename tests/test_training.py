@@ -49,6 +49,9 @@ def _project(root: Path, *, two: bool = False):
         payload = json.loads(path.read_text())
         second = json.loads(json.dumps(payload["groups"][0]))
         second["id"] = 1
+        payload["group_detail"]["1"] = json.loads(
+            json.dumps(payload["group_detail"]["0"])
+        )
         path.write_text(
             json.dumps({**payload, "groups": [payload["groups"][0], second]})
         )
@@ -606,7 +609,7 @@ def test_group_restart_uses_tv_backbone(
     )
 
     payload = json.loads(paths.model_config("XX").read_text())
-    payload["groups"][0]["optuna_settings"]["execution"]["trials"] = 1
+    payload["group_detail"]["0"]["optuna_settings"]["execution"]["trials"] = 1
     paths.model_config("XX").write_text(json.dumps(payload))
     checkpoint = paths.checkpoint("XX", 0)
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
@@ -681,7 +684,7 @@ def test_group_restart_replaces_only_selected_history(
     config, paths = evaluation_project(tmp_path, two=True)
     payload = json.loads(paths.model_config("XX").read_text())
     payload["groups"][1]["heatmap_range"] = {"min": 0.1, "max": 0.9}
-    payload["groups"][1]["optuna_settings"]["execution"]["trials"] = 1
+    payload["group_detail"]["1"]["optuna_settings"]["execution"]["trials"] = 1
     paths.model_config("XX").write_text(json.dumps(payload))
     config = load_config(tmp_path, "XX")
     prepare_training(config, paths, aligner=_aligned)

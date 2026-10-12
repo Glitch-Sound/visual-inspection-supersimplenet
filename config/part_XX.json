@@ -27,7 +27,11 @@
             "heatmap_range": {
                 "min": 0.0,
                 "max": 1.0
-            },
+            }
+        }
+    ],
+    "group_detail": {
+        "0": {
             "optuna_settings": {
                 "search": {
                     "learning_rate_multiplier": {
@@ -182,5 +186,5 @@
                 }
             }
         }
-    ]
+    }
 }

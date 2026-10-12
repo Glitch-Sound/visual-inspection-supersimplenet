@@ -114,7 +114,9 @@ def create_check_image(config: AppConfig, paths: ProjectPaths) -> Path:
 
     def populate(stage: Path) -> None:
         for group_id, selected_ranges in selected:
-            name = "all.png" if group_id is None else f"group_{group_id}.png"
+            name = (
+                "all.png" if group_id is None else f"{paths.group_name(group_id)}.png"
+            )
             write_image(
                 stage / name, draw_ranges(reference, selected_ranges, config.image_size)
             )
@@ -151,7 +153,7 @@ def prepare_training(
         sources: dict[int, list[PreparedSource]] = {item.id: [] for item in groups}
         excluded: dict[int, list[dict[str, object]]] = {item.id: [] for item in groups}
         targets = {
-            item.id: stage if group is not None else stage / f"group_{item.id}"
+            item.id: stage if group is not None else stage / paths.group_name(item.id)
             for item in groups
         }
         for target in targets.values():

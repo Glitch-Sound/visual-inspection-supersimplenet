@@ -34,10 +34,14 @@ def test_group_req_021_s01(tmp_path: Path) -> None:
     second["range_ids"] = [0]
     payload["groups"][0]["range_ids"] = [0, 1]
     payload["groups"].append(second)
+    payload["group_detail"]["1"] = json.loads(json.dumps(payload["group_detail"]["0"]))
+    payload["group_detail"]["1"]["optuna_settings"]["execution"]["seed"] = 73
     _save(path, payload)
     loaded = load_config(tmp_path, "XX")
     assert [group.id for group in loaded.part.select_groups()] == [0, 1]
     assert [item.id for item in loaded.part.ranges_for(loaded.part.groups[1])] == [0]
+    assert loaded.part.groups[1].optuna_settings.execution.seed == 73
+    assert loaded.part.groups[0].optuna_settings.execution.seed == 42
     assert config.part.groups[0].range_ids == [0, 1]
 
 
@@ -88,12 +92,71 @@ def test_group_req_021_s03(tmp_path: Path) -> None:
         load_model_config(path)
 
 
+@pytest.mark.parametrize("mutation", ["missing", "extra", "padded", "negative"])
+def test_group_detail_rejects_mismatched_ids(tmp_path: Path, mutation: str) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    if mutation == "missing":
+        payload["group_detail"] = {}
+    elif mutation == "extra":
+        payload["group_detail"]["1"] = payload["group_detail"]["0"]
+    elif mutation == "padded":
+        payload["group_detail"]["00"] = payload["group_detail"].pop("0")
+    elif mutation == "negative":
+        payload["group_detail"]["-1"] = payload["group_detail"].pop("0")
+    _save(path, payload)
+    with pytest.raises(ValidationError, match="group_detail"):
+        load_model_config(path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("old", "groups"),
+        ("summary_in_detail", "group_detail"),
+        ("missing_detail", "group_detail"),
+        ("missing_setting", "augmentation"),
+    ],
+)
+def test_group_detail_rejects_mixed_fields(
+    tmp_path: Path, mutation: str, reason: str
+) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    if mutation == "old":
+        payload["groups"][0]["score"] = payload["group_detail"]["0"].pop("score")
+    elif mutation == "summary_in_detail":
+        payload["group_detail"]["0"]["range_ids"] = [0]
+    elif mutation == "missing_detail":
+        payload.pop("group_detail")
+    else:
+        payload["group_detail"]["0"].pop("augmentation")
+    _save(path, payload)
+    with pytest.raises(ValidationError, match=reason):
+        load_model_config(path)
+
+
+def test_invalid_group_detail_keeps_config(tmp_path: Path) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    payload["group_detail"].pop("0")
+    _save(path, payload)
+    before = path.read_bytes()
+    with pytest.raises(ValidationError, match="group_detail"):
+        load_config(tmp_path, "XX")
+    with pytest.raises(ValidationError, match="group_detail"):
+        write_threshold(path, 0.4, group=0)
+    assert path.read_bytes() == before
+
+
 def test_training_threshold_updates_only_one_group(tmp_path: Path) -> None:
     build_project(tmp_path)
     path, payload = _payload(tmp_path)
     second = json.loads(json.dumps(payload["groups"][0]))
     second["id"] = 1
     payload["groups"].append(second)
+    payload["group_detail"]["1"] = json.loads(json.dumps(payload["group_detail"]["0"]))
+    payload["groups"][0]["inspection_threshold"] = 0.2
     _save(path, payload)
     before = preparation_fingerprint(
         load_config(tmp_path, "XX"), group=load_config(tmp_path, "XX").part.groups[0]
@@ -102,6 +165,10 @@ def test_training_threshold_updates_only_one_group(tmp_path: Path) -> None:
     updated = load_config(tmp_path, "XX")
     assert updated.part.groups[0].optuna_settings.threshold.value is None
     assert updated.part.groups[1].optuna_settings.threshold.value == 0.4
+    raw = json.loads(path.read_text())
+    assert raw["group_detail"]["0"]["optuna_settings"]["threshold"]["value"] is None
+    assert raw["group_detail"]["1"]["optuna_settings"]["threshold"]["value"] == 0.4
+    assert raw["groups"][0]["inspection_threshold"] == 0.2
     assert preparation_fingerprint(updated, group=updated.part.groups[0]) == before
 
 
@@ -110,7 +177,7 @@ def test_test_fingerprint_excludes_training_settings(tmp_path: Path) -> None:
     config = load_config(tmp_path, "XX")
     initial = preparation_fingerprint(config)
     path, payload = _payload(tmp_path)
-    payload["groups"][0]["augmentation"]["seed"] = 99
+    payload["group_detail"]["0"]["augmentation"]["seed"] = 99
     payload["blacklist"] = [{"image": "source.png", "id": [0]}]
     _save(path, payload)
     assert preparation_fingerprint(load_config(tmp_path, "XX")) == initial

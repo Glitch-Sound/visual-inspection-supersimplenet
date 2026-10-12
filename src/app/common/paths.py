@@ -73,7 +73,7 @@ class ProjectPaths:
 
     def check_image(self, model: str, group: int | None = None) -> Path:
         validate_model_name(model)
-        name = "all.png" if group is None else f"group_{self._group(group)}.png"
+        name = "all.png" if group is None else f"{self.group_name(group)}.png"
         candidate = self.root / "data/03_check" / model / name
         ensure_no_symlink_components(self.root, candidate)
         return ensure_within(self.root, candidate)
@@ -85,7 +85,7 @@ class ProjectPaths:
         model_dir = self._model_dir("data/04_train", model)
         if group is None:
             return model_dir
-        target = model_dir / f"group_{self._group(group)}"
+        target = model_dir / self.group_name(group)
         ensure_no_symlink_components(self.root, target)
         return ensure_within(model_dir, target)
 
@@ -104,13 +104,13 @@ class ProjectPaths:
         model_dir = self._model_dir("optuna", model)
         if group is None:
             return model_dir
-        target = model_dir / f"group_{self._group(group)}"
+        target = model_dir / self.group_name(group)
         ensure_no_symlink_components(self.root, target)
         return ensure_within(model_dir, target)
 
     def checkpoint(self, model: str, group: int) -> Path:
         validate_model_name(model)
-        target = self.root / "weights" / model / f"group_{self._group(group)}.ckpt"
+        target = self.root / "weights" / model / f"{self.group_name(group)}.ckpt"
         ensure_no_symlink_components(self.root, target)
         return ensure_within(self.root, target)
 
@@ -141,6 +141,10 @@ class ProjectPaths:
         if isinstance(group, bool) or not isinstance(group, int) or group < 0:
             raise ValueError(f"group must be a nonnegative integer: {group!r}")
         return group
+
+    @classmethod
+    def group_name(cls, group: int) -> str:
+        return f"group_{cls._group(group):02d}"
 
     def remove_model_artifact(self, path: Path, *, expected: Path) -> None:
         """Remove only an explicitly resolved model artifact."""

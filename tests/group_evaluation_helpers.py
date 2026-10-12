@@ -34,8 +34,13 @@ def project(root: Path, *, two: bool = False, score: float = 0.5):
         second["id"] = 1
         second["range_ids"] = [0]
         payload["groups"].append(second)
+        payload["group_detail"]["1"] = json.loads(
+            json.dumps(payload["group_detail"]["0"])
+        )
     for group in payload["groups"]:
-        group["optuna_settings"]["threshold"]["value"] = 0.4
+        payload["group_detail"][str(group["id"])]["optuna_settings"]["threshold"][
+            "value"
+        ] = 0.4
     path.write_text(json.dumps(payload))
     config = load_config(root, "XX")
     for name in ("base.png", "a.png", "b.png"):

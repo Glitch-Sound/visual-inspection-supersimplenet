@@ -36,6 +36,7 @@ def _two_groups(root: Path):
     second["id"] = 1
     second["range_ids"] = [0]
     payload["groups"].append(second)
+    payload["group_detail"]["1"] = json.loads(json.dumps(payload["group_detail"]["0"]))
     path.write_text(json.dumps(payload))
     return load_config(root, "XX"), paths
 
@@ -52,6 +53,8 @@ def test_group_req_001_s01(tmp_path: Path) -> None:
     assert paths.check_image("XX").is_file()
     assert paths.check_image("XX", 0).is_file()
     assert paths.check_image("XX", 1).is_file()
+    assert (tmp_path / "data/03_check/XX/group_00.png").is_file()
+    assert (tmp_path / "data/03_check/XX/group_01.png").is_file()
 
 
 def test_group_req_001_s02(tmp_path: Path) -> None:
@@ -113,6 +116,8 @@ def test_group_req_002_s01(tmp_path: Path) -> None:
     assert set(result) == {0, 1}
     assert (paths.prepared_train("XX", 0) / "a_01.png").is_file()
     assert (paths.prepared_train("XX", 1) / "a_00.png").is_file()
+    assert (tmp_path / "data/04_train/XX/group_00/a_01.png").is_file()
+    assert (tmp_path / "data/04_train/XX/group_01/a_00.png").is_file()
 
 
 def test_group_req_002_s02(tmp_path: Path) -> None:

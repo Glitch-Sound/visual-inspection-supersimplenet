@@ -20,6 +20,7 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | 型番 / `model` | CLI の `--model` で指定する対象製品の識別子。学習済みモデルそのものは指さない |
 | 分割 / `range` | 基準画像上の左上座標と分割IDで定義する切り出し範囲 |
 | グループ / `group` | 共通の分割IDを参照し、学習・検査条件と学習済みモデルを独立して持つ単位 |
+| グループ詳細 / `group_detail` | グループIDをキーに、探索条件・スコア契約・データ拡張をまとめた型番設定の領域 |
 | 基準画像 | 元画像の位置合わせ先となる画像 |
 | 元画像 | 学習または検査に入力する、分割前の画像 |
 | 分割画像 | 元画像を位置合わせし、設定範囲で切り出した画像 |
@@ -69,16 +70,20 @@ npm ci
 | `range` | 一意な分割IDと縮小前の開始座標の配列 |
 | `blacklist` | 学習準備だけで除外する元画像名と分割ID |
 | `alignment` | 型番内で共通のORB位置合わせ条件 |
-| `groups` | 必須の非空配列。グループIDは型番内で一意な非負整数 |
+| `groups` | 必須の非空配列。グループIDは型番内で一意な非負整数。対象分割と検査条件を置く |
 | `groups[].range_ids` | 非空・重複なしの既存分割ID。同じ分割IDを複数グループで参照できる |
-| `groups[].optuna_settings` | グループ別の探索、学習・検証分離、暫定閾値 |
-| `groups[].score` | `supersimplenet.pred_score`と無効化したPostProcessor |
-| `groups[].augmentation` | 学習入力だけに適用する拡張条件 |
 | `groups[].inspection_threshold` | `null`なら暫定閾値。0以上1以下の数値なら検査で使用 |
 | `groups[].heatmap_range` | 検査時に必須の有限な下限・上限。`min < max` |
+| `group_detail` | グループIDの通常の10進文字列をキーにする詳細設定。`groups`のIDと一対一に対応 |
+| `group_detail["<id>"].optuna_settings` | グループ別の探索、学習・検証分離、暫定閾値 |
+| `group_detail["<id>"].score` | `supersimplenet.pred_score`と無効化したPostProcessor |
+| `group_detail["<id>"].augmentation` | 学習入力だけに適用する拡張条件 |
 
 `blacklist`と`alignment`は型番共通である。<br />
-暫定閾値の`groups[].optuna_settings.threshold.value`は学習完了時に対象グループだけ更新される。<br />
+既存の型番設定では、各`groups`要素から`optuna_settings`、`score`、`augmentation`を取り出し、同じIDをキーとする`group_detail`へ移す。<br />
+例えば`id: 0`に対応するキーは`"0"`とし、`"00"`は使用しない。<br />
+旧形式の設定や、両領域で項目が重複する設定は入力不備として拒否される。<br />
+暫定閾値の`group_detail["<id>"].optuna_settings.threshold.value`は学習完了時に対象グループだけ更新される。<br />
 checkpointと最良試行にも同じ値を保存するため、暫定閾値だけを手動で変更しない。<br />
 切り出し位置、サイズ、縮小倍率、位置合わせなどを変更したら、該当する`train-pre`または`test-pre`を再実行する。<br />
 準備指紋が一致しない入力は学習・検査の前に拒否される。
@@ -118,15 +123,18 @@ uv run --locked test --model XX --group 1
 
 | 成果物 | 保存先 |
 | --- | --- |
-| 全分割と各グループの確認画像 | `data/03_check/<model>/all.png`、`group_<id>.png` |
-| グループ別学習準備 | `data/04_train/<model>/group_<id>/` |
+| 全分割と各グループの確認画像 | `data/03_check/<model>/all.png`、`group_<2桁以上のID>.png` |
+| グループ別学習準備 | `data/04_train/<model>/group_<2桁以上のID>/` |
 | 全分割の試験準備 | `data/05_test/<model>/` |
-| グループ別探索と最良試行 | `optuna/<model>/group_<id>/` |
-| グループ別checkpoint | `weights/<model>/group_<id>.ckpt` |
+| グループ別探索と最良試行 | `optuna/<model>/group_<2桁以上のID>/` |
+| グループ別checkpoint | `weights/<model>/group_<2桁以上のID>.ckpt` |
 | 現行結果参照 | `data/06_result/<model>/current.json` |
-| 検査結果画像と元画像・グループ別JSON | `data/06_result/<model>/generations/<実行ID>/group_<id>/` |
+| 検査結果画像と元画像・グループ別JSON | `data/06_result/<model>/generations/<実行ID>/group_<2桁以上のID>/` |
 
-`current.json`の`groups`は、グループIDをキーとして`generations/<実行ID>/group_<id>`への相対パスを示す。<br />
+グループ別成果物の名前だけIDを最低2桁で0埋めする (ID `0` は `group_00`、ID `100` は `group_100`)。<br />
+設定、CLI、各JSONのID値は従来どおり整数である。<br />
+旧名のグループ別成果物は自動移行しないため、必要なら退避したうえで`check`、`train-pre`、`train`、`test-pre`、全件`test`の順に再実行する。<br />
+`current.json`の`groups`は、グループIDを通常の10進文字列のキーとして`generations/<実行ID>/group_<2桁以上のID>`への相対パスを示す。<br />
 結果を読む側は、同じ型番の`test`が動いていない時に`current.json`を一度読み、示されたJSONと画像を読む。<br />
 単独検査では他グループの参照を保持する。<br />
 参照の切替後、参照されなくなったグループ結果と空の世代を整理し、現在の各グループ結果だけを残す。<br />
@@ -237,6 +245,11 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| split-group-config-details | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11の対象環境で新形式の複数グループ設定を使い、5 CLIの全件・単独実行と成果物読戻しを確認する。 |
+| split-group-config-details | AC-002 | 未検証 | タスク3.4: 両OSで詳細の欠落・余分・非標準IDキーと旧形式混在を入力不備として拒否し、既存成果物が変わらないことを確認する。 |
+| split-group-config-details | AC-003 | 未検証 | タスク3.5: 両OSで実モデルの単独グループ学習を行い、対象の暫定閾値だけが詳細設定へ書き戻されることを確認する。 |
+| pad-group-artifact-names | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11の対象環境でID 0・10のグループ別成果物名と整数IDを全CLIで確認する。 |
+| pad-group-artifact-names | AC-002 | 未検証 | タスク3.4: 両OSで旧名成果物を退避後に準備・学習・全件検査を再実行し、新名の現行参照と結果を読み戻す。 |
 | align-inspection-progress-and-scenario-tests | AC-001 | 未検証 | タスク4.1: 対象OSの実端末・非端末で全・単独グループ検査の元画像進捗、途中失敗、標準出力JSONを確認する。 |
 | align-inspection-progress-and-scenario-tests | AC-002 | 未検証 | タスク4.2: 対象OSの実画像と実GPU/CPUで準備、判定画像、色尺度、CLI表示を確認する。 |
 | align-inspection-progress-and-scenario-tests | AC-003 | 未検証 | タスク4.3: 実重みで指定グループを再学習し、checkpointによる検査と他グループ保持を確認する。 |

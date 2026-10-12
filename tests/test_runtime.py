@@ -168,7 +168,7 @@ def test_nreq_002_s01(
     if command == "train":
         preparation.prepare_training(config, paths, aligner=aligned)
         payload = json.loads(paths.model_config("XX").read_text())
-        payload["groups"][0]["optuna_settings"]["execution"]["trials"] = 1
+        payload["group_detail"]["0"]["optuna_settings"]["execution"]["trials"] = 1
         paths.model_config("XX").write_text(json.dumps(payload))
 
         class FakeRunner:

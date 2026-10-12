@@ -53,7 +53,7 @@ def read_current(
             len(parts) != 3
             or parts[0] != "generations"
             or not _RUN_ID.fullmatch(parts[1])
-            or parts[2] != f"group_{group}"
+            or parts[2] != paths.group_name(group)
         ):
             raise ValueError(f"invalid current.json path for group {group}: {value!r}")
         target = root / relative

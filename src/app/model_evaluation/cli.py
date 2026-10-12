@@ -142,7 +142,7 @@ def _test_command(
                         selected,
                         paths,
                         predictor=predictor,
-                        output_dir=generation / f"group_{selected.id}",
+                        output_dir=generation / paths.group_name(selected.id),
                         finish_runtime=lambda: recorder.snapshot(ExitCode.SUCCESS),
                         record_warning=recorder.warnings.append,
                         record_error=recorder.errors.append,
@@ -159,10 +159,12 @@ def _test_command(
             for result in all_results:
                 result.runtime = final_runtime
                 result.write_json(
-                    generation / f"group_{result.group}" / f"{result.source_image}.json"
+                    generation
+                    / paths.group_name(result.group)
+                    / f"{result.source_image}.json"
                 )
             new_paths = {
-                item.id: f"generations/{generation.name}/group_{item.id}"
+                item.id: f"generations/{generation.name}/{paths.group_name(item.id)}"
                 for item in groups
             }
             current = {**old_current, **new_paths}

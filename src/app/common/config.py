@@ -6,6 +6,7 @@ import configparser
 import hashlib
 import json
 import math
+import re
 import warnings
 from pathlib import Path, PureWindowsPath
 from typing import Annotated, Literal
@@ -284,6 +285,67 @@ class ModelConfig(StrictModel):
     alignment: AlignmentSettings
     groups: list[GroupConfig] = Field(min_length=1)
 
+    @model_validator(mode="before")
+    @classmethod
+    def combine_group_details(cls, value: object) -> object:
+        if not isinstance(value, dict) or "groups" not in value:
+            return value
+        groups = value["groups"]
+        details = value.get("group_detail")
+        if not isinstance(details, dict):
+            raise ValueError("group_detail must be an object")
+        if not isinstance(groups, list):
+            return value
+
+        summary_fields = {
+            "id",
+            "range_ids",
+            "inspection_threshold",
+            "heatmap_range",
+        }
+        detail_fields = {"optuna_settings", "score", "augmentation"}
+        group_ids: list[int] = []
+        for group in groups:
+            if not isinstance(group, dict):
+                return value
+            misplaced = set(group) - summary_fields
+            if misplaced:
+                raise ValueError(
+                    f"groups contains misplaced fields: {sorted(misplaced)}"
+                )
+            group_id = group.get("id")
+            if (
+                isinstance(group_id, bool)
+                or not isinstance(group_id, int)
+                or group_id < 0
+            ):
+                return value
+            group_ids.append(group_id)
+
+        for key, detail in details.items():
+            if not isinstance(key, str) or re.fullmatch(r"0|[1-9][0-9]*", key) is None:
+                raise ValueError(f"group_detail has invalid id key: {key!r}")
+            if not isinstance(detail, dict):
+                raise ValueError(f"group_detail[{key!r}] must be an object")
+            misplaced = set(detail) - detail_fields
+            if misplaced:
+                raise ValueError(
+                    f"group_detail[{key!r}] contains misplaced fields: "
+                    f"{sorted(misplaced)}"
+                )
+
+        expected = {str(group_id) for group_id in group_ids}
+        actual = set(details)
+        if expected != actual:
+            raise ValueError(
+                "group_detail ids must match groups.id: "
+                f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+            )
+        return {
+            **{key: item for key, item in value.items() if key != "group_detail"},
+            "groups": [{**group, **details[str(group["id"])]} for group in groups],
+        }
+
     @field_validator("base")
     @classmethod
     def validate_base_filename(cls, value: str) -> str:
@@ -444,11 +506,11 @@ def write_threshold(
 ) -> None:
     """Write a threshold-updated configuration without mutating other fields."""
 
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    selected = next((item for item in payload["groups"] if item["id"] == group), None)
-    if selected is None:
+    validated = load_model_config(path)
+    if group not in {item.id for item in validated.groups}:
         raise ValueError(f"unknown group {group} in {path}")
-    selected["optuna_settings"]["threshold"]["value"] = value
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["group_detail"][str(group)]["optuna_settings"]["threshold"]["value"] = value
     target = destination or path
     temporary = target.with_suffix(target.suffix + ".tmp")
     try:

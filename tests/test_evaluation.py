@@ -67,6 +67,8 @@ def test_group_req_023_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     _, paths = project(tmp_path, two=True)
     _run(monkeypatch, paths)
     assert set(_current(paths)) == {0, 1}
+    assert _current(paths)[0].endswith("/group_00")
+    assert _current(paths)[1].endswith("/group_01")
 
 
 def test_group_req_023_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,7 +122,7 @@ def test_group_req_023_s05(
         original_write = evaluation.write_image
 
         def fail_image_write(path, image):
-            if path.parent.name == "group_1":
+            if path.parent.name == "group_01":
                 raise OSError("injected image write failure")
             return original_write(path, image)
 
@@ -295,7 +297,7 @@ def test_group_req_013_s05(
     elif bad == "path":
         payload["groups"]["0"] = "../outside"
     elif bad == "missing":
-        payload["groups"]["0"] = "generations/" + "0" * 32 + "/group_0"
+        payload["groups"]["0"] = "generations/" + "0" * 32 + "/group_00"
     elif bad == "group":
         payload["groups"]["9"] = payload["groups"].pop("0")
     else:
@@ -708,7 +710,7 @@ def test_command_progress_cli_failure_exit_record(
 
         def fail_final_write(result, output):
             nonlocal writes
-            if output.parent.name == "group_1" and result.source_image == "second.png":
+            if output.parent.name == "group_01" and result.source_image == "second.png":
                 writes += 1
                 if writes == 2:
                     raise OSError("injected final write failure")
@@ -779,7 +781,7 @@ def test_command_progress_stops_before_failed_result_write(
     write_result = evaluation.write_inspection_result
 
     def fail_second_result(result, output):
-        if output.parent.name == "group_1" and result.source_image == "second.png":
+        if output.parent.name == "group_01" and result.source_image == "second.png":
             raise OSError("injected result write failure")
         write_result(result, output)
 
@@ -809,7 +811,7 @@ def test_command_progress_stops_before_failed_publication(
 
         def fail_rewrite(result, output):
             nonlocal writes
-            if output.parent.name == "group_1" and result.source_image == "second.png":
+            if output.parent.name == "group_01" and result.source_image == "second.png":
                 writes += 1
                 if writes == 2:
                     raise OSError("injected final write failure")
