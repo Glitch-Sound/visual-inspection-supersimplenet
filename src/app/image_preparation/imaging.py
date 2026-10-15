@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import floor
+from math import floor, sqrt
 from typing import Any, cast
 
 import cv2
@@ -32,6 +32,7 @@ class AlignedImage:
     image: ImageArray
     matches: int
     inlier_ratio: float
+    inlier_reprojection_rmse_px: float
 
 
 def resize_image(image: ImageArray, scale: float) -> ImageArray:
@@ -87,23 +88,79 @@ def align_orb(
     reference_points = np.asarray(
         [reference_keypoints[match.trainIdx].pt for match in matches], dtype=np.float32
     ).reshape(-1, 1, 2)
-    homography, mask = cv2.findHomography(
-        source_points,
-        reference_points,
-        cv2.RANSAC,
-        settings.ransac_reprojection_threshold_px,
-        confidence=settings.ransac_confidence,
+    try:
+        if settings.transform_model == "homography":
+            matrix, mask = cv2.findHomography(
+                source_points,
+                reference_points,
+                cv2.RANSAC,
+                settings.ransac_reprojection_threshold_px,
+                confidence=settings.ransac_confidence,
+            )
+        else:
+            matrix, mask = cv2.estimateAffinePartial2D(
+                source_points,
+                reference_points,
+                method=cv2.RANSAC,
+                ransacReprojThreshold=settings.ransac_reprojection_threshold_px,
+                confidence=settings.ransac_confidence,
+            )
+    except cv2.error as error:
+        raise AlignmentError("transform_failed", matches=count) from error
+    failure = (
+        "homography_failed"
+        if settings.transform_model == "homography"
+        else "similarity_failed"
     )
-    if homography is None or mask is None:
-        raise AlignmentError("homography_failed", matches=count)
-    inlier_ratio = float(mask.ravel().mean())
+    expected_shape = (3, 3) if settings.transform_model == "homography" else (2, 3)
+    if (
+        matrix is None
+        or mask is None
+        or matrix.shape != expected_shape
+        or mask.size != count
+        or not np.isfinite(matrix).all()
+        or abs(
+            float(np.linalg.det(matrix[:, :2] if matrix.shape == (2, 3) else matrix))
+        )
+        <= 1e-12
+    ):
+        raise AlignmentError(failure, matches=count)
+    inliers = mask.ravel().astype(bool)
+    if not inliers.any():
+        raise AlignmentError("no_inliers", matches=count)
+    inlier_ratio = float(inliers.mean())
     if inlier_ratio < settings.minimum_inlier_ratio:
         raise AlignmentError(
             "insufficient_inlier_ratio", matches=count, inlier_ratio=inlier_ratio
         )
-    height, width = reference.shape[:2]
-    aligned = cv2.warpPerspective(image, homography, (width, height))
-    return AlignedImage(cast(ImageArray, aligned), count, inlier_ratio)
+    try:
+        selected_source = source_points[inliers].reshape(-1, 1, 2)
+        selected_reference = reference_points[inliers].reshape(-1, 2)
+        if settings.transform_model == "homography":
+            projected = cv2.perspectiveTransform(selected_source, matrix)
+        else:
+            projected = cv2.transform(selected_source, matrix)
+        residuals = projected.reshape(-1, 2).astype(np.float64) - selected_reference
+        rmse = sqrt(float(np.mean(np.sum(residuals * residuals, axis=1))))
+        if not np.isfinite(rmse):
+            raise AlignmentError("invalid_reprojection_error", matches=count)
+        height, width = reference.shape[:2]
+        if settings.transform_model == "homography":
+            if settings.border_mode == "black":
+                aligned = cv2.warpPerspective(image, matrix, (width, height))
+            else:
+                aligned = cv2.warpPerspective(
+                    image, matrix, (width, height), borderMode=cv2.BORDER_REPLICATE
+                )
+        elif settings.border_mode == "black":
+            aligned = cv2.warpAffine(image, matrix, (width, height))
+        else:
+            aligned = cv2.warpAffine(
+                image, matrix, (width, height), borderMode=cv2.BORDER_REPLICATE
+            )
+    except cv2.error as error:
+        raise AlignmentError("transform_failed", matches=count) from error
+    return AlignedImage(cast(ImageArray, aligned), count, inlier_ratio, rmse)
 
 
 def validate_crop(image: ImageArray, crop: CropRange, size: int) -> None:

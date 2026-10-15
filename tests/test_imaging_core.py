@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import cv2
 import numpy as np
@@ -8,6 +9,7 @@ import pytest
 
 from app.common.atomic import recover_directory_swap
 from app.common.config import AlignmentSettings
+from app.common.image_io import ImageArray
 from app.image_preparation.imaging import AlignmentError, align_orb
 
 
@@ -113,3 +115,118 @@ def test_align_orb_filters_knn_candidates(monkeypatch: pytest.MonkeyPatch) -> No
             AlignmentSettings(minimum_matches=11),
         )
     assert error.value.matches == 10
+
+
+def _textured_image() -> np.ndarray:
+    return np.random.default_rng(123).integers(
+        20, 240, size=(128, 128, 3), dtype=np.uint8
+    )
+
+
+def test_alignment_default_pixels_match_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = _textured_image()
+    matrix = np.array([[1, 0, 9], [0, 1, 0], [0, 0, 1]], dtype=np.float64)
+
+    def estimator(source, _target, _method, _threshold, *, confidence):
+        assert confidence == 0.95
+        return matrix, np.ones((len(source), 1), dtype=np.uint8)
+
+    monkeypatch.setattr(cv2, "findHomography", estimator)
+    result = align_orb(image, image, AlignmentSettings())
+    expected = cv2.warpPerspective(image, matrix, (128, 128))
+    np.testing.assert_array_equal(result.image, expected)
+    assert result.inlier_reprojection_rmse_px == pytest.approx(9.0)
+    assert np.all(result.image[:, :9] == 0)
+
+
+def test_alignment_replicate_border_pixels(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = _textured_image()
+    matrix = np.array([[1, 0, 9], [0, 1, 0], [0, 0, 1]], dtype=np.float64)
+    monkeypatch.setattr(
+        cv2,
+        "findHomography",
+        lambda source, *_args, **_kwargs: (
+            matrix,
+            np.ones((len(source), 1), dtype=np.uint8),
+        ),
+    )
+    result = align_orb(image, image, AlignmentSettings(border_mode="replicate"))
+    np.testing.assert_array_equal(result.image[:, :9], image[:, :1].repeat(9, axis=1))
+    assert np.all(result.image[:, :9] > 0)
+
+
+def test_alignment_similarity_transform(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = _textured_image()
+    matrix = np.array([[0.0, -1.0, 127.0], [1.0, 0.0, 0.0]])
+    captured: dict[str, object] = {}
+
+    def estimator(source, _target, *, method, ransacReprojThreshold, confidence):
+        captured.update(
+            method=method,
+            threshold=ransacReprojThreshold,
+            confidence=confidence,
+        )
+        return matrix, np.ones((len(source), 1), dtype=np.uint8)
+
+    monkeypatch.setattr(cv2, "estimateAffinePartial2D", estimator)
+    result = align_orb(image, image, AlignmentSettings(transform_model="similarity"))
+    np.testing.assert_array_equal(
+        result.image, cv2.warpAffine(image, matrix, (128, 128))
+    )
+    assert captured == {"method": cv2.RANSAC, "threshold": 8.0, "confidence": 0.95}
+    assert result.inlier_reprojection_rmse_px >= 0
+
+
+def test_alignment_similarity_with_real_estimator() -> None:
+    reference = np.random.default_rng(8).integers(
+        20, 230, size=(256, 256, 3), dtype=np.uint8
+    )
+    shifted = cast(
+        ImageArray,
+        cv2.warpAffine(
+            reference,
+            np.array([[1, 0, 7], [0, 1, 4]], dtype=np.float32),
+            (256, 256),
+            borderMode=cv2.BORDER_REPLICATE,
+        ),
+    )
+    result = align_orb(
+        shifted,
+        reference,
+        AlignmentSettings(transform_model="similarity", border_mode="replicate"),
+    )
+    assert result.matches >= 10
+    assert result.inlier_ratio > 0.9
+    assert result.inlier_reprojection_rmse_px < 1.0
+    assert result.image.shape == reference.shape
+
+
+def test_alignment_rejects_nonfinite_transform(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = _textured_image()
+    invalid = np.eye(3, dtype=np.float64)
+    invalid[0, 0] = float("nan")
+    monkeypatch.setattr(
+        cv2,
+        "findHomography",
+        lambda source, *_args, **_kwargs: (
+            invalid,
+            np.ones((len(source), 1), dtype=np.uint8),
+        ),
+    )
+    with pytest.raises(AlignmentError, match="homography_failed"):
+        align_orb(image, image, AlignmentSettings())
+
+
+@pytest.mark.parametrize("no_mask", [True, False])
+def test_alignment_similarity_rejects_missing_inliers(
+    monkeypatch: pytest.MonkeyPatch, no_mask: bool
+) -> None:
+    image = _textured_image()
+    matrix = np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float64)
+
+    def estimator(source, *_args, **_kwargs):
+        return matrix, (None if no_mask else np.zeros((len(source), 1), dtype=np.uint8))
+
+    monkeypatch.setattr(cv2, "estimateAffinePartial2D", estimator)
+    with pytest.raises(AlignmentError, match="similarity_failed|no_inliers"):
+        align_orb(image, image, AlignmentSettings(transform_model="similarity"))

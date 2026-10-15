@@ -43,7 +43,7 @@ _real_fit_selected_parameters = training_cli.fit_selected_parameters
 def _aligned(
     image: np.ndarray, _reference: np.ndarray, _settings: object
 ) -> AlignedImage:
-    return AlignedImage(image, 20, 0.8)
+    return AlignedImage(image, 20, 0.8, 0.0)
 
 
 def _project(

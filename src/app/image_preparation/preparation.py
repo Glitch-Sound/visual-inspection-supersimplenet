@@ -216,6 +216,7 @@ def prepare_training(
                             status="aligned",
                             matches=aligned.matches,
                             inlier_ratio=aligned.inlier_ratio,
+                            inlier_reprojection_rmse_px=aligned.inlier_reprojection_rmse_px,
                         ),
                         splits=splits,
                     )
@@ -306,6 +307,7 @@ def prepare_testing(
                         status="aligned",
                         matches=aligned.matches,
                         inlier_ratio=aligned.inlier_ratio,
+                        inlier_reprojection_rmse_px=aligned.inlier_reprojection_rmse_px,
                     ),
                     splits=splits,
                 )

@@ -10,6 +10,8 @@
     "blacklist": [],
     "alignment": {
         "method": "ORB",
+        "transform_model": "homography",
+        "border_mode": "black",
         "knn_k": 2,
         "ratio_threshold": 0.75,
         "minimum_matches": 10,

@@ -18,7 +18,7 @@ from app.model_evaluation.predictor import Prediction
 def aligned(
     image: np.ndarray, _reference: np.ndarray, _settings: object
 ) -> AlignedImage:
-    return AlignedImage(image, 20, 0.8)
+    return AlignedImage(image, 20, 0.8, 0.0)
 
 
 def project(root: Path, *, two: bool = False, three: bool = False, score: float = 0.5):

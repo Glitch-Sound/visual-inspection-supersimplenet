@@ -299,6 +299,8 @@ class AugmentationSettings(StrictModel):
 
 class AlignmentSettings(StrictModel):
     method: Literal["ORB"] = "ORB"
+    transform_model: Literal["homography", "similarity"] = "homography"
+    border_mode: Literal["black", "replicate"] = "black"
     knn_k: Literal[2] = 2
     ratio_threshold: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.75
     minimum_matches: Annotated[int, Field(ge=4)] = 10

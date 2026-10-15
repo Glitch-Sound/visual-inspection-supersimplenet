@@ -211,6 +211,23 @@ def test_test_fingerprint_excludes_training_settings(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [("transform_model", "affine"), ("border_mode", "reflect")],
+)
+def test_alignment_choices_rejected(tmp_path: Path, field: str, bad_value: str) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    assert load_config(tmp_path, "XX").part.alignment.transform_model == "homography"
+    assert load_config(tmp_path, "XX").part.alignment.border_mode == "black"
+    payload["alignment"][field] = bad_value
+    _save(path, payload)
+    before = path.read_bytes()
+    with pytest.raises(ValidationError, match=field):
+        load_config(tmp_path, "XX")
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
     ("unit", "minimum"),
     [("unknown", 2), ("split", None), ("split", 0), ("split", True), ("split", 1.5)],
 )

@@ -141,6 +141,9 @@ class AlignmentResult(ContractModel):
     recapture_required: bool = False
     matches: int | None = None
     inlier_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    inlier_reprojection_rmse_px: float | None = Field(
+        default=None, ge=0.0, allow_inf_nan=False
+    )
 
 
 class PreparedSplit(ContractModel):

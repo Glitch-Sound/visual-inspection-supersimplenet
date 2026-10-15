@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 import typer
 from conftest import build_project, write_test_image
+from pydantic import ValidationError
 
 from app.common.config import load_config, preparation_fingerprint
+from app.common.contracts import AlignmentResult, load_preparation_manifest
 from app.common.image_io import ImageReadError
-from app.image_preparation.imaging import AlignedImage, AlignmentError
+from app.image_preparation.imaging import AlignedImage, AlignmentError, align_orb
 from app.image_preparation.preparation import (
     PreparationError,
     create_check_image,
@@ -22,7 +25,7 @@ from app.image_preparation.preparation import (
 def aligned(
     image: np.ndarray, _reference: np.ndarray, _settings: object
 ) -> AlignedImage:
-    return AlignedImage(image, 20, 0.8)
+    return AlignedImage(image, 20, 0.8, 0.0)
 
 
 def _two_groups(root: Path):
@@ -44,6 +47,165 @@ def _two_groups(root: Path):
 def _train_images(paths) -> None:
     for name in ("base.png", "a.png", "b.png"):
         write_test_image(paths.original_train("XX") / name, size=32)
+
+
+def _alignment_config(paths, **changes):
+    path = paths.model_config("XX")
+    payload = json.loads(path.read_text())
+    payload["alignment"].update(changes)
+    path.write_text(json.dumps(payload))
+    return load_config(paths.root, "XX")
+
+
+def test_similarity_replicate_testing_pixels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = build_project(tmp_path)
+    config = _alignment_config(
+        paths, transform_model="similarity", border_mode="replicate"
+    )
+    texture = np.random.default_rng(10).integers(
+        20, 240, size=(128, 128, 3), dtype=np.uint8
+    )
+    paths.original_train("XX").mkdir(parents=True)
+    paths.original_test("XX").mkdir(parents=True)
+    cv2.imwrite(str(paths.original_train("XX") / "base.png"), texture)
+    cv2.imwrite(str(paths.original_test("XX") / "sample.png"), texture)
+
+    def estimate(source, *_args, **_kwargs):
+        matrix = np.array([[1, 0, 9], [0, 1, 0]], dtype=np.float64)
+        return matrix, np.ones((len(source), 1), dtype=np.uint8)
+
+    monkeypatch.setattr(cv2, "estimateAffinePartial2D", estimate)
+    manifest = prepare_testing(config, paths, aligner=align_orb)
+    result = cv2.imread(str(paths.prepared_test("XX") / "sample_00.png"))
+    assert result is not None
+    np.testing.assert_array_equal(result, texture[:8, :1].repeat(8, axis=1))
+    assert manifest.sources[0].alignment.inlier_reprojection_rmse_px == pytest.approx(9)
+
+
+def test_alignment_estimation_failure_excludes_training(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    _train_images(paths)
+
+    def fail(_image, _reference, _settings):
+        raise AlignmentError("similarity_failed", matches=20)
+
+    manifest = prepare_training(config, paths, aligner=fail)[0]
+    assert all(
+        source.alignment.reason == "similarity_failed" for source in manifest.sources
+    )
+    assert all(not source.splits for source in manifest.sources)
+
+
+def test_alignment_estimation_failure_undetermines_testing(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    _train_images(paths)
+    write_test_image(paths.original_test("XX") / "sample.png", size=32)
+
+    def fail(_image, _reference, _settings):
+        raise AlignmentError("no_inliers", matches=20)
+
+    manifest = prepare_testing(config, paths, aligner=fail)
+    source = manifest.sources[0]
+    assert source.alignment.status == "undetermined"
+    assert source.alignment.reason == "no_inliers"
+    assert source.alignment.recapture_required
+    assert not source.splits
+
+
+def test_alignment_options_change_fingerprint(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    _train_images(paths)
+    write_test_image(paths.original_test("XX") / "sample.png", size=32)
+    prepare_training(config, paths, aligner=aligned)
+    prepare_testing(config, paths, aligner=aligned)
+    for field, value in (
+        ("transform_model", "similarity"),
+        ("border_mode", "replicate"),
+    ):
+        changed = _alignment_config(paths, **{field: value})
+        with pytest.raises(ValueError, match="fingerprint mismatch"):
+            load_preparation_manifest(
+                paths.prepared_train("XX", 0),
+                model="XX",
+                group=0,
+                allowed_split_ids={0},
+                fingerprint=preparation_fingerprint(
+                    changed, group=changed.part.groups[0]
+                ),
+            )
+        with pytest.raises(ValueError, match="fingerprint mismatch"):
+            load_preparation_manifest(
+                paths.prepared_test("XX"),
+                model="XX",
+                allowed_split_ids={0},
+                fingerprint=preparation_fingerprint(changed),
+            )
+
+
+def test_training_alignment_rmse_manifest(tmp_path: Path) -> None:
+    config, paths = _two_groups(tmp_path)
+    for name, value in (("base.png", 50), ("a.png", 80), ("b.png", 100)):
+        write_test_image(paths.original_train("XX") / name, size=32, value=value)
+
+    def measured(image, _reference, _settings):
+        return AlignedImage(image, 20, 0.8, float(image[0, 0, 0]) / 100)
+
+    manifests = prepare_training(config, paths, aligner=measured)
+    for name, expected in (("base.png", 0.5), ("a.png", 0.8), ("b.png", 1.0)):
+        assert [
+            next(
+                s for s in manifests[group].sources if s.source_image == name
+            ).alignment.inlier_reprojection_rmse_px
+            for group in manifests
+        ] == [expected, expected]
+    saved = json.loads((paths.prepared_train("XX", 0) / "manifest.json").read_text())
+    assert (
+        len(
+            [
+                s
+                for s in saved["sources"]
+                if s["alignment"]["inlier_reprojection_rmse_px"] is not None
+            ]
+        )
+        == 3
+    )
+
+
+def test_testing_alignment_rmse_manifest(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    write_test_image(paths.original_train("XX") / "base.png", size=32)
+    write_test_image(paths.original_test("XX") / "a.png", size=32, value=50)
+    write_test_image(paths.original_test("XX") / "b.png", size=32, value=100)
+
+    def measured(image, _reference, _settings):
+        return AlignedImage(image, 20, 0.8, float(image[0, 0, 0]) / 100)
+
+    prepare_testing(config, paths, aligner=measured)
+    saved = json.loads((paths.prepared_test("XX") / "manifest.json").read_text())
+    assert {
+        s["source_image"]: s["alignment"]["inlier_reprojection_rmse_px"]
+        for s in saved["sources"]
+    } == {"a.png": 0.5, "b.png": 1.0}
+
+
+def test_failed_alignment_rmse_is_null(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    _train_images(paths)
+    write_test_image(paths.original_test("XX") / "sample.png", size=32)
+
+    def fail(_image, _reference, _settings):
+        raise AlignmentError("no_inliers")
+
+    train = prepare_training(config, paths, aligner=fail)[0]
+    testing = prepare_testing(config, paths, aligner=fail)
+    for source in [*train.sources, *testing.sources]:
+        assert source.alignment.inlier_reprojection_rmse_px is None
+        assert not source.splits
+    for invalid in (-1, float("nan"), float("inf")):
+        with pytest.raises(ValidationError):
+            AlignmentResult(status="aligned", inlier_reprojection_rmse_px=invalid)
 
 
 def test_group_req_001_s01(tmp_path: Path) -> None:

@@ -22,6 +22,9 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | グループ / `group` | 共通の分割IDを参照し、学習・検査条件と学習済みモデルを独立して持つ単位 |
 | グループ詳細 / `group_detail` | グループIDをキーに、探索条件・スコア契約・データ拡張をまとめた型番設定の領域 |
 | 基準画像 | 元画像の位置合わせ先となる画像 |
+| 変換モデル | 位置合わせで許す幾何変換。`homography` は射影変換、`similarity` は平行移動・回転・等方拡大縮小 |
+| 境界埋め | 位置合わせ後に元画像の外側となる領域の画素。`black` は黒、`replicate` は端画素の複製 |
+| 残り誤差 / `inlier_reprojection_rmse_px` | 位置合わせに採用した対応点の再投影RMSE。縮小後画像のピクセル単位 |
 | 元画像 | 学習または検査に入力する、分割前の画像 |
 | 分割画像 | 元画像を位置合わせし、設定範囲で切り出した画像 |
 | 準備manifest | 元画像と分割画像の対応、準備条件の指紋を記録するJSON |
@@ -77,6 +80,8 @@ npm ci
 | `range` | 一意な分割IDと縮小前の開始座標の配列 |
 | `blacklist` | 学習準備だけで除外する元画像名と分割ID |
 | `alignment` | 型番内で共通のORB位置合わせ条件 |
+| `alignment.transform_model` | `homography` (射影変換、既定) または `similarity` (平行移動・回転・等方拡大縮小に限定) |
+| `alignment.border_mode` | `black` (黒埋め、既定) または `replicate` (端画素を複製) |
 | `groups` | 必須の非空配列。グループIDは型番内で一意な非負整数。対象分割と検査条件を置く |
 | `groups[].range_ids` | 非空・重複なしの既存分割ID。同じ分割IDを複数グループで参照できる |
 | `groups[].inspection_threshold` | `null`なら暫定閾値。0以上1以下の数値なら検査で使用 |
@@ -94,6 +99,9 @@ npm ci
 | `group_detail["<id>"].augmentation` | 学習入力だけに適用する拡張条件 |
 
 `blacklist`と`alignment`は型番共通である。<br />
+変換モデルと境界埋めを省略した場合、従来と同じ射影変換と黒埋めを使う。<br />
+端画素の複製は位置合わせにより生じた黒帯を避けるが、元画像の端自体が黒い場合は黒画素が残る。<br />
+設定例の`alignment.transform_model`と`alignment.border_mode`を変更して試す。
 既存の型番設定では、各`groups`要素から`optuna_settings`、`score`、`augmentation`を取り出し、同じIDをキーとする`group_detail`へ移す。<br />
 例えば`id: 0`に対応するキーは`"0"`とし、`"00"`は使用しない。<br />
 旧形式の設定や、両領域で項目が重複する設定は入力不備として拒否される。<br />
@@ -116,6 +124,70 @@ npm ci
 checkpointと最良試行にも同じ値を保存するため、暫定閾値だけを手動で変更しない。<br />
 切り出し位置、サイズ、縮小倍率、位置合わせなどを変更したら、該当する`train-pre`または`test-pre`を再実行する。<br />
 準備指紋が一致しない入力は学習・検査の前に拒否される。
+
+### 位置合わせの残り誤差と学習拡張
+
+`train-pre`と`test-pre`のmanifestには、位置合わせに成功した元画像ごとの`alignment.inlier_reprojection_rmse_px`を記録する。<br />
+これは縮小後画像で採用した対応点の再投影RMSEであり、分割画像の全画素のずれや回転角を直接示さない。<br />
+失敗した元画像の値は`null`なので、分布には含めない。
+
+次の例で学習グループと試験画像の件数、中央値、90・95パーセンタイル、最大値を確認する。<br />
+`XX`と`group_00`は対象の型番とグループ名に置き換える。<br />
+グループごとに学習manifestがあるため、各グループを個別に確認する。
+
+```bash
+uv run --locked python - <<'PY'
+import json
+from pathlib import Path
+import numpy as np
+
+model = "XX"
+group = "group_00"
+manifests = {
+    "train": Path("data/04_train") / model / group / "manifest.json",
+    "test": Path("data/05_test") / model / "manifest.json",
+}
+for label, path in manifests.items():
+    data = json.loads(path.read_text(encoding="utf-8"))
+    values = [
+        source["alignment"]["inlier_reprojection_rmse_px"]
+        for source in data["sources"]
+        if source["alignment"]["status"] == "aligned"
+        and source["alignment"].get("inlier_reprojection_rmse_px") is not None
+    ]
+    if not values:
+        print(f"{label}: measured images = 0")
+        continue
+    print(
+        f"{label}: n={len(values)}, median={np.median(values):.2f}px, "
+        f"p90={np.percentile(values, 90):.2f}px, "
+        f"p95={np.percentile(values, 95):.2f}px, max={max(values):.2f}px"
+    )
+PY
+```
+
+学習・試験の分布が大きく異なる場合は、撮影条件や位置合わせ失敗画像も確認する。<br />
+高い誤差の元画像と対応する分割画像を開き、縁の黒帯、実際の位置ズレ、欠陥の見え方を確認する。<br />
+`group_detail["<id>"].augmentation.translation.max_ratio`は分割画像の幅・高さに対する各軸の移動割合である。<br />
+たとえば分割サイズ500pxで目安とするずれが5pxなら、`5 / 500 = 0.01`を強度の検討開始点にできる。<br />
+RMSEは平行移動成分だけの測定値ではないため、その値を機械的に設定へ転記しない。<br />
+`rotation.max_degrees`はRMSEから一意に計算できないため、正常な元画像の実際の回転を見て設定する。<br />
+どちらも拡張が欠陥を隠したり不自然な像を作らないか確認し、調整後の検査結果で誤検出の変化を評価する。
+
+この変更を導入した型番では準備指紋が変わる。<br />
+元画像と設定を確認してから、次の順で再準備・再学習・再検査する。<br />
+`train --restart`は新しい分割画像と拡張強度でモデルを作り直すために使う。
+
+```bash
+uv run --locked train-pre --model XX
+uv run --locked train --model XX --restart
+uv run --locked test-pre --model XX
+uv run --locked test --model XX
+```
+
+旧準備結果を新設定で使うと指紋不一致で拒否されるので、対応する`train-pre`または`test-pre`からやり直す。<br />
+採用設定を戻す場合は`homography`と`black`に戻し、同じ順で再実行する。<br />
+旧モデル・旧結果が必要なら、切替前に運用者が退避する。
 
 ### 2. 確認・学習・検査
 
@@ -278,6 +350,12 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| alinment-robustness | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTS・Windows 11の対象実機で旧版と既定設定の分割画素を比較する。 |
+| alinment-robustness | AC-002 | 未検証 | タスク4.2: 両OSの位置ズレ実画像で端画素複製により黒埋め由来の帯が消えることを確認する。 |
+| alinment-robustness | AC-003 | 未検証 | タスク4.3: 両OSの実画像で両変換の成功・失敗と不正設定時の旧成果物保持を確認する。 |
+| alinment-robustness | AC-004 | 未検証 | タスク4.4: 両OSの学習・試験実画像でRMSE、失敗画像のnull、分布を確認する。 |
+| alinment-robustness | AC-005 | 未検証 | タスク4.5: 両OSの対象型番でREADMEに沿った再準備・再学習・再検査と指紋不一致時の扱いを確認する。 |
+| alinment-robustness | AC-006 | 未検証 | タスク4.6: 両OSの実画像で現行・新設定の検査結果と所要時間を比較し、採用判断を記録する。 |
 | per-split-threshold | AC-001 | 未検証 | タスク5.2: Ubuntu 24.04 LTS・Windows 11の実画像でグループ単位の閾値と判定の従来互換を確認する。 |
 | per-split-threshold | AC-002 | 未検証 | タスク5.2: 両OSの実スコアから分割ID別の算出値と件数不足時のグループ代替・警告を照合する。 |
 | per-split-threshold | AC-003 | 未検証 | タスク5.2: 両OSの実画像で分割ID別の手動上書きと学習由来の暫定値が変わらないことを確認する。 |
