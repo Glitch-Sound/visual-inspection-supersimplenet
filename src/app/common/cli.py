@@ -83,13 +83,17 @@ def _run(
         lock_path = paths.model_lock(model)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(lock_path, timeout=0):
-            from app.common.artifact_transaction import recover_artifact_transaction
+            from app.common.artifact_transaction import (
+                recover_artifact_transaction,
+                recover_restart_backup,
+            )
             from app.common.config import load_config
             from app.common.result_index import cleanup_generations, read_current
 
             config = load_config(paths.root, model)
             for group in config.part.select_groups():
                 recover_artifact_transaction(paths, model, group.id)
+                recover_restart_backup(paths, model, group.id)
             try:
                 current = read_current(
                     paths,

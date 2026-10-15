@@ -14,9 +14,16 @@ from app.common.artifact_transaction import (
     _transaction_journal,
     _transaction_path,
     recover_artifact_transaction,
+    recover_restart_backup,
 )
 from app.common.config import AppConfig, GroupConfig, write_threshold
-from app.common.contracts import BestTrialResult, ScoreContract, TrialParametersContract
+from app.common.contracts import (
+    BestTrialResult,
+    FoldRecord,
+    ScoreContract,
+    SourceScore,
+    TrialParametersContract,
+)
 from app.common.paths import ProjectPaths
 from app.common.runtime import package_versions
 from app.model_training.search import DatasetSplit, TrialOutcome
@@ -30,6 +37,10 @@ def persist_best_trial(
     split: DatasetSplit,
     study: optuna.Study,
     outcomes: dict[int, TrialOutcome],
+    final_checkpoint: Path | None = None,
+    final_train_sources: tuple[str, ...] | None = None,
+    cross_validation: list[FoldRecord] | None = None,
+    score_by_source: list[SourceScore] | None = None,
 ) -> BestTrialResult:
     recover_artifact_transaction(paths, config.model, group.id)
     best = study.best_trial
@@ -46,12 +57,27 @@ def persist_best_trial(
             training_scores=[float(score) for score in training_scores],
             checkpoint=Path(checkpoint),
         )
-    threshold = float(
-        np.percentile(
-            outcome.training_scores,
-            group.optuna_settings.threshold.percentile,
+    threshold_settings = group.optuna_settings.threshold
+    if threshold_settings.method == "out_of_fold_percentile":
+        scores = [item.score for item in score_by_source or []]
+        if not scores or not np.isfinite(scores).all():
+            raise RuntimeError("out-of-fold scores must be nonempty and finite")
+        threshold = min(
+            1.0,
+            float(np.percentile(scores, threshold_settings.percentile))
+            + threshold_settings.margin,
         )
-    )
+    else:
+        if (
+            not outcome.training_scores
+            or not np.isfinite(outcome.training_scores).all()
+        ):
+            raise ValueError("training scores must be nonempty and finite")
+        threshold = float(
+            np.percentile(outcome.training_scores, threshold_settings.percentile)
+        )
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("calculated threshold must be in [0, 1]")
     target_checkpoint = paths.checkpoint(config.model, group.id)
     target_config = paths.model_config(config.model)
     target_best = paths.study_dir(config.model, group.id) / "best_trial.json"
@@ -71,7 +97,7 @@ def persist_best_trial(
     try:
         target_checkpoint.parent.mkdir(parents=True, exist_ok=True)
         target_best.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(outcome.checkpoint, stages["checkpoint"])
+        shutil.copy2(final_checkpoint or outcome.checkpoint, stages["checkpoint"])
         _attach_checkpoint_metadata(
             stages["checkpoint"],
             model=config.model,
@@ -96,6 +122,16 @@ def persist_best_trial(
             checkpoint=str(target_checkpoint.relative_to(paths.root)),
             score_contract=ScoreContract(),
             threshold=threshold,
+            threshold_method=threshold_settings.method,
+            threshold_percentile=threshold_settings.percentile,
+            threshold_margin=threshold_settings.margin,
+            cross_validation=cross_validation or [],
+            score_by_source=score_by_source or [],
+            final_train_sources=list(
+                final_train_sources
+                if final_train_sources is not None
+                else sorted(set(split.train_sources) | set(split.validation_sources))
+            ),
             train_sources=list(split.train_sources),
             validation_sources=list(split.validation_sources),
             seed=group.optuna_settings.execution.seed,
@@ -173,10 +209,28 @@ def _attach_checkpoint_metadata(
     torch.save(payload, path)
 
 
-def restart_training(paths: ProjectPaths, model: str, group: int) -> None:
-    paths.remove_model_artifact(
-        paths.study_dir(model, group), expected=paths.study_dir(model, group)
-    )
-    paths.remove_model_artifact(
-        paths.checkpoint(model, group), expected=paths.checkpoint(model, group)
-    )
+def restart_training(paths: ProjectPaths, model: str, group: int) -> Path | None:
+    """Move old search history aside until the replacement is published."""
+    study_dir = paths.study_dir(model, group)
+    backup = study_dir.with_name(study_dir.name + ".restart-backup")
+    recover_artifact_transaction(paths, model, group)
+    recover_restart_backup(paths, model, group)
+    if not study_dir.exists():
+        return None
+    study_dir.replace(backup)
+    return backup
+
+
+def finish_restart(paths: ProjectPaths, backup: Path | None) -> bool:
+    if backup is not None and backup.exists():
+        try:
+            paths.remove_model_artifact(backup, expected=backup)
+        except OSError:
+            return False
+    return True
+
+
+def restore_restart(paths: ProjectPaths, study_dir: Path, backup: Path | None) -> None:
+    if backup is not None and backup.exists():
+        paths.remove_model_artifact(study_dir, expected=study_dir)
+        backup.replace(study_dir)

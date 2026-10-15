@@ -121,6 +121,14 @@ def test_legacy_artifacts_can_be_regenerated_and_read(
             return TrialOutcome([0.2], [0.1, 0.2], checkpoint)
 
     monkeypatch.setattr(training_cli, "AnomalibTrialRunner", FakeRunner)
+
+    def fake_selected(_parameters, *, validation_images, work_dir, **_kwargs):
+        work_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint = work_dir / "model.ckpt"
+        torch.save({"state_dict": {}}, checkpoint)
+        return checkpoint, [0.2] * len(validation_images)
+
+    monkeypatch.setattr(training_cli, "fit_selected_parameters", fake_selected)
     training_cli._train_command(model="XX", group=0)
     assert paths.checkpoint("XX", 0).is_file()
     assert (paths.study_dir("XX", 0) / "best_trial.json").is_file()

@@ -16,21 +16,31 @@ from app.common.cli import _run, show_stage
 from app.common.config import load_config, preparation_fingerprint
 from app.common.contracts import (
     BestTrialResult,
+    FoldRecord,
+    SourceScore,
     TrialParametersContract,
     load_preparation_manifest,
 )
 from app.common.model_adapter import BACKBONE_NAME
 from app.common.paths import ProjectPaths
 from app.common.runtime import RunRecorder
-from app.model_training.artifacts import persist_best_trial, restart_training
+from app.model_training.artifacts import (
+    _trial_parameters_contract,
+    finish_restart,
+    persist_best_trial,
+    restart_training,
+    restore_restart,
+)
 from app.model_training.search import (
     TrialParameters,
+    all_prepared_images,
     create_study,
+    cross_validation_splits,
     run_search,
     split_by_source,
 )
 from app.model_training.synthetic_validation import create_synthetic_validation
-from app.model_training.trainer import AnomalibTrialRunner
+from app.model_training.trainer import AnomalibTrialRunner, fit_selected_parameters
 
 
 def format_training_summary(result: BestTrialResult) -> str:
@@ -94,6 +104,7 @@ def _train_command(
         os.environ.setdefault("TORCH_HOME", str(paths.pretrained))
         summaries: list[str] = []
         for selected in groups:
+            restart_backup: Path | None = None
             try:
                 prepared = paths.prepared_train(model, selected.id)
                 manifest = load_preparation_manifest(
@@ -107,8 +118,20 @@ def _train_command(
                 split = split_by_source(
                     manifest, prepared, train_ratio=normal.train_ratio, seed=normal.seed
                 )
+                threshold_settings = selected.optuna_settings.threshold
+                folds = (
+                    cross_validation_splits(
+                        manifest,
+                        prepared,
+                        folds=threshold_settings.folds or "leave_one_out",
+                        seed=normal.seed,
+                    )
+                    if threshold_settings.method == "out_of_fold_percentile"
+                    else ()
+                )
+                final_sources, final_images = all_prepared_images(manifest, prepared)
                 if restart:
-                    restart_training(paths, model, selected.id)
+                    restart_backup = restart_training(paths, model, selected.id)
                 study_dir = paths.study_dir(model, selected.id)
                 show_stage(f"グループ {selected.id}: Optuna 探索を実行")
                 study = create_study(config, selected, study_dir / "study.db")
@@ -148,6 +171,61 @@ def _train_command(
                         ),
                         on_trial_finish=show_trial_outcome,
                     )
+                selected_contract = _trial_parameters_contract(study.best_trial.params)
+                parameters = TrialParameters(**selected_contract.model_dump())
+                fold_records: list[FoldRecord] = []
+                score_records: list[SourceScore] = []
+                source_by_split = {
+                    part.image: source.source_image
+                    for source in manifest.sources
+                    for part in source.splits
+                }
+                for fold_number, fold in enumerate(folds, start=1):
+                    show_stage(
+                        f"グループ {selected.id}: 交差検証 {fold_number}/{len(folds)}"
+                    )
+                    try:
+                        _, scores = fit_selected_parameters(
+                            parameters,
+                            train_images=fold.train_images,
+                            validation_images=fold.validation_images,
+                            work_dir=study_dir
+                            / "cross_validation"
+                            / f"fold-{fold_number:04d}",
+                            device=recorder.device,
+                            group=selected,
+                            seed=selected.optuna_settings.execution.seed + fold_number,
+                        )
+                        fold_records.append(
+                            FoldRecord(
+                                train_sources=list(fold.train_sources),
+                                validation_sources=list(fold.validation_sources),
+                            )
+                        )
+                        for image, score in zip(
+                            fold.validation_images, scores, strict=True
+                        ):
+                            score_records.append(
+                                SourceScore(
+                                    source_image=source_by_split[image.name],
+                                    split_image=image.name,
+                                    score=score,
+                                )
+                            )
+                    except (ValueError, KeyError) as error:
+                        raise RuntimeError(
+                            f"cross-validation fold {fold_number} failed: {error}"
+                        ) from error
+                show_stage(f"グループ {selected.id}: 全正常データで最終学習")
+                final_checkpoint, _ = fit_selected_parameters(
+                    parameters,
+                    train_images=final_images,
+                    validation_images=final_images,
+                    work_dir=study_dir / "final_refit",
+                    device=recorder.device,
+                    group=selected,
+                    seed=selected.optuna_settings.execution.seed,
+                )
                 result = persist_best_trial(
                     config=config,
                     group=selected,
@@ -155,7 +233,14 @@ def _train_command(
                     split=split,
                     study=study,
                     outcomes=outcomes,
+                    final_checkpoint=final_checkpoint,
+                    final_train_sources=final_sources,
+                    cross_validation=fold_records,
+                    score_by_source=score_records,
                 )
+                if not finish_restart(paths, restart_backup):
+                    show_stage(f"グループ {selected.id}: 旧探索履歴の整理を後で再試行")
+                restart_backup = None
                 show_trial_conditions(
                     f"グループ {selected.id} 最良試行 {result.trial_number + 1} の条件",
                     result.parameters,
@@ -169,8 +254,14 @@ def _train_command(
                 )
                 config = load_config(paths.root, model)
             except (ValueError, FileNotFoundError) as error:
+                restore_restart(
+                    paths, paths.study_dir(model, selected.id), restart_backup
+                )
                 raise ValueError(f"group {selected.id} failed: {error}") from error
             except Exception as error:
+                restore_restart(
+                    paths, paths.study_dir(model, selected.id), restart_backup
+                )
                 raise RuntimeError(f"group {selected.id} failed: {error}") from error
         return "; ".join(summaries)
 

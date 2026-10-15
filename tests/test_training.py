@@ -14,6 +14,7 @@ from conftest import build_project, write_test_image
 
 from app.common.config import load_config, preparation_fingerprint
 from app.common.contracts import (
+    BestTrialResult,
     load_preparation_manifest,
 )
 from app.common.runtime import DeviceSelection, RunRecorder
@@ -30,10 +31,13 @@ from app.model_training.search import (
     TrialOutcome,
     TrialParameters,
     create_study,
+    cross_validation_splits,
     run_search,
     split_by_source,
 )
 from app.model_training.trainer import AnomalibTrialRunner
+
+_real_fit_selected_parameters = training_cli.fit_selected_parameters
 
 
 def _aligned(
@@ -63,6 +67,15 @@ def _project(root: Path, *, two: bool = False):
 
 
 def _run_cli(monkeypatch: pytest.MonkeyPatch, paths, *, group=None, restart=False):
+    if training_cli.fit_selected_parameters is _real_fit_selected_parameters:
+
+        def fake_selected(_parameters, *, validation_images, work_dir, **_kwargs):
+            work_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint = work_dir / "model.ckpt"
+            torch.save({"state_dict": {}}, checkpoint)
+            return checkpoint, [0.2] * len(validation_images)
+
+        monkeypatch.setattr(training_cli, "fit_selected_parameters", fake_selected)
     recorder = RunRecorder("train", "XX", DeviceSelection("cpu", "CPU", "test"))
     monkeypatch.setattr(
         "app.model_training.cli._run",
@@ -76,8 +89,25 @@ def _stub_search(
 ) -> list[int]:
     done: list[int] = []
 
+    def fake_selected(_parameters, *, validation_images, work_dir, **_kwargs):
+        work_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint = work_dir / "model.ckpt"
+        torch.save({"state_dict": {}}, checkpoint)
+        return checkpoint, [0.2] * len(validation_images)
+
+    monkeypatch.setattr(training_cli, "fit_selected_parameters", fake_selected)
+
     class Study:
         trials = []
+        best_trial = SimpleNamespace(
+            params={
+                "learning_rate_multiplier": 1.0,
+                "batch_size": 4,
+                "epochs": 1,
+                "feature_layers": '["layer2"]',
+                "image_size": 256,
+            }
+        )
 
     monkeypatch.setattr("app.model_training.cli.create_study", lambda *_args: Study())
     monkeypatch.setattr(
@@ -88,7 +118,7 @@ def _stub_search(
         "app.model_training.cli.show_trial_conditions", lambda *_args: None
     )
 
-    def persist(*, config, group, paths, split, study, outcomes):
+    def persist(*, config, group, paths, split, study, outcomes, **_kwargs):
         if group.id == fail_group:
             raise RuntimeError("injected failure")
         done.append(group.id)
@@ -161,6 +191,440 @@ def _synthetic_study(config, paths, values: list[tuple[float, float]]):
 
     study, outcomes = run_search(selected, split, study, runner)
     return selected, split, study, outcomes
+
+
+def _oof_project(root: Path, *, two: bool = False):
+    _, paths = _project(root, two=two)
+    payload = json.loads(paths.model_config("XX").read_text())
+    for detail in payload["group_detail"].values():
+        threshold = detail["optuna_settings"]["threshold"]
+        threshold.update(
+            method="out_of_fold_percentile", folds=2, percentile=50, margin=0.05
+        )
+        detail["optuna_settings"]["execution"]["trials"] = 1
+    paths.model_config("XX").write_text(json.dumps(payload))
+    return load_config(root, "XX"), paths
+
+
+def _fake_oof_training(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+
+    class FakeRunner:
+        def __init__(self, work_dir, _device, _group):
+            self.work_dir = work_dir
+
+        def __call__(self, _parameters, _split, trial):
+            self.work_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint = self.work_dir / f"trial-{trial.number}.ckpt"
+            torch.save({"state_dict": {"source": "search"}}, checkpoint)
+            return TrialOutcome([0.2], [0.1, 0.2], checkpoint)
+
+    def fit(parameters, *, train_images, validation_images, work_dir, **_kwargs):
+        calls.append(
+            (parameters, tuple(train_images), tuple(validation_images), work_dir)
+        )
+        work_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint = work_dir / "model.ckpt"
+        torch.save({"state_dict": {"source": work_dir.name}}, checkpoint)
+        return checkpoint, [
+            0.2 + 0.1 * index for index in range(len(validation_images))
+        ]
+
+    monkeypatch.setattr(training_cli, "AnomalibTrialRunner", FakeRunner)
+    monkeypatch.setattr(training_cli, "fit_selected_parameters", fit)
+    return calls
+
+
+def test_oof_folds_cover_sources_without_leakage(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected = config.part.groups[0]
+    manifest = load_preparation_manifest(
+        paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
+    )
+    folds = cross_validation_splits(
+        manifest, paths.prepared_train("XX", 0), folds=2, seed=42
+    )
+    all_sources = {item.source_image for item in manifest.sources if item.splits}
+    assert len(folds) == 2
+    assert sorted(name for fold in folds for name in fold.validation_sources) == sorted(
+        all_sources
+    )
+    for fold in folds:
+        assert set(fold.train_sources).isdisjoint(fold.validation_sources)
+        assert set(fold.train_sources) | set(fold.validation_sources) == all_sources
+        assert len(fold.validation_images) == len(fold.validation_sources)
+    assert selected.optuna_settings.normal_only.train_ratio == 0.8
+
+
+def test_leave_one_out_uses_each_source_once(tmp_path: Path) -> None:
+    _, paths = _project(tmp_path)
+    manifest = load_preparation_manifest(
+        paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
+    )
+    folds = cross_validation_splits(
+        manifest, paths.prepared_train("XX", 0), folds="leave_one_out", seed=42
+    )
+    assert len(folds) == 4
+    assert all(len(fold.validation_sources) == 1 for fold in folds)
+    assert len({fold.validation_sources[0] for fold in folds}) == 4
+
+
+def test_oof_rejects_invalid_fold_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _oof_project(tmp_path)
+    path = paths.model_config("XX")
+    payload = json.loads(path.read_text())
+    payload["group_detail"]["0"]["optuna_settings"]["threshold"]["folds"] = 5
+    path.write_text(json.dumps(payload))
+    old_checkpoint = paths.checkpoint("XX", 0)
+    old_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    old_checkpoint.write_bytes(b"old")
+    _fake_oof_training(monkeypatch)
+    with pytest.raises(ValueError, match="source count is 4"):
+        _run_cli(monkeypatch, paths, group=0)
+    assert old_checkpoint.read_bytes() == b"old"
+    for invalid in (1, 0):
+        payload["group_detail"]["0"]["optuna_settings"]["threshold"]["folds"] = invalid
+        path.write_text(json.dumps(payload))
+        with pytest.raises(ValueError, match="folds"):
+            load_config(tmp_path, "XX")
+
+
+def test_oof_threshold_and_score_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _oof_project(tmp_path)
+    calls = _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    best = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    scores = [item.score for item in best.score_by_source]
+    assert best.threshold == pytest.approx(min(1.0, np.percentile(scores, 50) + 0.05))
+    assert best.threshold_method == "out_of_fold_percentile"
+    assert best.threshold_margin == 0.05
+    assert len(best.cross_validation) == 2
+    assert {item.source_image for item in best.score_by_source} == set(
+        best.final_train_sources
+    )
+    assert all(item.split_image.endswith(".png") for item in best.score_by_source)
+    assert len(calls) == 3
+
+
+def test_oof_invalid_scores_preserve_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _oof_project(tmp_path)
+    _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    checkpoint = paths.checkpoint("XX", 0)
+    best = paths.study_dir("XX", 0) / "best_trial.json"
+    before = (
+        checkpoint.read_bytes(),
+        best.read_bytes(),
+        paths.model_config("XX").read_bytes(),
+    )
+
+    def bad_fit(parameters, *, validation_images, work_dir, **_kwargs):
+        del parameters
+        work_dir.mkdir(parents=True, exist_ok=True)
+        target = work_dir / "model.ckpt"
+        torch.save({"state_dict": {}}, target)
+        return target, [float("nan")] * len(validation_images)
+
+    monkeypatch.setattr(training_cli, "fit_selected_parameters", bad_fit)
+    with pytest.raises(RuntimeError, match="cross-validation fold 1 failed"):
+        _run_cli(monkeypatch, paths, group=0, restart=True)
+    assert (
+        checkpoint.read_bytes(),
+        best.read_bytes(),
+        paths.model_config("XX").read_bytes(),
+    ) == before
+
+
+def test_oof_final_refit_uses_all_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _oof_project(tmp_path)
+    calls = _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    best = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    assert best.final_train_sources == ["a.png", "b.png", "base.png", "c.png"]
+    assert len(calls[-1][1]) == 4
+    assert calls[-1][1] == calls[-1][2]
+    assert (
+        torch.load(paths.checkpoint("XX", 0), weights_only=False)["state_dict"][
+            "source"
+        ]
+        == "final_refit"
+    )
+
+
+def test_legacy_threshold_with_full_refit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _project(tmp_path)
+    payload = json.loads(paths.model_config("XX").read_text())
+    payload["group_detail"]["0"]["optuna_settings"]["execution"]["trials"] = 1
+    paths.model_config("XX").write_text(json.dumps(payload))
+    calls = _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    best = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    assert best.threshold_method == "training_percentile"
+    assert best.threshold == pytest.approx(0.199)
+    assert len(calls) == 1 and len(calls[0][1]) == 4
+    assert len(best.final_train_sources) == 4
+
+
+def test_refit_failure_preserves_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _oof_project(tmp_path)
+    _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    checkpoint = paths.checkpoint("XX", 0)
+    best = paths.study_dir("XX", 0) / "best_trial.json"
+    before = (
+        checkpoint.read_bytes(),
+        best.read_bytes(),
+        paths.model_config("XX").read_bytes(),
+    )
+
+    def fail_final(parameters, *, train_images, validation_images, work_dir, **_kwargs):
+        del parameters, train_images
+        if work_dir.name == "final_refit":
+            raise RuntimeError("final fit failed")
+        work_dir.mkdir(parents=True, exist_ok=True)
+        target = work_dir / "model.ckpt"
+        torch.save({"state_dict": {}}, target)
+        return target, [0.2] * len(validation_images)
+
+    monkeypatch.setattr(training_cli, "fit_selected_parameters", fail_final)
+    with pytest.raises(RuntimeError, match="final fit failed"):
+        _run_cli(monkeypatch, paths, group=0, restart=True)
+    assert (
+        checkpoint.read_bytes(),
+        best.read_bytes(),
+        paths.model_config("XX").read_bytes(),
+    ) == before
+
+
+def test_final_artifact_threshold_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.model_evaluation.evaluation import validate_best_trial_contract
+    from app.model_evaluation.predictor import load_checkpoint_metadata
+
+    _, paths = _oof_project(tmp_path)
+    _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    config = load_config(tmp_path, "XX")
+    group = config.part.groups[0]
+    best = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    metadata = load_checkpoint_metadata(paths.checkpoint("XX", 0))
+    assert (
+        best.threshold == group.optuna_settings.threshold.value == metadata["threshold"]
+    )
+    validate_best_trial_contract(config, group, paths, best)
+
+
+def test_training_reuses_pretrained_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import timm.models._hub as hub
+    from timm.models.resnet import ResNet
+
+    from app.common.model_adapter import create_supersimplenet
+
+    cache = tmp_path / "model.bin"
+    downloads = []
+
+    def cached_download(_repo_id, *, filename, **_kwargs):
+        assert filename == "pytorch_model.bin"
+        if not cache.exists():
+            cache.write_bytes(b"cached")
+            downloads.append(cache)
+        return str(cache)
+
+    monkeypatch.setattr(hub, "_has_safetensors", False)
+    monkeypatch.setattr(hub, "hf_hub_download", cached_download)
+    monkeypatch.setattr(hub, "_torch_load", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        ResNet,
+        "load_state_dict",
+        lambda *_args, **_kwargs: SimpleNamespace(missing_keys=[], unexpected_keys=[]),
+    )
+    for _ in range(2):
+        create_supersimplenet(
+            layers=["layer2"], image_size=256, learning_rate_multiplier=1.0
+        )
+    assert downloads == [cache]
+
+
+def test_refit_artifact_transaction_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.common.artifact_transaction import recover_artifact_transaction
+    from app.model_training import artifacts as artifact_module
+
+    _, paths = _oof_project(tmp_path)
+    _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    checkpoint = paths.checkpoint("XX", 0)
+    best = paths.study_dir("XX", 0) / "best_trial.json"
+    previous = (
+        checkpoint.read_bytes(),
+        best.read_bytes(),
+        paths.model_config("XX").read_bytes(),
+    )
+    original = artifact_module._replace_staged_artifact
+    calls = 0
+
+    def fail_second(source, target):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("interrupted update")
+        original(source, target)
+
+    monkeypatch.setattr(artifact_module, "_replace_staged_artifact", fail_second)
+    with pytest.raises(RuntimeError, match="interrupted update"):
+        _run_cli(monkeypatch, paths, group=0, restart=True)
+    recover_artifact_transaction(paths, "XX", 0)
+    assert (
+        checkpoint.read_bytes(),
+        best.read_bytes(),
+        paths.model_config("XX").read_bytes(),
+    ) == previous
+
+
+def test_interrupted_restart_restores_old_artifacts_before_next_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.common.cli import _run
+    from app.model_training.artifacts import restart_training
+
+    _, paths = build_project(tmp_path)
+    study_dir = paths.study_dir("XX", 0)
+    study_dir.mkdir(parents=True)
+    (study_dir / "best_trial.json").write_bytes(b"old best")
+    checkpoint = paths.checkpoint("XX", 0)
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"old checkpoint")
+    old_config = paths.model_config("XX").read_bytes()
+    backup = restart_training(paths, "XX", 0)
+    assert backup is not None
+    study_dir.mkdir()
+    (study_dir / "study.db").write_bytes(b"interrupted search")
+
+    monkeypatch.chdir(tmp_path)
+    _run("test", "XX", lambda _paths, _recorder: None)
+
+    assert (study_dir / "best_trial.json").read_bytes() == b"old best"
+    assert not (study_dir / "study.db").exists()
+    assert checkpoint.read_bytes() == b"old checkpoint"
+    assert paths.model_config("XX").read_bytes() == old_config
+    assert not backup.exists()
+
+
+def test_process_interruption_during_restart_update_recovers_old_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.common.cli import _run
+    from app.model_training import artifacts as artifact_module
+
+    _, paths = _oof_project(tmp_path)
+    _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    checkpoint = paths.checkpoint("XX", 0)
+    best = paths.study_dir("XX", 0) / "best_trial.json"
+    previous = (
+        checkpoint.read_bytes(),
+        best.read_bytes(),
+        paths.model_config("XX").read_bytes(),
+    )
+    original_replace = artifact_module._replace_staged_artifact
+    calls = 0
+
+    def interrupt_second(source: Path, target: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise KeyboardInterrupt("simulated process interruption")
+        original_replace(source, target)
+
+    monkeypatch.setattr(artifact_module, "_replace_staged_artifact", interrupt_second)
+    with pytest.raises(KeyboardInterrupt, match="simulated process interruption"):
+        _run_cli(monkeypatch, paths, group=0, restart=True)
+    assert (paths.study_dir("XX", 0) / ".artifact-transaction.json").exists()
+
+    monkeypatch.chdir(tmp_path)
+    _run("test", "XX", lambda _paths, _recorder: None)
+
+    assert (
+        checkpoint.read_bytes(),
+        best.read_bytes(),
+        paths.model_config("XX").read_bytes(),
+    ) == previous
+    study_dir = paths.study_dir("XX", 0)
+    assert not study_dir.with_name(study_dir.name + ".restart-backup").exists()
+
+
+def test_interrupted_restart_after_publication_keeps_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.common.cli import _run
+    from app.model_training.artifacts import restart_training
+
+    _, paths = build_project(tmp_path)
+    study_dir = paths.study_dir("XX", 0)
+    study_dir.mkdir(parents=True)
+    (study_dir / "best_trial.json").write_bytes(b"same best")
+    backup = restart_training(paths, "XX", 0)
+    assert backup is not None
+    study_dir.mkdir()
+    (study_dir / "best_trial.json").write_bytes(b"same best")
+    (study_dir / "study.db").write_bytes(b"replacement history")
+
+    monkeypatch.chdir(tmp_path)
+    _run("test", "XX", lambda _paths, _recorder: None)
+
+    assert (study_dir / "study.db").read_bytes() == b"replacement history"
+    assert not backup.exists()
+
+
+def test_refit_contract_mismatch_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.model_evaluation.evaluation import validate_best_trial_contract
+
+    _, paths = _oof_project(tmp_path)
+    _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    config = load_config(tmp_path, "XX")
+    group = config.part.groups[0]
+    best = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    group.optuna_settings.threshold.margin = 0.07
+    with pytest.raises(ValueError, match="margin"):
+        validate_best_trial_contract(config, group, paths, best)
+
+
+def test_refit_group_thresholds_are_independent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _oof_project(tmp_path, two=True)
+    _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    first = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    first_checkpoint = paths.checkpoint("XX", 0).read_bytes()
+    payload = json.loads(paths.model_config("XX").read_text())
+    payload["group_detail"]["1"]["optuna_settings"]["threshold"]["margin"] = 0.1
+    paths.model_config("XX").write_text(json.dumps(payload))
+    _run_cli(monkeypatch, paths, group=1)
+    config = load_config(tmp_path, "XX")
+    second = BestTrialResult.read_json(paths.study_dir("XX", 1) / "best_trial.json")
+    assert second.threshold != first.threshold
+    assert config.part.groups[0].optuna_settings.threshold.value == first.threshold
+    assert paths.checkpoint("XX", 0).read_bytes() == first_checkpoint
 
 
 def test_req_031_s01(tmp_path: Path) -> None:

@@ -30,7 +30,9 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | checkpoint | グループの学習済みモデルと型番・グループ・暫定閾値のメタデータ |
 | 異常スコア | SuperSimpleNetの`pred_score`。校正済み確率ではない |
 | 異常マップ | 分割画像の画素ごとの`anomaly_map`。ヒートマップ表示に使う |
-| 暫定閾値 | 学習集合の異常スコアから算出する、初期評価用の判定境界 |
+| 暫定閾値 | グループで選んだ方式の異常スコアから算出する、初期評価用の判定境界 |
+| 学習対象外スコア / `out_of_fold` | 元画像単位の交差検証で、その分割の学習に使わなかった画像から得た異常スコア |
+| 全件再学習 | 探索で選んだ条件を使い、ブラックリスト除外後の全正常元画像で最終モデルを学習する段階 |
 | 擬似欠陥 | 正常な検証分割画像に合成する傷、シミ、斑点、異物。学習入力には使わない |
 | 擬似 AUROC | 正常と擬似欠陥の検証スコアの分離度。実際の異常の検出性能を示さない |
 | 検査用閾値 | グループの`inspection_threshold`。指定時に暫定閾値に代えて使う |
@@ -80,6 +82,7 @@ npm ci
 | `group_detail["<id>"].optuna_settings` | グループ別の探索、学習・検証分離、暫定閾値 |
 | `group_detail["<id>"].optuna_settings.objective` | `normal_percentile` または `synthetic_auroc`。省略時は従来の `normal_percentile` |
 | `group_detail["<id>"].optuna_settings.synthetic_validation` | 擬似欠陥の `types`、`intensity`、`seed`。種類は `scratch`、`stain`、`spot`、`foreign_patch` |
+| `group_detail["<id>"].optuna_settings.threshold` | `training_percentile` または `out_of_fold_percentile`。新方式では `percentile`、絶対加算値の `margin`、分割数または `leave_one_out` の `folds` を指定 |
 | `group_detail["<id>"].score` | `supersimplenet.pred_score`と無効化したPostProcessor |
 | `group_detail["<id>"].augmentation` | 学習入力だけに適用する拡張条件 |
 
@@ -88,6 +91,12 @@ npm ci
 例えば`id: 0`に対応するキーは`"0"`とし、`"00"`は使用しない。<br />
 旧形式の設定や、両領域で項目が重複する設定は入力不備として拒否される。<br />
 暫定閾値の`group_detail["<id>"].optuna_settings.threshold.value`は学習完了時に対象グループだけ更新される。<br />
+`out_of_fold_percentile`では各元画像を一度ずつ検証に回し、学習対象外の全分割画像の`pred_score`の設定済みパーセンタイルに`margin`を加え、1を上限として暫定閾値を決める。<br />
+`folds`には2以上の分割数、または元画像を1枚ずつ検証する`leave_one_out`を指定する。<br />
+`training_percentile`では従来どおり探索時の学習集合のスコアから閾値を決める。<br />
+どちらの方式でも探索は従来の1分割で行い、最良条件で全正常データ(ブラックリスト除外後)を再学習したcheckpointを検査に使う。<br />
+新方式では探索後に分割数分と全件再学習1回、従来方式では全件再学習1回の学習が増える。<br />
+方式や分割条件を変更したグループは`train --restart`で再学習し、検査結果を再生成する。<br />
 checkpointと最良試行にも同じ値を保存するため、暫定閾値だけを手動で変更しない。<br />
 切り出し位置、サイズ、縮小倍率、位置合わせなどを変更したら、該当する`train-pre`または`test-pre`を再実行する。<br />
 準備指紋が一致しない入力は学習・検査の前に拒否される。
@@ -253,6 +262,12 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| out-of-fold-threshold-and-refit | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11で指定分割数と1枚ずつ方式の元画像非重複、全件被覆、結果読戻しを確認する。 |
+| out-of-fold-threshold-and-refit | AC-002 | 未検証 | タスク4.2: 両OSで実画像の学習対象外スコア、パーセンタイル、マージン、元画像別記録を再計算して確認する。 |
+| out-of-fold-threshold-and-refit | AC-003 | 未検証 | タスク4.2: 両OSで全正常データによる最終checkpointと検査時の読戻しを確認する。 |
+| out-of-fold-threshold-and-refit | AC-004 | 未検証 | タスク4.2: 両OSで従来方式の閾値と全件再学習checkpointを確認する。 |
+| out-of-fold-threshold-and-refit | AC-005 | 未検証 | タスク4.2: 両OSで3成果物の閾値一致、不正入力・処理失敗・中断後の旧一式復旧を確認する。 |
+| out-of-fold-threshold-and-refit | AC-006 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11の実画像と利用可能なCPU/GPUでtrainからtestまで実行し、分割・スコア・checkpointを読み戻す。 |
 | synthetic-anomaly-validation | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11で4種類の擬似画像、強度・seed、同条件での画像と探索結果の再現、原本不変を確認する。 |
 | synthetic-anomaly-validation | AC-002 | 未検証 | タスク4.2: 両OSで実モデルの正常・擬似スコアとAUROC最大化による最良試行を確認する。 |
 | synthetic-anomaly-validation | AC-003 | 未検証 | タスク4.2: 両OSで旧設定の百分位最小化、枝刈り、最良試行が従来と一致することを確認する。 |

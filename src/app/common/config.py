@@ -95,10 +95,25 @@ class PrunerSettings(StrictModel):
 
 
 class ThresholdSettings(StrictModel):
-    method: Literal["training_percentile"] = "training_percentile"
+    method: Literal["training_percentile", "out_of_fold_percentile"] = (
+        "training_percentile"
+    )
     percentile: Annotated[float, Field(gt=0.0, le=100.0)] = 99
+    margin: Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False)] = 0.0
+    folds: StrictInt | Literal["leave_one_out"] | None = None
     score_source: Literal["supersimplenet.pred_score"] = "supersimplenet.pred_score"
     value: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
+
+    @model_validator(mode="after")
+    def validate_method_settings(self) -> ThresholdSettings:
+        if self.method == "out_of_fold_percentile":
+            if self.folds is None or (isinstance(self.folds, int) and self.folds < 2):
+                raise ValueError(
+                    "out_of_fold_percentile requires folds >= 2 or leave_one_out"
+                )
+        elif self.folds is not None or self.margin != 0:
+            raise ValueError("training_percentile does not use folds or margin")
+        return self
 
 
 class NormalOnlySettings(StrictModel):

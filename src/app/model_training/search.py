@@ -67,6 +67,69 @@ def split_by_source(
     )
 
 
+def cross_validation_splits(
+    manifest: PreparationManifest,
+    prepared_dir: Path,
+    *,
+    folds: int | str,
+    seed: int,
+) -> tuple[DatasetSplit, ...]:
+    usable = {
+        source.source_image: source for source in manifest.sources if source.splits
+    }
+    names = sorted(usable)
+    count = len(names)
+    fold_count = count if folds == "leave_one_out" else folds
+    if (
+        not isinstance(fold_count, int)
+        or isinstance(fold_count, bool)
+        or count < 2
+        or fold_count < 2
+        or fold_count > count
+    ):
+        raise ValueError(
+            f"cross-validation requires 2..{count} folds and at least 2 source images; "
+            f"current source count is {count}"
+        )
+    np.random.default_rng(seed).shuffle(names)
+    chunks = np.array_split(names, fold_count)
+    result = []
+    for chunk in chunks:
+        validation_names = tuple(sorted(str(name) for name in chunk))
+        validation_set = set(validation_names)
+        train_names = tuple(sorted(set(names) - validation_set))
+        result.append(
+            DatasetSplit(
+                train_sources=train_names,
+                validation_sources=validation_names,
+                train_images=tuple(
+                    prepared_dir / part.image
+                    for name in train_names
+                    for part in usable[name].splits
+                ),
+                validation_images=tuple(
+                    prepared_dir / part.image
+                    for name in validation_names
+                    for part in usable[name].splits
+                ),
+            )
+        )
+    return tuple(result)
+
+
+def all_prepared_images(
+    manifest: PreparationManifest, prepared_dir: Path
+) -> tuple[tuple[str, ...], tuple[Path, ...]]:
+    usable = sorted(
+        (source for source in manifest.sources if source.splits),
+        key=lambda source: source.source_image,
+    )
+    return (
+        tuple(source.source_image for source in usable),
+        tuple(prepared_dir / part.image for source in usable for part in source.splits),
+    )
+
+
 @dataclass(frozen=True)
 class TrialParameters:
     learning_rate_multiplier: float
@@ -162,7 +225,24 @@ def create_study(config: AppConfig, group: GroupConfig, storage: Path) -> optuna
         raise ValueError(
             f"evaluation contract differs ({', '.join(differing)}); use train --restart"
         )
+    threshold_contract = {
+        "method": settings.threshold.method,
+        "percentile": settings.threshold.percentile,
+        "margin": settings.threshold.margin,
+        "folds": settings.threshold.folds,
+    }
+    previous_threshold = study.user_attrs.get("threshold_contract")
+    if study.trials and previous_threshold is None:
+        if settings.threshold.method != "training_percentile":
+            raise ValueError(
+                "threshold contract differs from existing study; use train --restart"
+            )
+    elif previous_threshold is not None and previous_threshold != threshold_contract:
+        raise ValueError(
+            "threshold contract differs from existing study; use train --restart"
+        )
     study.set_user_attr("evaluation_contract", contract)
+    study.set_user_attr("threshold_contract", threshold_contract)
     return study
 
 

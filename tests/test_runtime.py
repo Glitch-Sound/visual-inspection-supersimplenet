@@ -182,6 +182,14 @@ def test_nreq_002_s01(
                 return TrialOutcome([0.2], [0.1, 0.2], checkpoint)
 
         monkeypatch.setattr(training_cli, "AnomalibTrialRunner", FakeRunner)
+
+        def fake_selected(_parameters, *, validation_images, work_dir, **_kwargs):
+            work_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint = work_dir / "model.ckpt"
+            torch.save({"state_dict": {}}, checkpoint)
+            return checkpoint, [0.2] * len(validation_images)
+
+        monkeypatch.setattr(training_cli, "fit_selected_parameters", fake_selected)
     commands = {
         "check": lambda: preparation_cli._check_command(model="XX"),
         "train-pre": lambda: preparation_cli._train_pre_command(model="XX", group=None),

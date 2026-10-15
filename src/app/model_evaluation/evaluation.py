@@ -96,6 +96,25 @@ def validate_best_trial_contract(
         )
     if threshold is None or not np.isclose(best.threshold, threshold):
         raise ValueError("best_trial threshold does not match model config")
+    settings = group.optuna_settings.threshold
+    if best.threshold_method != settings.method:
+        raise ValueError("best_trial threshold method does not match model config")
+    if best.threshold_percentile is not None and not np.isclose(
+        best.threshold_percentile, settings.percentile
+    ):
+        raise ValueError("best_trial threshold percentile does not match model config")
+    if not np.isclose(best.threshold_margin, settings.margin):
+        raise ValueError("best_trial threshold margin does not match model config")
+    if settings.method == "out_of_fold_percentile":
+        expected_folds = (
+            len(best.final_train_sources)
+            if settings.folds == "leave_one_out"
+            else settings.folds
+        )
+        if len(best.cross_validation) != expected_folds:
+            raise ValueError(
+                "best_trial cross-validation folds do not match model config"
+            )
     parameters = best.parameters
     search = group.optuna_settings.search
     if not (

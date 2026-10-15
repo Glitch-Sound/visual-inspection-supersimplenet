@@ -69,3 +69,17 @@ def recover_artifact_transaction(paths: ProjectPaths, model: str, group: int) ->
             target.unlink()
     journal.unlink()
     _remove_transaction_files((*stages.values(), *backups.values()))
+
+
+def recover_restart_backup(paths: ProjectPaths, model: str, group: int) -> None:
+    """Restore an interrupted restart or discard its obsolete search history."""
+
+    study_dir = paths.study_dir(model, group)
+    backup = study_dir.with_name(study_dir.name + ".restart-backup")
+    if not backup.exists():
+        return
+    if (study_dir / "best_trial.json").is_file():
+        paths.remove_model_artifact(backup, expected=backup)
+        return
+    paths.remove_model_artifact(study_dir, expected=study_dir)
+    backup.replace(study_dir)

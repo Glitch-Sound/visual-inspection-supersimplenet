@@ -283,6 +283,35 @@ class TrialParametersContract(ContractModel):
     image_size: int = Field(gt=0)
 
 
+class FoldRecord(ContractModel):
+    train_sources: list[str] = Field(min_length=1)
+    validation_sources: list[str] = Field(min_length=1)
+
+    @field_validator("train_sources", "validation_sources")
+    @classmethod
+    def safe_sources(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("fold source names must be unique")
+        return [_safe_filename(name) for name in value]
+
+    @model_validator(mode="after")
+    def disjoint_sources(self) -> FoldRecord:
+        if set(self.train_sources) & set(self.validation_sources):
+            raise ValueError("fold train and validation sources must be disjoint")
+        return self
+
+
+class SourceScore(ContractModel):
+    source_image: str
+    split_image: str
+    score: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+
+    @field_validator("source_image", "split_image")
+    @classmethod
+    def safe_image(cls, value: str) -> str:
+        return _safe_filename(value)
+
+
 class BestTrialResult(ContractModel):
     model: str
     group: Annotated[StrictInt, Field(ge=0)]
@@ -302,6 +331,14 @@ class BestTrialResult(ContractModel):
     checkpoint: str
     score_contract: ScoreContract
     threshold: float = Field(ge=0.0, le=1.0)
+    threshold_method: Literal["training_percentile", "out_of_fold_percentile"] = (
+        "training_percentile"
+    )
+    threshold_percentile: float | None = Field(default=None, gt=0.0, le=100.0)
+    threshold_margin: float = Field(default=0.0, ge=0.0, le=1.0, allow_inf_nan=False)
+    cross_validation: list[FoldRecord] = Field(default_factory=list)
+    score_by_source: list[SourceScore] = Field(default_factory=list)
+    final_train_sources: list[str] = Field(default_factory=list)
     train_sources: list[str]
     validation_sources: list[str]
     seed: int
@@ -312,7 +349,7 @@ class BestTrialResult(ContractModel):
     def model_is_safe(cls, value: str) -> str:
         return _safe_model(value)
 
-    @field_validator("train_sources", "validation_sources")
+    @field_validator("train_sources", "validation_sources", "final_train_sources")
     @classmethod
     def source_filenames_are_safe(cls, value: list[str]) -> list[str]:
         for filename in value:
@@ -327,6 +364,34 @@ class BestTrialResult(ContractModel):
             raise ValueError("best_trial range_ids must be unique")
         if set(self.train_sources) & set(self.validation_sources):
             raise ValueError("train_sources and validation_sources must be disjoint")
+        if self.threshold_method == "out_of_fold_percentile":
+            if not self.cross_validation or not self.score_by_source:
+                raise ValueError(
+                    "out_of_fold_percentile requires fold and score records"
+                )
+            if self.threshold_percentile is None or not self.final_train_sources:
+                raise ValueError(
+                    "out_of_fold_percentile requires percentile and final sources"
+                )
+            source_names = {item.source_image for item in self.score_by_source}
+            if source_names != set(self.final_train_sources):
+                raise ValueError("out-of-fold scores must cover final training sources")
+            validation = [
+                name
+                for fold in self.cross_validation
+                for name in fold.validation_sources
+            ]
+            if sorted(validation) != sorted(self.final_train_sources):
+                raise ValueError("folds must validate every final training source once")
+            if len({item.split_image for item in self.score_by_source}) != len(
+                self.score_by_source
+            ):
+                raise ValueError("out-of-fold split image names must be unique")
+            for fold in self.cross_validation:
+                if set(fold.train_sources) | set(fold.validation_sources) != set(
+                    self.final_train_sources
+                ):
+                    raise ValueError("folds must cover all final training sources")
         return self
 
 

@@ -96,8 +96,10 @@
                     "interval_epochs": 10
                 },
                 "threshold": {
-                    "method": "training_percentile",
+                    "method": "out_of_fold_percentile",
                     "percentile": 99,
+                    "margin": 0.05,
+                    "folds": "leave_one_out",
                     "score_source": "supersimplenet.pred_score",
                     "value": null
                 },

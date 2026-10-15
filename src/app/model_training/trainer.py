@@ -176,6 +176,70 @@ class AnomalibTrialRunner:
         )
 
 
+def fit_selected_parameters(
+    parameters: TrialParameters,
+    *,
+    train_images: Sequence[Path],
+    validation_images: Sequence[Path],
+    work_dir: Path,
+    device: DeviceSelection,
+    group: GroupConfig,
+    seed: int,
+) -> tuple[Path, list[float]]:
+    """Fit the selected settings independently and score only held-out images."""
+    from anomalib.data import Folder
+    from anomalib.engine import Engine
+    from lightning.pytorch import seed_everything
+
+    if not train_images or not validation_images:
+        raise ValueError("selected fit requires nonempty train and validation images")
+    seed_everything(seed, workers=True)
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    train_dir = work_dir / "train"
+    validation_dir = work_dir / "validation"
+    link_dataset(train_images, train_dir)
+    link_dataset(validation_images, validation_dir)
+    datamodule = Folder(
+        name="visual-inspection-selected",
+        normal_dir=train_dir,
+        normal_test_dir=validation_dir,
+        train_batch_size=parameters.batch_size,
+        eval_batch_size=parameters.batch_size,
+        num_workers=0,
+        train_augmentations=AnomalibTrainingAugmentation(group.augmentation),
+        val_augmentations=None,
+        test_augmentations=None,
+        val_split_mode="same_as_test",
+        seed=seed,
+    )
+    model = create_supersimplenet(
+        layers=parameters.feature_layers,
+        image_size=parameters.image_size,
+        learning_rate_multiplier=parameters.learning_rate_multiplier,
+    )
+    engine = Engine(
+        max_epochs=parameters.epochs,
+        accelerator="gpu" if device.device == "cuda" else "cpu",
+        devices=1,
+        default_root_dir=work_dir,
+        logger=False,
+    )
+    engine.fit(model, datamodule=datamodule)
+    checkpoint = work_dir / "model.ckpt"
+    engine.trainer.save_checkpoint(checkpoint)
+    predictions = engine.predict(
+        model=model, data_path=validation_dir, return_predictions=True
+    )
+    scores = extract_predictions(predictions or [])
+    if len(scores) != len(validation_images):
+        raise ValueError(
+            f"selected fit returned {len(scores)} scores for "
+            f"{len(validation_images)} validation images"
+        )
+    return checkpoint, scores
+
+
 def extract_predictions(prediction_batches: list[Any]) -> list[float]:
     """Extract raw sigmoid ``pred_score`` values from Anomalib predictions."""
 
