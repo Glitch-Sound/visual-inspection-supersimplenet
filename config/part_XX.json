@@ -48,14 +48,13 @@
                         "type": "categorical",
                         "choices": [
                             4,
-                            8,
-                            16
+                            8
                         ]
                     },
                     "epochs": {
                         "type": "categorical",
                         "choices": [
-                            200
+                            300
                         ]
                     },
                     "feature_layers": {
@@ -77,8 +76,6 @@
                         "image_size": {
                             "type": "categorical",
                             "choices": [
-                                256,
-                                384,
                                 500
                             ]
                         },
@@ -146,13 +143,13 @@
                 "translation": {
                     "enabled": true,
                     "probability": 0.5,
-                    "max_ratio": 0.02,
+                    "max_ratio": 0.01,
                     "padding_mode": "reflection"
                 },
                 "rotation": {
                     "enabled": true,
                     "probability": 0.5,
-                    "max_degrees": 3.0,
+                    "max_degrees": 1.0,
                     "padding_mode": "reflection"
                 },
                 "brightness": {

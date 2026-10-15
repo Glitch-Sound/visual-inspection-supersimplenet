@@ -24,6 +24,33 @@ def _save(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def test_template_values_and_omitted_augmentation_strengths(tmp_path: Path) -> None:
+    template_root = Path(__file__).parents[1]
+    template = json.loads(
+        (template_root / "config" / "part_XX.json").read_text(encoding="utf-8")
+    )
+    search = template["group_detail"]["0"]["optuna_settings"]["search"]
+    assert search["batch_size"]["choices"] == [4, 8]
+    assert search["epochs"]["choices"] == [300]
+    assert search["preprocessing"]["image_size"]["choices"] == [500]
+    augmentation = template["group_detail"]["0"]["augmentation"]
+    assert augmentation["translation"]["max_ratio"] == 0.01
+    assert augmentation["rotation"]["max_degrees"] == 1.0
+    template_config = load_config(template_root, "XX")
+    assert template_config.image_size == 1000
+    assert template_config.image_resize == 0.5
+
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    augmentation = payload["group_detail"]["0"]["augmentation"]
+    augmentation["translation"].pop("max_ratio")
+    augmentation["rotation"].pop("max_degrees")
+    _save(path, payload)
+    loaded = load_config(tmp_path, "XX").part.groups[0].augmentation
+    assert loaded.translation.max_ratio == 0.01
+    assert loaded.rotation.max_degrees == 1.0
+
+
 def test_synthetic_objective_defaults_and_validation(tmp_path: Path) -> None:
     build_project(tmp_path)
     path, payload = _payload(tmp_path)

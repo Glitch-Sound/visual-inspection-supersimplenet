@@ -206,12 +206,12 @@ class EnabledProbability(StrictModel):
 
 
 class TranslationSettings(EnabledProbability):
-    max_ratio: Annotated[float, Field(ge=0.0, le=1.0)] = 0.02
+    max_ratio: Annotated[float, Field(ge=0.0, le=1.0)] = 0.01
     padding_mode: Literal["reflection"] = "reflection"
 
 
 class RotationSettings(EnabledProbability):
-    max_degrees: Annotated[float, Field(ge=0.0, le=180.0)] = 3.0
+    max_degrees: Annotated[float, Field(ge=0.0, le=180.0)] = 1.0
     padding_mode: Literal["reflection"] = "reflection"
 
 
