@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import optuna
 import typer
@@ -26,11 +29,15 @@ from app.model_training.search import (
     run_search,
     split_by_source,
 )
+from app.model_training.synthetic_validation import create_synthetic_validation
 from app.model_training.trainer import AnomalibTrialRunner
 
 
 def format_training_summary(result: BestTrialResult) -> str:
-    return f"暫定探索指標={result.objective} threshold={result.threshold}"
+    name = getattr(result, "objective_name", "normal_percentile")
+    if name == "normal_percentile":
+        return f"暫定探索指標={result.objective} threshold={result.threshold}"
+    return f"擬似AUROC暫定探索指標={result.objective} threshold={result.threshold}"
 
 
 def show_trial_conditions(
@@ -63,7 +70,13 @@ def show_trial_outcome(trial: optuna.trial.FrozenTrial) -> None:
         if trial.state == optuna.trial.TrialState.COMPLETE
         else ""
     )
-    show_stage(f"試行 {trial.number + 1} {status}{metric}")
+    reason = trial.user_attrs.get("failure_reason")
+    detail = (
+        f" 理由={reason}"
+        if trial.state == optuna.trial.TrialState.FAIL and reason
+        else ""
+    )
+    show_stage(f"試行 {trial.number + 1} {status}{metric}{detail}")
 
 
 def _train_command(
@@ -102,25 +115,39 @@ def _train_command(
                 existing = len(study.trials)
                 total = selected.optuna_settings.execution.trials
                 show_stage(
-                    f"探索条件: バックボーン={BACKBONE_NAME} "
+                    f"探索条件: 目的={selected.optuna_settings.objective} "
+                    f"バックボーン={BACKBONE_NAME} "
                     f"学習画像={len(split.train_images)} 検証画像={len(split.validation_images)} "
                     f"既存試行={existing} 今回の試行={max(0, total - existing)}"
                 )
                 runner = AnomalibTrialRunner(
                     study_dir / "trials", recorder.device, selected
                 )
-                study, outcomes = run_search(
-                    selected,
-                    split,
-                    study,
-                    runner,
-                    on_trial_start=lambda number, parameters, total=total: (
-                        show_trial_conditions(
-                            f"試行 {number + 1}/{total} 開始条件", parameters
+                study_dir.mkdir(parents=True, exist_ok=True)
+                with TemporaryDirectory(prefix="synthetic-", dir=study_dir) as temp_dir:
+                    try:
+                        synthetic_images = create_synthetic_validation(
+                            split.validation_images,
+                            Path(temp_dir),
+                            group=selected.id,
+                            settings=selected.optuna_settings.synthetic_validation,
                         )
-                    ),
-                    on_trial_finish=show_trial_outcome,
-                )
+                    except (OSError, ValueError) as error:
+                        split = replace(split, synthetic_error=str(error))
+                    else:
+                        split = replace(split, synthetic_images=synthetic_images)
+                    study, outcomes = run_search(
+                        selected,
+                        split,
+                        study,
+                        runner,
+                        on_trial_start=lambda number, parameters, total=total: (
+                            show_trial_conditions(
+                                f"試行 {number + 1}/{total} 開始条件", parameters
+                            )
+                        ),
+                        on_trial_finish=show_trial_outcome,
+                    )
                 result = persist_best_trial(
                     config=config,
                     group=selected,

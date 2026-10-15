@@ -140,6 +140,227 @@ def _study(config, paths, *, group=0, trials=1):
     )
 
 
+def _synthetic_study(config, paths, values: list[tuple[float, float]]):
+    selected = config.part.groups[0]
+    selected.optuna_settings.objective = "synthetic_auroc"
+    selected.optuna_settings.execution.trials = len(values)
+    study = create_study(config, selected, paths.study_dir("XX", 0) / "study.db")
+    split = split_by_source(
+        load_preparation_manifest(
+            paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
+        ),
+        paths.prepared_train("XX", 0),
+    )
+
+    def runner(parameters, split, trial):
+        del parameters, split
+        normal, synthetic = values[trial.number]
+        checkpoint = paths.study_dir("XX", 0) / f"trial_{trial.number}.ckpt"
+        torch.save({"state_dict": {}}, checkpoint)
+        return TrialOutcome([normal], [0.1, 0.2], checkpoint, [synthetic])
+
+    study, outcomes = run_search(selected, split, study, runner)
+    return selected, split, study, outcomes
+
+
+def test_req_031_s01(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected, (study, _) = _study(config, paths, trials=1)
+    selected.optuna_settings.execution.trials = 2
+    resumed = create_study(config, selected, paths.study_dir("XX", 0) / "study.db")
+    assert len(resumed.trials) == len(study.trials) == 1
+
+
+def test_legacy_normal_study_resumes_without_evaluation_contract(
+    tmp_path: Path,
+) -> None:
+    config, paths = _project(tmp_path)
+    selected = config.part.groups[0]
+    storage = paths.study_dir("XX", 0) / "study.db"
+    storage.parent.mkdir(parents=True)
+    legacy = optuna.create_study(
+        study_name="visual-inspection-XX-group-0",
+        storage=f"sqlite:///{storage}",
+        direction="minimize",
+    )
+    legacy.add_trial(optuna.create_trial(value=0.2, params={}, distributions={}))
+    resumed = create_study(config, selected, storage)
+    assert len(resumed.trials) == 1
+    assert resumed.user_attrs["evaluation_contract"]["objective"] == "normal_percentile"
+
+
+def test_req_031_s02(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected, _ = _study(config, paths, trials=1)
+    checkpoint = paths.checkpoint("XX", 0)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b"existing")
+    selected.optuna_settings.objective = "synthetic_auroc"
+    with pytest.raises(ValueError, match="train --restart"):
+        create_study(config, selected, paths.study_dir("XX", 0) / "study.db")
+    assert checkpoint.read_bytes() == b"existing"
+
+
+def test_req_032_s01(tmp_path: Path) -> None:
+    from app.model_training.search import synthetic_auroc
+
+    for normal, synthetic in (([], [0.5]), ([0.5], []), ([float("nan")], [0.5])):
+        with pytest.raises(ValueError, match="finite"):
+            synthetic_auroc(normal, synthetic)
+
+    config, paths = _project(tmp_path)
+    selected = config.part.groups[0]
+    selected.optuna_settings.objective = "synthetic_auroc"
+    selected.optuna_settings.execution.trials = 1
+    study = create_study(config, selected, paths.study_dir("XX", 0) / "study.db")
+    split = split_by_source(
+        load_preparation_manifest(
+            paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
+        ),
+        paths.prepared_train("XX", 0),
+    )
+    old_checkpoint = paths.checkpoint("XX", 0)
+    old_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    old_checkpoint.write_bytes(b"existing")
+
+    def invalid_runner(parameters, split, trial):
+        del parameters, split, trial
+        return TrialOutcome([0.2], [0.1], old_checkpoint, [float("nan")])
+
+    with pytest.raises(RuntimeError, match="all Optuna trials failed"):
+        run_search(selected, split, study, invalid_runner)
+    assert study.trials[0].state == optuna.trial.TrialState.FAIL
+    assert "finite" in study.trials[0].user_attrs["failure_reason"]
+    assert old_checkpoint.read_bytes() == b"existing"
+
+
+def test_generation_failure_is_recorded_as_failed_trial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _project(tmp_path)
+    config_path = paths.model_config("XX")
+    payload = json.loads(config_path.read_text())
+    payload["group_detail"]["0"]["optuna_settings"]["objective"] = "synthetic_auroc"
+    config_path.write_text(json.dumps(payload))
+    old_config = config_path.read_bytes()
+    old_checkpoint = paths.checkpoint("XX", 0)
+    old_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    old_checkpoint.write_bytes(b"existing")
+    old_best = paths.study_dir("XX", 0) / "best_trial.json"
+    old_best.parent.mkdir(parents=True, exist_ok=True)
+    old_best.write_text("existing")
+
+    def fail_generation(*args, **kwargs):
+        del args, kwargs
+        raise ValueError("invalid validation image")
+
+    monkeypatch.setattr(training_cli, "create_synthetic_validation", fail_generation)
+    with pytest.raises(RuntimeError, match="all Optuna trials failed"):
+        _run_cli(monkeypatch, paths, group=0)
+
+    config = load_config(tmp_path, "XX")
+    selected = config.part.groups[0]
+    study = create_study(config, selected, paths.study_dir("XX", 0) / "study.db")
+    assert len(study.trials) == 1
+    assert study.trials[0].state == optuna.trial.TrialState.FAIL
+    assert "invalid validation image" in study.trials[0].user_attrs["failure_reason"]
+    assert old_checkpoint.read_bytes() == b"existing"
+    assert old_best.read_text() == "existing"
+    assert config_path.read_bytes() == old_config
+
+    selected.optuna_settings.execution.trials = 2
+    split = split_by_source(
+        load_preparation_manifest(
+            paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
+        ),
+        paths.prepared_train("XX", 0),
+    )
+
+    def recovered_runner(parameters, split, trial):
+        del parameters, split, trial
+        return TrialOutcome([0.2], [0.1], old_checkpoint, [0.8])
+
+    resumed, _ = run_search(selected, split, study, recovered_runner)
+    assert resumed.best_trial.number == 1
+
+
+def test_req_005_s01_synthetic(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    _, _, study, _ = _synthetic_study(config, paths, [(0.1, 0.1), (0.4, 0.8)])
+    assert study.direction == optuna.study.StudyDirection.MAXIMIZE
+    assert study.best_trial.number == 1
+    assert study.trials[0].value == 0.5
+    assert study.trials[1].value == 1.0
+
+
+def test_req_005_s02_synthetic(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected, split, study, outcomes = _synthetic_study(config, paths, [(0.2, 0.8)])
+    best = persist_best_trial(
+        config=config,
+        group=selected,
+        paths=paths,
+        split=split,
+        study=study,
+        outcomes=outcomes,
+    )
+    summary = training_cli.format_training_summary(best)
+    assert "擬似AUROC暫定探索指標=" in summary
+    assert "精度" not in summary and "再現率" not in summary
+
+
+def test_synthetic_validation_is_reused_across_trials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, paths = _project(tmp_path)
+    config_path = paths.model_config("XX")
+    payload = json.loads(config_path.read_text())
+    payload["group_detail"]["0"]["optuna_settings"]["objective"] = "synthetic_auroc"
+    config_path.write_text(json.dumps(payload))
+    observed: list[tuple[Path, ...]] = []
+    original = training_cli.create_synthetic_validation
+
+    def record(images, destination, *, group, settings):
+        generated = original(images, destination, group=group, settings=settings)
+        observed.append(generated)
+        return generated
+
+    monkeypatch.setattr(training_cli, "create_synthetic_validation", record)
+    _stub_search(monkeypatch, paths)
+    _run_cli(monkeypatch, paths, group=0)
+    assert len(observed) == 1
+    assert len(observed[0]) > 0
+    assert "目的=synthetic_auroc" in capsys.readouterr().err
+    assert not observed[0][0].exists()
+
+
+def test_req_005_s03(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected, (study, _) = _study(config, paths, trials=2)
+    assert selected.optuna_settings.objective == "normal_percentile"
+    assert study.direction == optuna.study.StudyDirection.MINIMIZE
+    assert study.best_trial.number == 0
+
+
+def test_req_007_s01_synthetic(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected, split, study, outcomes = _synthetic_study(config, paths, [(0.2, 0.8)])
+    best = persist_best_trial(
+        config=config,
+        group=selected,
+        paths=paths,
+        split=split,
+        study=study,
+        outcomes=outcomes,
+    )
+    saved = json.loads((paths.study_dir("XX", 0) / "best_trial.json").read_text())
+    assert best.objective_name == saved["objective_name"] == "synthetic_auroc"
+    assert saved["synthetic_auroc"] == 1.0
+    assert saved["normal_p99"] == 0.2
+    assert saved["synthetic_scores_summary"]["count"] == 1
+    assert saved["threshold"] == 0.199
+
+
 def test_group_req_022_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _, paths = _project(tmp_path, two=True)
     done = _stub_search(monkeypatch, paths)
@@ -505,6 +726,11 @@ def test_group_req_007_s05(tmp_path: Path) -> None:
             )["threshold"]
             == threshold
         )
+        result = json.loads(
+            (paths.study_dir("XX", group_id) / "best_trial.json").read_text()
+        )
+        assert result["objective_name"] == "normal_percentile"
+        assert result["normal_p99"] == pytest.approx(0.2)
 
 
 def test_group_req_008_s01(tmp_path: Path) -> None:
@@ -764,7 +990,9 @@ def test_nreq_004_s01(
     show_conditions = training_cli.show_trial_conditions
     _stub_search(monkeypatch, paths)
     _run_cli(monkeypatch, paths, group=0)
-    assert "バックボーン=wide_resnet50_2.tv_in1k" in capsys.readouterr().err
+    output = capsys.readouterr().err
+    assert "バックボーン=wide_resnet50_2.tv_in1k" in output
+    assert "目的=normal_percentile" in output
     show_conditions("試行 1/3 開始条件", TrialParameters(1.0, 4, 2, ["layer2"], 256))
     rendered = capsys.readouterr().err
     for value in (
@@ -791,6 +1019,13 @@ def test_nreq_004_s02(capsys: pytest.CaptureFixture[str]) -> None:
         assert ("暫定探索指標=0.2" in message) == (
             state == optuna.trial.TrialState.COMPLETE
         )
+    failed = optuna.create_trial(
+        state=optuna.trial.TrialState.FAIL,
+        params={},
+        user_attrs={"failure_reason": "ValueError: invalid score"},
+    )
+    training_cli.show_trial_outcome(failed)
+    assert "理由=ValueError: invalid score" in capsys.readouterr().err
 
 
 def test_nreq_004_s03(tmp_path: Path) -> None:

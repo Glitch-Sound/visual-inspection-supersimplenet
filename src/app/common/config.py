@@ -116,6 +116,25 @@ class NormalOnlySettings(StrictModel):
         return self
 
 
+SyntheticDefect = Literal["scratch", "stain", "spot", "foreign_patch"]
+
+
+class SyntheticValidationSettings(StrictModel):
+    types: list[SyntheticDefect] = Field(
+        default_factory=lambda: ["scratch", "stain", "spot", "foreign_patch"],
+        min_length=1,
+    )
+    intensity: Annotated[float, Field(gt=0.0, le=1.0, allow_inf_nan=False)] = 0.5
+    seed: StrictInt = 42
+
+    @field_validator("types")
+    @classmethod
+    def unique_types(cls, value: list[SyntheticDefect]) -> list[SyntheticDefect]:
+        if len(value) != len(set(value)):
+            raise ValueError("synthetic_validation.types must not contain duplicates")
+        return value
+
+
 class ExecutionSettings(StrictModel):
     trials: Annotated[int, Field(gt=0)] = 10
     seed: int = 42
@@ -129,6 +148,10 @@ class OptunaSettings(StrictModel):
     threshold: ThresholdSettings
     normal_only: NormalOnlySettings
     execution: ExecutionSettings
+    objective: Literal["normal_percentile", "synthetic_auroc"] = "normal_percentile"
+    synthetic_validation: SyntheticValidationSettings = Field(
+        default_factory=SyntheticValidationSettings
+    )
 
 
 class ScoreSettings(StrictModel):

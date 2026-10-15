@@ -518,6 +518,52 @@ def test_limited_archive_accepts_deferred_acceptance(tmp_path: Path) -> None:
     assert strict.returncode == 1
 
 
+def test_limited_archive_accepts_multiple_conditions_for_one_task(
+    tmp_path: Path,
+) -> None:
+    change = write_limited_change(tmp_path)
+    proposal = change / "proposal.md"
+    proposal.write_text(
+        proposal.read_text(encoding="utf-8") + "- AC-002: 追加条件を検証できる。\n",
+        encoding="utf-8",
+    )
+    design = change / "design.md"
+    design.write_text(
+        design.read_text(encoding="utf-8")
+        + "| AC-002 | 追加条件 | 実機試験 | 対象OSの実機試験 | 未検証 | 未作成 |\n",
+        encoding="utf-8",
+    )
+    tasks = change / "tasks.md"
+    tasks.write_text(
+        tasks.read_text(encoding="utf-8").replace(
+            "3.3 AC-001 を", "3.3 `AC-001`〜`AC-002` を"
+        ),
+        encoding="utf-8",
+    )
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        readme.read_text(encoding="utf-8")
+        + "| example | AC-002 | 未検証 | タスク3.3: 対象OSの実機確認 |\n",
+        encoding="utf-8",
+    )
+
+    result = run_check(tmp_path, "--change", "example", "--phase", "limited-archive")
+    assert result.returncode == 0, result.stderr
+
+
+def test_limited_archive_rejects_duplicate_condition_for_one_task(
+    tmp_path: Path,
+) -> None:
+    write_limited_change(tmp_path)
+    readme = tmp_path / "README.md"
+    row = "| example | AC-001 | 未検証 | タスク3.3: 対象OSの実機確認 |\n"
+    readme.write_text(readme.read_text(encoding="utf-8") + row, encoding="utf-8")
+
+    result = run_check(tmp_path, "--change", "example", "--phase", "limited-archive")
+    assert result.returncode == 1
+    assert "延期行が重複しています" in result.stderr
+
+
 def test_limited_archive_accepts_archived_change(tmp_path: Path) -> None:
     change = write_limited_change(tmp_path)
     archive = change.parent / "archive"

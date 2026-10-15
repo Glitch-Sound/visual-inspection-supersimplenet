@@ -31,6 +31,8 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | 異常スコア | SuperSimpleNetの`pred_score`。校正済み確率ではない |
 | 異常マップ | 分割画像の画素ごとの`anomaly_map`。ヒートマップ表示に使う |
 | 暫定閾値 | 学習集合の異常スコアから算出する、初期評価用の判定境界 |
+| 擬似欠陥 | 正常な検証分割画像に合成する傷、シミ、斑点、異物。学習入力には使わない |
+| 擬似 AUROC | 正常と擬似欠陥の検証スコアの分離度。実際の異常の検出性能を示さない |
 | 検査用閾値 | グループの`inspection_threshold`。指定時に暫定閾値に代えて使う |
 | `undetermined` | 位置合わせ失敗や分割不足などで正常と確定できないグループ内判定 |
 | 結果世代 | 1回の`test`で完成させる、グループ別の結果画像とJSONの一式 |
@@ -76,6 +78,8 @@ npm ci
 | `groups[].heatmap_range` | 検査時に必須の有限な下限・上限。`min < max` |
 | `group_detail` | グループIDの通常の10進文字列をキーにする詳細設定。`groups`のIDと一対一に対応 |
 | `group_detail["<id>"].optuna_settings` | グループ別の探索、学習・検証分離、暫定閾値 |
+| `group_detail["<id>"].optuna_settings.objective` | `normal_percentile` または `synthetic_auroc`。省略時は従来の `normal_percentile` |
+| `group_detail["<id>"].optuna_settings.synthetic_validation` | 擬似欠陥の `types`、`intensity`、`seed`。種類は `scratch`、`stain`、`spot`、`foreign_patch` |
 | `group_detail["<id>"].score` | `supersimplenet.pred_score`と無効化したPostProcessor |
 | `group_detail["<id>"].augmentation` | 学習入力だけに適用する拡張条件 |
 
@@ -110,6 +114,10 @@ uv run --locked test --model XX --group 1
 ```
 
 学習探索履歴とcheckpointを対象グループで作り直す場合は`train --restart`を使う。<br />
+探索目的、擬似欠陥条件、評価用seedを変えた場合は、異なる条件の試行を混ぜないよう対象グループで`train --restart`を使う。<br />
+`synthetic_auroc`は正常な検証分割画像から作る擬似欠陥との分離度を最大化する。<br />
+最良試行結果には目的名・目的値、正常スコアの99パーセンタイル、擬似AUROC、擬似スコアの分布要約と生成条件を記録する。<br />
+擬似AUROCは実際の異常画像による検出性能や本番利用の承認を意味しない。<br />
 `test`は実行のたびに対象グループの結果を新しく作るため、`--restart`は受け付けない。<br />
 全件学習で後続グループが失敗した場合、コマンドはエラー終了し、失敗グループIDを表示する。<br />
 完了済みグループの成果物は保持する。<br />
@@ -245,6 +253,11 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| synthetic-anomaly-validation | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11で4種類の擬似画像、強度・seed、同条件での画像と探索結果の再現、原本不変を確認する。 |
+| synthetic-anomaly-validation | AC-002 | 未検証 | タスク4.2: 両OSで実モデルの正常・擬似スコアとAUROC最大化による最良試行を確認する。 |
+| synthetic-anomaly-validation | AC-003 | 未検証 | タスク4.2: 両OSで旧設定の百分位最小化、枝刈り、最良試行が従来と一致することを確認する。 |
+| synthetic-anomaly-validation | AC-004 | 未検証 | タスク4.2: 両OSで目的名・各指標・再現条件のCLI表示と結果JSON読戻しを確認する。 |
+| synthetic-anomaly-validation | AC-005 | 未検証 | タスク4.2: 両OSで不正設定、評価失敗、条件不一致の再開拒否、保存復旧と旧成果物保持を確認する。 |
 | split-group-config-details | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11の対象環境で新形式の複数グループ設定を使い、5 CLIの全件・単独実行と成果物読戻しを確認する。 |
 | split-group-config-details | AC-002 | 未検証 | タスク3.4: 両OSで詳細の欠落・余分・非標準IDキーと旧形式混在を入力不備として拒否し、既存成果物が変わらないことを確認する。 |
 | split-group-config-details | AC-003 | 未検証 | タスク3.5: 両OSで実モデルの単独グループ学習を行い、対象の暫定閾値だけが詳細設定へ書き戻されることを確認する。 |

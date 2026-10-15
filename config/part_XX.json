@@ -107,6 +107,12 @@
                     "validation_ratio": 0.2,
                     "seed": 42
                 },
+                "objective": "normal_percentile",
+                "synthetic_validation": {
+                    "types": ["scratch", "stain", "spot", "foreign_patch"],
+                    "intensity": 0.5,
+                    "seed": 42
+                },
                 "execution": {
                     "trials": 10,
                     "seed": 42,

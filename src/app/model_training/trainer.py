@@ -117,12 +117,22 @@ class AnomalibTrialRunner:
             val_split_mode="same_as_test",
             seed=42,
         )
+        pruning = self.group.optuna_settings if self.group is not None else None
+        synthetic_objective = (
+            pruning is not None and pruning.objective == "synthetic_auroc"
+        )
+        if synthetic_objective and pruning is not None:
+            from lightning.pytorch import seed_everything
+
+            seed_everything(pruning.execution.seed + trial.number, workers=True)
+            import torch
+
+            torch.use_deterministic_algorithms(True)
         model = create_supersimplenet(
             layers=parameters.feature_layers,
             image_size=parameters.image_size,
             learning_rate_multiplier=parameters.learning_rate_multiplier,
         )
-        pruning = self.group.optuna_settings if self.group is not None else None
         engine = Engine(
             callbacks=(
                 [
@@ -132,7 +142,7 @@ class AnomalibTrialRunner:
                         interval_epochs=pruning.pruner.interval_epochs,
                     )
                 ]
-                if pruning is not None
+                if pruning is not None and not synthetic_objective
                 else None
             ),
             max_epochs=parameters.epochs,
@@ -150,10 +160,19 @@ class AnomalibTrialRunner:
         training_predictions = engine.predict(
             model=model, data_path=train_dir, return_predictions=True
         )
+        synthetic_scores = None
+        if split.synthetic_images:
+            synthetic_predictions = engine.predict(
+                model=model,
+                data_path=split.synthetic_images[0].parent,
+                return_predictions=True,
+            )
+            synthetic_scores = extract_predictions(synthetic_predictions or [])
         return TrialOutcome(
             validation_scores=extract_predictions(validation_predictions or []),
             training_scores=extract_predictions(training_predictions or []),
             checkpoint=checkpoint,
+            synthetic_scores=synthetic_scores,
         )
 
 

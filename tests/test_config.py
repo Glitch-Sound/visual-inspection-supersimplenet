@@ -24,6 +24,33 @@ def _save(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def test_synthetic_objective_defaults_and_validation(tmp_path: Path) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    settings = payload["group_detail"]["0"]["optuna_settings"]
+    assert (
+        load_config(tmp_path, "XX").part.groups[0].optuna_settings.objective
+        == "normal_percentile"
+    )
+    for field in ("objective", "synthetic_validation"):
+        settings.pop(field, None)
+    _save(path, payload)
+    assert (
+        load_config(tmp_path, "XX").part.groups[0].optuna_settings.objective
+        == "normal_percentile"
+    )
+    for bad in (
+        {"types": [], "intensity": 0.5, "seed": 42},
+        {"types": ["unknown"], "intensity": 0.5, "seed": 42},
+        {"types": ["scratch"], "intensity": 0, "seed": 42},
+        {"types": ["scratch"], "intensity": 2, "seed": 42},
+    ):
+        settings["synthetic_validation"] = bad
+        _save(path, payload)
+        with pytest.raises(ValidationError, match="synthetic_validation"):
+            load_config(tmp_path, "XX")
+
+
 def test_group_req_021_s01(tmp_path: Path) -> None:
     config, _ = build_project(
         tmp_path, ranges=[{"id": 0, "x": 0, "y": 0}, {"id": 1, "x": 8, "y": 0}]
