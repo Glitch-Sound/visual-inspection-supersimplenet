@@ -101,6 +101,7 @@
                     "margin": 0.05,
                     "folds": "leave_one_out",
                     "score_source": "supersimplenet.pred_score",
+                    "unit": "group",
                     "value": null
                 },
                 "normal_only": {

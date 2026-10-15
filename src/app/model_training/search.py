@@ -231,6 +231,9 @@ def create_study(config: AppConfig, group: GroupConfig, storage: Path) -> optuna
         "margin": settings.threshold.margin,
         "folds": settings.threshold.folds,
     }
+    if settings.threshold.unit == "split":
+        threshold_contract["unit"] = settings.threshold.unit
+        threshold_contract["min_score_count"] = settings.threshold.min_score_count
     previous_threshold = study.user_attrs.get("threshold_contract")
     if study.trials and previous_threshold is None:
         if settings.threshold.method != "training_percentile":

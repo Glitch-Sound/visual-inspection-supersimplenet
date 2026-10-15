@@ -21,14 +21,17 @@ def aligned(
     return AlignedImage(image, 20, 0.8)
 
 
-def project(root: Path, *, two: bool = False, score: float = 0.5):
+def project(root: Path, *, two: bool = False, three: bool = False, score: float = 0.5):
+    ranges = [{"id": 0, "x": 0, "y": 0}, {"id": 1, "x": 8, "y": 0}]
+    if three:
+        ranges.append({"id": 2, "x": 16, "y": 0})
     config, paths = build_project(
         root,
-        ranges=[{"id": 0, "x": 0, "y": 0}, {"id": 1, "x": 8, "y": 0}],
+        ranges=ranges,
     )
     path = paths.model_config("XX")
     payload = json.loads(path.read_text())
-    payload["groups"][0]["range_ids"] = [0, 1]
+    payload["groups"][0]["range_ids"] = [item["id"] for item in ranges]
     if two:
         second = json.loads(json.dumps(payload["groups"][0]))
         second["id"] = 1

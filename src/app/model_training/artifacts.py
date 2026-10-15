@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,7 @@ from app.common.contracts import (
     FoldRecord,
     ScoreContract,
     SourceScore,
+    SplitThreshold,
     TrialParametersContract,
 )
 from app.common.paths import ProjectPaths
@@ -41,6 +43,7 @@ def persist_best_trial(
     final_train_sources: tuple[str, ...] | None = None,
     cross_validation: list[FoldRecord] | None = None,
     score_by_source: list[SourceScore] | None = None,
+    record_warning: Callable[[str], None] | None = None,
 ) -> BestTrialResult:
     recover_artifact_transaction(paths, config.model, group.id)
     best = study.best_trial
@@ -78,6 +81,47 @@ def persist_best_trial(
         )
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("calculated threshold must be in [0, 1]")
+    split_thresholds: dict[str, SplitThreshold] = {}
+    threshold_warnings: list[str] = []
+    if threshold_settings.unit == "split":
+        minimum = threshold_settings.min_score_count
+        if minimum is None:
+            raise ValueError("min_score_count is required for split thresholds")
+        by_id: dict[int, list[float]] = {split_id: [] for split_id in group.range_ids}
+        for item in score_by_source or []:
+            source = Path(item.source_image)
+            matching = [
+                split_id
+                for split_id in group.range_ids
+                if item.split_image == f"{source.stem}_{split_id:02d}{source.suffix}"
+            ]
+            if len(matching) != 1:
+                raise ValueError(
+                    f"split score image does not match group range_ids: {item.split_image}"
+                )
+            by_id[matching[0]].append(item.score)
+        for split_id in group.range_ids:
+            values = by_id[split_id]
+            if len(values) >= minimum:
+                split_value = min(
+                    1.0,
+                    float(np.percentile(values, threshold_settings.percentile))
+                    + threshold_settings.margin,
+                )
+                source_name = "calculated"
+            else:
+                split_value = threshold
+                source_name = "group_fallback"
+                warning = (
+                    f"group {group.id} split {split_id}: out-of-fold score count "
+                    f"{len(values)} is below min_score_count {minimum}; using group threshold"
+                )
+                threshold_warnings.append(warning)
+                if record_warning is not None:
+                    record_warning(warning)
+            split_thresholds[str(split_id)] = SplitThreshold(
+                value=split_value, source=source_name, score_count=len(values)
+            )
     target_checkpoint = paths.checkpoint(config.model, group.id)
     target_config = paths.model_config(config.model)
     target_best = paths.study_dir(config.model, group.id) / "best_trial.json"
@@ -103,9 +147,18 @@ def persist_best_trial(
             model=config.model,
             group=group.id,
             threshold=threshold,
+            threshold_unit=threshold_settings.unit,
+            min_score_count=threshold_settings.min_score_count,
+            split_thresholds=split_thresholds,
         )
         write_threshold(
-            target_config, threshold, group=group.id, destination=stages["config"]
+            target_config,
+            threshold,
+            group=group.id,
+            split_values=split_thresholds
+            if threshold_settings.unit == "split"
+            else None,
+            destination=stages["config"],
         )
         result = BestTrialResult(
             model=config.model,
@@ -125,6 +178,10 @@ def persist_best_trial(
             threshold_method=threshold_settings.method,
             threshold_percentile=threshold_settings.percentile,
             threshold_margin=threshold_settings.margin,
+            threshold_unit=threshold_settings.unit,
+            min_score_count=threshold_settings.min_score_count,
+            split_thresholds=split_thresholds,
+            threshold_warnings=threshold_warnings,
             cross_validation=cross_validation or [],
             score_by_source=score_by_source or [],
             final_train_sources=list(
@@ -194,7 +251,14 @@ def _replace_staged_artifact(source: Path, target: Path) -> None:
 
 
 def _attach_checkpoint_metadata(
-    path: Path, *, model: str, group: int, threshold: float
+    path: Path,
+    *,
+    model: str,
+    group: int,
+    threshold: float,
+    threshold_unit: str = "group",
+    min_score_count: int | None = None,
+    split_thresholds: dict[str, SplitThreshold] | None = None,
 ) -> None:
     import torch
 
@@ -205,6 +269,11 @@ def _attach_checkpoint_metadata(
         "score_source": "supersimplenet.pred_score",
         "anomalib_post_processor": False,
         "threshold": threshold,
+        "threshold_unit": threshold_unit,
+        "min_score_count": min_score_count,
+        "split_thresholds": {
+            key: item.model_dump() for key, item in (split_thresholds or {}).items()
+        },
     }
     torch.save(payload, path)
 

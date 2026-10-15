@@ -13,6 +13,7 @@ from group_evaluation_helpers import FakePredictor, aligned, project, recorder
 from typer.testing import CliRunner
 
 from app.common.config import load_config
+from app.common.contracts import BestTrialResult
 from app.common.result_index import (
     create_generation,
     read_current,
@@ -61,6 +62,63 @@ def _two_sources(root: Path):
     write_test_image(paths.original_test("XX") / "second.png", size=32)
     prepare_testing(config, paths, aligner=aligned)
     return paths
+
+
+def _split_project(root: Path, *, three: bool = False):
+    _, paths = project(root, three=three)
+    config_path = paths.model_config("XX")
+    payload = json.loads(config_path.read_text())
+    group = payload["groups"][0]
+    ids = group["range_ids"]
+    values = {
+        str(split_id): {
+            "value": [0.3, 0.4, 0.7][split_id],
+            "source": "group_fallback" if split_id == 1 else "calculated",
+            "score_count": 1 if split_id == 1 else 2,
+        }
+        for split_id in ids
+    }
+    threshold = payload["group_detail"]["0"]["optuna_settings"]["threshold"]
+    threshold.update(
+        method="out_of_fold_percentile",
+        folds=2,
+        percentile=50,
+        unit="split",
+        min_score_count=2,
+        split_values=values,
+    )
+    config_path.write_text(json.dumps(payload))
+    best_path = paths.study_dir("XX", 0) / "best_trial.json"
+    best_payload = json.loads(best_path.read_text())
+    best_payload.update(
+        threshold_method="out_of_fold_percentile",
+        threshold_percentile=50,
+        threshold_unit="split",
+        min_score_count=2,
+        split_thresholds=values,
+        final_train_sources=["a.png", "b.png"],
+        cross_validation=[
+            {"train_sources": ["a.png"], "validation_sources": ["b.png"]},
+            {"train_sources": ["b.png"], "validation_sources": ["a.png"]},
+        ],
+        score_by_source=[
+            {
+                "source_image": source,
+                "split_image": f"{Path(source).stem}_00.png",
+                "score": 0.3,
+            }
+            for source in ("a.png", "b.png")
+        ],
+    )
+    best_path.write_text(json.dumps(best_payload))
+    BestTrialResult.read_json(best_path)
+    checkpoint = paths.checkpoint("XX", 0)
+    state = torch.load(checkpoint, weights_only=False)
+    state["visual_inspection"].update(
+        threshold_unit="split", min_score_count=2, split_thresholds=values
+    )
+    torch.save(state, checkpoint)
+    return load_config(root, "XX"), paths
 
 
 def test_group_req_023_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -450,6 +508,214 @@ def test_group_req_018_s06(tmp_path: Path) -> None:
     metadata = load_checkpoint_metadata(paths.checkpoint("XX", 0))
     with pytest.raises(ValueError, match="threshold"):
         validate_score_contract(config, group, metadata)
+
+
+@pytest.mark.parametrize("artifact", ["config", "best", "checkpoint"])
+def test_split_threshold_artifact_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, artifact: str
+) -> None:
+    _, paths = _split_project(tmp_path)
+    _run(monkeypatch, paths)
+    before = _current(paths)
+    if artifact == "config":
+        path = paths.model_config("XX")
+        payload = json.loads(path.read_text())
+        payload["group_detail"]["0"]["optuna_settings"]["threshold"]["split_values"][
+            "0"
+        ]["value"] = 0.2
+        path.write_text(json.dumps(payload))
+    elif artifact == "best":
+        path = paths.study_dir("XX", 0) / "best_trial.json"
+        payload = json.loads(path.read_text())
+        payload["split_thresholds"]["0"]["value"] = 0.2
+        path.write_text(json.dumps(payload))
+    else:
+        path = paths.checkpoint("XX", 0)
+        payload = torch.load(path, weights_only=False)
+        payload["visual_inspection"]["split_thresholds"]["0"]["value"] = 0.2
+        torch.save(payload, path)
+    with pytest.raises(ValueError, match="split threshold"):
+        _run(
+            monkeypatch,
+            paths,
+            predictor_factory=lambda *_a, **_kw: pytest.fail("predictor started"),
+        )
+    assert _current(paths) == before
+
+
+def test_split_threshold_result_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _split_project(tmp_path, three=True)
+    path = paths.model_config("XX")
+    payload = json.loads(path.read_text())
+    payload["groups"][0]["inspection_threshold_by_split"] = {"2": 0.2}
+    path.write_text(json.dumps(payload))
+    _run(monkeypatch, paths, score=0.5)
+    result_path = paths.results("XX") / _current(paths)[0] / "sample.png.json"
+    result = json.loads(result_path.read_text())
+    assert [
+        (item["threshold"], item["threshold_source"]) for item in result["splits"]
+    ] == [
+        (0.3, "split_calculated"),
+        (0.4, "group_fallback"),
+        (0.2, "manual_override"),
+    ]
+    assert result["overall_status"] == "anomaly"
+    assert result["threshold"] == 0.4
+
+
+def test_split_threshold_prediction_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _split_project(tmp_path)
+
+    class FailingPredictor:
+        calls = 0
+
+        def __call__(self, image):
+            del image
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("prediction failed")
+            return Prediction(0.1, np.zeros((8, 8), dtype=np.float32))
+
+    _run(monkeypatch, paths, predictor_factory=lambda *_a, **_kw: FailingPredictor())
+    result_path = paths.results("XX") / _current(paths)[0] / "sample.png.json"
+    result = json.loads(result_path.read_text())
+    assert result["splits"][0]["status"] == "error"
+    assert result["splits"][0]["threshold"] == 0.3
+    assert result["splits"][0]["threshold_source"] == "split_calculated"
+    assert result["overall_status"] == "undetermined"
+
+
+def test_group_threshold_default_compatibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = project(tmp_path)
+    _run(monkeypatch, paths, score=0.5)
+    result = json.loads(
+        (paths.results("XX") / _current(paths)[0] / "sample.png.json").read_text()
+    )
+    assert [
+        (item["status"], item["threshold"], item["threshold_source"])
+        for item in result["splits"]
+    ] == [
+        ("anomaly", 0.4, "group_calculated"),
+        ("anomaly", 0.4, "group_calculated"),
+    ]
+
+
+def test_group_null_threshold_compatibility(tmp_path: Path) -> None:
+    config, _ = project(tmp_path)
+    assert config.part.groups[0].inspection_threshold is None
+    assert effective_threshold(config.part.groups[0], 0.4) == 0.4
+
+
+def test_group_manual_threshold_compatibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = project(tmp_path)
+    path = paths.model_config("XX")
+    payload = json.loads(path.read_text())
+    payload["groups"][0]["inspection_threshold"] = 0.7
+    path.write_text(json.dumps(payload))
+    _run(monkeypatch, paths, score=0.5)
+    result = json.loads(
+        (paths.results("XX") / _current(paths)[0] / "sample.png.json").read_text()
+    )
+    assert all(item["status"] == "normal" for item in result["splits"])
+    assert all(
+        item["threshold_source"] == "group_manual_override" for item in result["splits"]
+    )
+    assert (
+        load_config(tmp_path, "XX").part.groups[0].optuna_settings.threshold.value
+        == 0.4
+    )
+
+
+@pytest.mark.parametrize("value", [0.0, 1.0])
+def test_split_threshold_boundaries(tmp_path: Path, value: float) -> None:
+    config, _ = _split_project(tmp_path)
+    image = np.zeros((4, 4, 3), dtype=np.uint8)
+    split = evaluate_split(
+        image_path=Path("input.png"),
+        image=image,
+        prediction=Prediction(value, np.zeros((4, 4), dtype=np.float32)),
+        split_id=0,
+        threshold=value,
+        threshold_source="manual_override",
+        heatmap_range=require_heatmap_range(config.part.groups[0]),
+        result_path=tmp_path / f"result-{value}.png",
+    )
+    assert split.status == "anomaly"
+    assert split.threshold == value
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("0", -0.1),
+        ("0", 1.1),
+        ("0", "bad"),
+        ("0", True),
+        ("0", float("nan")),
+        ("99", 0.4),
+        ("00", 0.4),
+    ],
+)
+def test_split_manual_threshold_rejected(
+    tmp_path: Path, key: str, value: object
+) -> None:
+    _, paths = _split_project(tmp_path)
+    path = paths.model_config("XX")
+    payload = json.loads(path.read_text())
+    payload["groups"][0]["inspection_threshold_by_split"] = {key: value}
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="inspection_threshold_by_split"):
+        load_config(tmp_path, "XX")
+
+
+def test_split_manual_threshold_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _split_project(tmp_path)
+    path = paths.model_config("XX")
+    payload = json.loads(path.read_text())
+    payload["groups"][0]["inspection_threshold_by_split"] = {"0": 0.7}
+    path.write_text(json.dumps(payload))
+    _run(monkeypatch, paths, score=0.5)
+    result = json.loads(
+        (paths.results("XX") / _current(paths)[0] / "sample.png.json").read_text()
+    )
+    assert result["splits"][0]["status"] == "normal"
+    assert result["splits"][0]["threshold_source"] == "manual_override"
+    assert result["splits"][1]["status"] == "anomaly"
+    assert result["splits"][1]["threshold_source"] == "group_fallback"
+    assert (
+        load_config(tmp_path, "XX")
+        .part.groups[0]
+        .optuna_settings.threshold.split_values["0"]
+        .value
+        == 0.3
+    )
+
+
+def test_manual_override_does_not_hide_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _split_project(tmp_path)
+    path = paths.model_config("XX")
+    payload = json.loads(path.read_text())
+    payload["groups"][0]["inspection_threshold_by_split"] = {"0": 0.7}
+    payload["group_detail"]["0"]["optuna_settings"]["threshold"]["value"] = 0.6
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="threshold"):
+        _run(
+            monkeypatch,
+            paths,
+            predictor_factory=lambda *_a, **_kw: pytest.fail("predictor started"),
+        )
 
 
 def test_group_req_019_s01(tmp_path: Path) -> None:

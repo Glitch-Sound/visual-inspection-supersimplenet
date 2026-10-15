@@ -210,6 +210,36 @@ def test_test_fingerprint_excludes_training_settings(tmp_path: Path) -> None:
     assert preparation_fingerprint(load_config(tmp_path, "XX")) == initial
 
 
+@pytest.mark.parametrize(
+    ("unit", "minimum"),
+    [("unknown", 2), ("split", None), ("split", 0), ("split", True), ("split", 1.5)],
+)
+def test_split_threshold_settings_rejected(
+    tmp_path: Path, unit: object, minimum: object
+) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    threshold = payload["group_detail"]["0"]["optuna_settings"]["threshold"]
+    threshold.update(unit=unit, min_score_count=minimum)
+    threshold["method"] = "out_of_fold_percentile"
+    threshold["folds"] = 2
+    _save(path, payload)
+    before = path.read_bytes()
+    with pytest.raises(ValidationError):
+        load_config(tmp_path, "XX")
+    assert path.read_bytes() == before
+
+
+def test_split_threshold_requires_oof(tmp_path: Path) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    threshold = payload["group_detail"]["0"]["optuna_settings"]["threshold"]
+    threshold.update(unit="split", min_score_count=2)
+    _save(path, payload)
+    with pytest.raises(ValidationError, match="out_of_fold_percentile"):
+        load_config(tmp_path, "XX")
+
+
 def test_group_artifact_paths_reject_symlink_alias(tmp_path: Path) -> None:
     _, paths = build_project(tmp_path)
     real = tmp_path / "other-study"

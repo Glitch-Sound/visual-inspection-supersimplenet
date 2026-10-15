@@ -312,6 +312,32 @@ class SourceScore(ContractModel):
         return _safe_filename(value)
 
 
+class SplitThreshold(ContractModel):
+    value: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    source: Literal["calculated", "group_fallback"]
+    score_count: StrictInt = Field(ge=0)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def finite_numeric_value(cls, value: object) -> object:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError("split threshold value must be a finite JSON number")
+        return value
+
+
+ThresholdSource = Literal[
+    "split_calculated",
+    "group_fallback",
+    "manual_override",
+    "group_calculated",
+    "group_manual_override",
+]
+
+
 class BestTrialResult(ContractModel):
     model: str
     group: Annotated[StrictInt, Field(ge=0)]
@@ -336,6 +362,21 @@ class BestTrialResult(ContractModel):
     )
     threshold_percentile: float | None = Field(default=None, gt=0.0, le=100.0)
     threshold_margin: float = Field(default=0.0, ge=0.0, le=1.0, allow_inf_nan=False)
+    threshold_unit: Literal["group", "split"] = "group"
+    min_score_count: StrictInt | None = Field(default=None, ge=1)
+    split_thresholds: dict[str, SplitThreshold] = Field(default_factory=dict)
+    threshold_warnings: list[str] = Field(default_factory=list)
+
+    @field_validator("split_thresholds", mode="before")
+    @classmethod
+    def validate_split_keys(cls, value: object) -> object:
+        if not isinstance(value, dict) or any(
+            not isinstance(key, str) or not re.fullmatch(r"0|[1-9][0-9]*", key)
+            for key in value
+        ):
+            raise ValueError("split_thresholds keys must be canonical split ids")
+        return value
+
     cross_validation: list[FoldRecord] = Field(default_factory=list)
     score_by_source: list[SourceScore] = Field(default_factory=list)
     final_train_sources: list[str] = Field(default_factory=list)
@@ -362,6 +403,37 @@ class BestTrialResult(ContractModel):
     def datasets_are_disjoint(self) -> BestTrialResult:
         if len(self.range_ids) != len(set(self.range_ids)):
             raise ValueError("best_trial range_ids must be unique")
+        if self.threshold_unit == "split":
+            if (
+                self.min_score_count is None
+                or self.threshold_method != "out_of_fold_percentile"
+            ):
+                raise ValueError(
+                    "split threshold requires out_of_fold_percentile and min_score_count"
+                )
+            if set(self.split_thresholds) != {str(item) for item in self.range_ids}:
+                raise ValueError("split thresholds must cover range_ids")
+            for item in self.split_thresholds.values():
+                if (
+                    item.source == "calculated"
+                    and item.score_count < self.min_score_count
+                ):
+                    raise ValueError(
+                        "calculated split threshold has insufficient score_count"
+                    )
+                if (
+                    item.source == "group_fallback"
+                    and item.score_count >= self.min_score_count
+                ):
+                    raise ValueError(
+                        "group fallback must have insufficient score_count"
+                    )
+                if item.source == "group_fallback" and not math.isclose(
+                    item.value, self.threshold
+                ):
+                    raise ValueError("group fallback must match group threshold")
+        elif self.min_score_count is not None or self.split_thresholds:
+            raise ValueError("group threshold must not have split settings")
         if set(self.train_sources) & set(self.validation_sources):
             raise ValueError("train_sources and validation_sources must be disjoint")
         if self.threshold_method == "out_of_fold_percentile":
@@ -402,6 +474,8 @@ class SplitResult(ContractModel):
     status: ResultStatus
     result_image: str | None = None
     error: str | None = None
+    threshold: float | None = Field(default=None, ge=0.0, le=1.0, allow_inf_nan=False)
+    threshold_source: ThresholdSource | None = None
 
     @field_validator("image")
     @classmethod

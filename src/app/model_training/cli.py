@@ -237,6 +237,7 @@ def _train_command(
                     final_train_sources=final_sources,
                     cross_validation=fold_records,
                     score_by_source=score_records,
+                    record_warning=recorder.warnings.append,
                 )
                 if not finish_restart(paths, restart_backup):
                     show_stage(f"グループ {selected.id}: 旧探索履歴の整理を後で再試行")

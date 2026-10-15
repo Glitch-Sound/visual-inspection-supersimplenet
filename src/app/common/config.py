@@ -20,7 +20,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.common.contracts import HeatmapRange
+from app.common.contracts import HeatmapRange, SplitThreshold
 from app.common.paths import ProjectPaths, validate_model_name
 
 Probability = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -103,9 +103,33 @@ class ThresholdSettings(StrictModel):
     folds: StrictInt | Literal["leave_one_out"] | None = None
     score_source: Literal["supersimplenet.pred_score"] = "supersimplenet.pred_score"
     value: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
+    unit: Literal["group", "split"] = "group"
+    min_score_count: StrictInt | None = Field(default=None, ge=1)
+    split_values: dict[str, SplitThreshold] = Field(default_factory=dict)
+
+    @field_validator("split_values", mode="before")
+    @classmethod
+    def validate_split_keys(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            raise ValueError("split_values must be an object")
+        if any(
+            not isinstance(key, str) or not re.fullmatch(r"0|[1-9][0-9]*", key)
+            for key in value
+        ):
+            raise ValueError("split_values keys must be canonical split ids")
+        return value
 
     @model_validator(mode="after")
     def validate_method_settings(self) -> ThresholdSettings:
+        if self.unit == "split":
+            if self.method != "out_of_fold_percentile" or self.min_score_count is None:
+                raise ValueError(
+                    "split threshold requires out_of_fold_percentile and min_score_count"
+                )
+        elif self.min_score_count is not None or self.split_values:
+            raise ValueError(
+                "group threshold does not use min_score_count or split_values"
+            )
         if self.method == "out_of_fold_percentile":
             if self.folds is None or (isinstance(self.folds, int) and self.folds < 2):
                 raise ValueError(
@@ -287,6 +311,9 @@ class GroupConfig(StrictModel):
     id: Annotated[StrictInt, Field(ge=0)]
     range_ids: list[Annotated[StrictInt, Field(ge=0, le=99)]] = Field(min_length=1)
     inspection_threshold: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
+    inspection_threshold_by_split: dict[
+        str, Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False)] | None
+    ] = Field(default_factory=dict)
     heatmap_range: HeatmapRange | None = None
     optuna_settings: OptunaSettings
     score: ScoreSettings
@@ -305,6 +332,26 @@ class GroupConfig(StrictModel):
             )
         return value
 
+    @field_validator("inspection_threshold_by_split", mode="before")
+    @classmethod
+    def validate_split_overrides(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            raise ValueError("inspection_threshold_by_split must be an object")
+        for key, item in value.items():
+            if not isinstance(key, str) or not re.fullmatch(r"0|[1-9][0-9]*", key):
+                raise ValueError(
+                    "inspection_threshold_by_split keys must be canonical split ids"
+                )
+            if item is not None and (
+                isinstance(item, bool)
+                or not isinstance(item, (int, float))
+                or not math.isfinite(item)
+            ):
+                raise ValueError(
+                    "inspection_threshold_by_split values must be finite numbers or null"
+                )
+        return value
+
     @model_validator(mode="after")
     def validate_group(self) -> GroupConfig:
         if len(self.range_ids) != len(set(self.range_ids)):
@@ -313,6 +360,26 @@ class GroupConfig(StrictModel):
             raise ValueError(
                 f"group {self.id} score.source must equal threshold.score_source"
             )
+        threshold = self.optuna_settings.threshold
+        valid_keys = {str(item) for item in self.range_ids}
+        if set(self.inspection_threshold_by_split) - valid_keys:
+            raise ValueError(
+                "inspection_threshold_by_split references unknown range ids"
+            )
+        if self.inspection_threshold_by_split and threshold.unit != "split":
+            raise ValueError(
+                "inspection_threshold_by_split requires split threshold unit"
+            )
+        if threshold.split_values and set(threshold.split_values) != valid_keys:
+            raise ValueError("split_values must cover group range_ids")
+        if threshold.unit == "split" and threshold.split_values:
+            for item in threshold.split_values.values():
+                if (
+                    item.source == "group_fallback"
+                    and threshold.value is not None
+                    and not math.isclose(item.value, threshold.value)
+                ):
+                    raise ValueError("group fallback must match group threshold")
         return self
 
 
@@ -339,6 +406,7 @@ class ModelConfig(StrictModel):
             "id",
             "range_ids",
             "inspection_threshold",
+            "inspection_threshold_by_split",
             "heatmap_range",
         }
         detail_fields = {"optuna_settings", "score", "augmentation"}
@@ -540,7 +608,12 @@ def preparation_fingerprint(
 
 
 def write_threshold(
-    path: Path, value: float, *, group: int, destination: Path | None = None
+    path: Path,
+    value: float,
+    *,
+    group: int,
+    split_values: dict[str, SplitThreshold] | None = None,
+    destination: Path | None = None,
 ) -> None:
     """Write a threshold-updated configuration without mutating other fields."""
 
@@ -548,7 +621,12 @@ def write_threshold(
     if group not in {item.id for item in validated.groups}:
         raise ValueError(f"unknown group {group} in {path}")
     payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["group_detail"][str(group)]["optuna_settings"]["threshold"]["value"] = value
+    threshold = payload["group_detail"][str(group)]["optuna_settings"]["threshold"]
+    threshold["value"] = value
+    if split_values is not None:
+        threshold["split_values"] = {
+            key: item.model_dump() for key, item in split_values.items()
+        }
     target = destination or path
     temporary = target.with_suffix(target.suffix + ".tmp")
     try:

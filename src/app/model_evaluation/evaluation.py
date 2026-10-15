@@ -20,6 +20,8 @@ from app.common.contracts import (
     RunMetadata,
     ScoreContract,
     SplitResult,
+    SplitThreshold,
+    ThresholdSource,
     load_preparation_manifest,
 )
 from app.common.image_io import ImageArray, read_image, write_image
@@ -61,7 +63,47 @@ def validate_score_contract(
         or not np.isclose(checkpoint_threshold, threshold)
     ):
         raise ValueError("checkpoint threshold does not match model config")
+    settings = group.optuna_settings.threshold
+    if settings.unit == "split":
+        if checkpoint_metadata.get("threshold_unit") != "split":
+            raise ValueError("checkpoint threshold unit does not match model config")
+        if checkpoint_metadata.get("min_score_count") != settings.min_score_count:
+            raise ValueError("checkpoint min_score_count does not match model config")
+        _validate_split_thresholds(
+            group,
+            checkpoint_metadata.get("split_thresholds"),
+            label="checkpoint",
+        )
+    elif checkpoint_metadata.get("threshold_unit", "group") != "group":
+        raise ValueError("checkpoint threshold unit does not match model config")
     return threshold
+
+
+def _validate_split_thresholds(
+    group: GroupConfig, candidate: object, *, label: str
+) -> None:
+    settings = group.optuna_settings.threshold
+    expected = settings.split_values
+    if set(expected) != {str(item) for item in group.range_ids}:
+        raise ValueError("model config split thresholds must cover range_ids")
+    if not isinstance(candidate, dict) or set(candidate) != set(expected):
+        raise ValueError(f"{label} split threshold ids do not match model config")
+    for key, value in candidate.items():
+        try:
+            actual = SplitThreshold.model_validate(value)
+        except ValueError as error:
+            raise ValueError(
+                f"{label} split threshold {key} is invalid: {error}"
+            ) from error
+        planned = expected[key]
+        if (
+            not np.isclose(actual.value, planned.value)
+            or actual.source != planned.source
+            or actual.score_count != planned.score_count
+        ):
+            raise ValueError(
+                f"{label} split threshold {key} does not match model config"
+            )
 
 
 def effective_threshold(group: GroupConfig, provisional_threshold: float) -> float:
@@ -105,6 +147,16 @@ def validate_best_trial_contract(
         raise ValueError("best_trial threshold percentile does not match model config")
     if not np.isclose(best.threshold_margin, settings.margin):
         raise ValueError("best_trial threshold margin does not match model config")
+    if best.threshold_unit != settings.unit:
+        raise ValueError("best_trial threshold unit does not match model config")
+    if settings.unit == "split":
+        if best.min_score_count != settings.min_score_count:
+            raise ValueError("best_trial min_score_count does not match model config")
+        _validate_split_thresholds(
+            group,
+            {key: item.model_dump() for key, item in best.split_thresholds.items()},
+            label="best_trial",
+        )
     if settings.method == "out_of_fold_percentile":
         expected_folds = (
             len(best.final_train_sources)
@@ -160,6 +212,7 @@ def evaluate_split(
     threshold: float,
     heatmap_range: HeatmapRange,
     result_path: Path,
+    threshold_source: ThresholdSource = "group_calculated",
 ) -> SplitResult:
     status = (
         ResultStatus.ANOMALY if prediction.score >= threshold else ResultStatus.NORMAL
@@ -181,6 +234,8 @@ def evaluate_split(
         score=prediction.score,
         status=status,
         result_image=result_path.name,
+        threshold=threshold,
+        threshold_source=threshold_source,
     )
 
 
@@ -206,7 +261,12 @@ def evaluate_model(
         else checkpoint_metadata
     )
     provisional_threshold = validate_score_contract(config, group, metadata)
-    threshold = effective_threshold(group, provisional_threshold)
+    settings = group.optuna_settings.threshold
+    threshold = (
+        effective_threshold(group, provisional_threshold)
+        if settings.unit == "group"
+        else provisional_threshold
+    )
     if on_threshold_selected is not None:
         on_threshold_selected(threshold)
     prepared_dir = paths.prepared_test(config.model)
@@ -233,6 +293,28 @@ def evaluate_model(
         for split in source.splits:
             if split.split_id not in required_ids:
                 continue
+            threshold_source: ThresholdSource
+            if settings.unit == "split":
+                key = str(split.split_id)
+                override = group.inspection_threshold_by_split.get(key)
+                if override is not None:
+                    applied_threshold = override
+                    threshold_source = "manual_override"
+                else:
+                    learned = settings.split_values[key]
+                    applied_threshold = learned.value
+                    threshold_source = (
+                        "split_calculated"
+                        if learned.source == "calculated"
+                        else "group_fallback"
+                    )
+            else:
+                applied_threshold = threshold
+                threshold_source = (
+                    "group_manual_override"
+                    if group.inspection_threshold is not None
+                    else "group_calculated"
+                )
             image_path = prepared_dir / split.image
             result_name = f"{split.image}_result.png"
             try:
@@ -249,6 +331,8 @@ def evaluate_model(
                         score=None,
                         status=ResultStatus.ERROR,
                         error=message,
+                        threshold=applied_threshold,
+                        threshold_source=threshold_source,
                     )
                 )
             else:
@@ -258,7 +342,8 @@ def evaluate_model(
                         image=image,
                         prediction=prediction,
                         split_id=split.split_id,
-                        threshold=threshold,
+                        threshold=applied_threshold,
+                        threshold_source=threshold_source,
                         heatmap_range=heatmap_range,
                         result_path=output_dir / result_name,
                     )

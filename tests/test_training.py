@@ -46,8 +46,22 @@ def _aligned(
     return AlignedImage(image, 20, 0.8)
 
 
-def _project(root: Path, *, two: bool = False):
-    config, paths = build_project(root)
+def _project(
+    root: Path,
+    *,
+    two: bool = False,
+    two_splits: bool = False,
+    missing_second: bool = False,
+):
+    ranges = (
+        [{"id": 0, "x": 0, "y": 0}, {"id": 1, "x": 8, "y": 0}] if two_splits else None
+    )
+    blacklist = (
+        [{"image": name, "id": [1]} for name in ("base.png", "a.png", "b.png", "c.png")]
+        if missing_second
+        else None
+    )
+    config, paths = build_project(root, ranges=ranges, blacklist=blacklist)
     if two:
         path = paths.model_config("XX")
         payload = json.loads(path.read_text())
@@ -193,8 +207,16 @@ def _synthetic_study(config, paths, values: list[tuple[float, float]]):
     return selected, split, study, outcomes
 
 
-def _oof_project(root: Path, *, two: bool = False):
-    _, paths = _project(root, two=two)
+def _oof_project(
+    root: Path,
+    *,
+    two: bool = False,
+    two_splits: bool = False,
+    missing_second: bool = False,
+):
+    _, paths = _project(
+        root, two=two, two_splits=two_splits, missing_second=missing_second
+    )
     payload = json.loads(paths.model_config("XX").read_text())
     for detail in payload["group_detail"].values():
         threshold = detail["optuna_settings"]["threshold"]
@@ -204,6 +226,107 @@ def _oof_project(root: Path, *, two: bool = False):
         detail["optuna_settings"]["execution"]["trials"] = 1
     paths.model_config("XX").write_text(json.dumps(payload))
     return load_config(root, "XX"), paths
+
+
+def _split_oof_project(root: Path, *, minimum: int, missing_second: bool = False):
+    _, paths = _oof_project(root, two_splits=True, missing_second=missing_second)
+    payload = json.loads(paths.model_config("XX").read_text())
+    payload["group_detail"]["0"]["optuna_settings"]["threshold"].update(
+        unit="split", min_score_count=minimum
+    )
+    paths.model_config("XX").write_text(json.dumps(payload))
+    return load_config(root, "XX"), paths
+
+
+def test_split_threshold_calculation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _split_oof_project(tmp_path, minimum=4)
+    _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    best = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    assert set(best.split_thresholds) == {"0", "1"}
+    for split_id, item in best.split_thresholds.items():
+        scores = [
+            score.score
+            for score in best.score_by_source
+            if score.split_image.endswith(f"_{int(split_id):02d}.png")
+        ]
+        assert item.score_count == len(scores) == 4
+        assert item.source == "calculated"
+        assert item.value == pytest.approx(min(1.0, np.percentile(scores, 50) + 0.05))
+    assert best.threshold == pytest.approx(
+        min(
+            1.0, np.percentile([item.score for item in best.score_by_source], 50) + 0.05
+        )
+    )
+    config = load_config(tmp_path, "XX")
+    assert (
+        config.part.groups[0].optuna_settings.threshold.split_values
+        == best.split_thresholds
+    )
+    metadata = torch.load(paths.checkpoint("XX", 0), weights_only=False)[
+        "visual_inspection"
+    ]
+    assert metadata["split_thresholds"] == {
+        key: item.model_dump() for key, item in best.split_thresholds.items()
+    }
+
+
+def test_split_threshold_fallback_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _split_oof_project(tmp_path, minimum=3, missing_second=True)
+    _fake_oof_training(monkeypatch)
+    _, recorder = _run_cli(monkeypatch, paths, group=0)
+    best = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    assert len(best.threshold_warnings) == 1
+    assert recorder.warnings == best.threshold_warnings
+    assert best.split_thresholds["0"].source == "calculated"
+    fallback = best.split_thresholds["1"]
+    assert fallback.value == best.threshold
+    assert fallback.source == "group_fallback"
+    assert fallback.score_count == 0
+    assert "split 1" in best.threshold_warnings[0]
+    assert "score count 0" in best.threshold_warnings[0]
+    assert "min_score_count 3" in best.threshold_warnings[0]
+
+
+def test_group_threshold_default_compatibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _oof_project(tmp_path)
+    _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    best = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    assert best.threshold_unit == "group"
+    assert best.split_thresholds == {}
+    assert best.threshold == pytest.approx(
+        min(
+            1.0, np.percentile([item.score for item in best.score_by_source], 50) + 0.05
+        )
+    )
+
+
+def test_split_threshold_count_change_requires_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _split_oof_project(tmp_path, minimum=3)
+    _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    path = paths.model_config("XX")
+    payload = json.loads(path.read_text())
+    payload["group_detail"]["0"]["optuna_settings"]["threshold"]["min_score_count"] = 5
+    path.write_text(json.dumps(payload))
+    load_config(tmp_path, "XX")
+    with pytest.raises(ValueError, match="train --restart"):
+        _run_cli(monkeypatch, paths, group=0)
+    _run_cli(monkeypatch, paths, group=0, restart=True)
+    best = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    assert best.min_score_count == 5
+    assert all(
+        item.source == "group_fallback" for item in best.split_thresholds.values()
+    )
 
 
 def _fake_oof_training(monkeypatch: pytest.MonkeyPatch):

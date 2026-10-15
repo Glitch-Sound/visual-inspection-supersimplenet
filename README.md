@@ -31,6 +31,9 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | 異常スコア | SuperSimpleNetの`pred_score`。校正済み確率ではない |
 | 異常マップ | 分割画像の画素ごとの`anomaly_map`。ヒートマップ表示に使う |
 | 暫定閾値 | グループで選んだ方式の異常スコアから算出する、初期評価用の判定境界 |
+| 閾値単位 / `unit` | グループ内の全分割に同じ閾値を使う `group`、または分割ID別の閾値を使う `split` |
+| 最少スコア件数 / `min_score_count` | 分割ID別の暫定閾値を算出するために必要な学習対象外スコアの件数 |
+| グループ代替 | 分割IDのスコア件数が不足した時、学習で算出したグループ暫定閾値を使うこと |
 | 学習対象外スコア / `out_of_fold` | 元画像単位の交差検証で、その分割の学習に使わなかった画像から得た異常スコア |
 | 全件再学習 | 探索で選んだ条件を使い、ブラックリスト除外後の全正常元画像で最終モデルを学習する段階 |
 | 擬似欠陥 | 正常な検証分割画像に合成する傷、シミ、斑点、異物。学習入力には使わない |
@@ -77,12 +80,16 @@ npm ci
 | `groups` | 必須の非空配列。グループIDは型番内で一意な非負整数。対象分割と検査条件を置く |
 | `groups[].range_ids` | 非空・重複なしの既存分割ID。同じ分割IDを複数グループで参照できる |
 | `groups[].inspection_threshold` | `null`なら暫定閾値。0以上1以下の数値なら検査で使用 |
+| `groups[].inspection_threshold_by_split` | `split` 単位で使う分割ID別の手動閾値。通常の10進文字列のIDをキーにし、値は0以上1以下の数値または `null` |
 | `groups[].heatmap_range` | 検査時に必須の有限な下限・上限。`min < max` |
 | `group_detail` | グループIDの通常の10進文字列をキーにする詳細設定。`groups`のIDと一対一に対応 |
 | `group_detail["<id>"].optuna_settings` | グループ別の探索、学習・検証分離、暫定閾値 |
 | `group_detail["<id>"].optuna_settings.objective` | `normal_percentile` または `synthetic_auroc`。省略時は従来の `normal_percentile` |
 | `group_detail["<id>"].optuna_settings.synthetic_validation` | 擬似欠陥の `types`、`intensity`、`seed`。種類は `scratch`、`stain`、`spot`、`foreign_patch` |
 | `group_detail["<id>"].optuna_settings.threshold` | `training_percentile` または `out_of_fold_percentile`。新方式では `percentile`、絶対加算値の `margin`、分割数または `leave_one_out` の `folds` を指定 |
+| `group_detail["<id>"].optuna_settings.threshold.unit` | `group` または `split`。省略時は `group` |
+| `group_detail["<id>"].optuna_settings.threshold.min_score_count` | `split` 単位で必須の1以上の整数。件数未満の分割はグループ暫定閾値を使用 |
+| `group_detail["<id>"].optuna_settings.threshold.split_values` | 学習が書き戻す分割ID別の値、算出・代替の由来、スコア件数 |
 | `group_detail["<id>"].score` | `supersimplenet.pred_score`と無効化したPostProcessor |
 | `group_detail["<id>"].augmentation` | 学習入力だけに適用する拡張条件 |
 
@@ -92,11 +99,20 @@ npm ci
 旧形式の設定や、両領域で項目が重複する設定は入力不備として拒否される。<br />
 暫定閾値の`group_detail["<id>"].optuna_settings.threshold.value`は学習完了時に対象グループだけ更新される。<br />
 `out_of_fold_percentile`では各元画像を一度ずつ検証に回し、学習対象外の全分割画像の`pred_score`の設定済みパーセンタイルに`margin`を加え、1を上限として暫定閾値を決める。<br />
+分割IDごとに判定したい場合は `unit` を `split` にして `min_score_count` を指定する。<br />
+この単位では `out_of_fold_percentile` が必須で、各分割IDの学習対象外スコアから同じパーセンタイルとマージンで閾値を算出する。<br />
+件数が不足する分割IDにはグループ暫定閾値を代替し、分割ID・実件数・必要件数を警告と最良試行結果に記録する。<br />
+設定例では `groups[].inspection_threshold_by_split` に `{"1": 0.65}` を置くと、分割ID 1だけを検査時に手動上書きする。<br />
+分割ID単位ではグループの `inspection_threshold` は判定に使わず、分割ID別の手動値を最優先する。<br />
+検査結果JSONの各 `splits` 要素には、適用した `threshold` と `threshold_source` を記録する。<br />
+由来は `split_calculated`、`group_fallback`、`manual_override`、またはグループ単位の `group_calculated`、`group_manual_override` である。<br />
 `folds`には2以上の分割数、または元画像を1枚ずつ検証する`leave_one_out`を指定する。<br />
 `training_percentile`では従来どおり探索時の学習集合のスコアから閾値を決める。<br />
 どちらの方式でも探索は従来の1分割で行い、最良条件で全正常データ(ブラックリスト除外後)を再学習したcheckpointを検査に使う。<br />
 新方式では探索後に分割数分と全件再学習1回、従来方式では全件再学習1回の学習が増える。<br />
 方式や分割条件を変更したグループは`train --restart`で再学習し、検査結果を再生成する。<br />
+閾値単位または最少件数を変更したグループも `train --restart` で再学習し、`test` で結果を再生成する。<br />
+`split` から `group` に戻す場合は、学習が書き戻した `min_score_count` と `split_values`、不要になった `inspection_threshold_by_split` を設定から削除してから再学習する。<br />
 checkpointと最良試行にも同じ値を保存するため、暫定閾値だけを手動で変更しない。<br />
 切り出し位置、サイズ、縮小倍率、位置合わせなどを変更したら、該当する`train-pre`または`test-pre`を再実行する。<br />
 準備指紋が一致しない入力は学習・検査の前に拒否される。
@@ -262,6 +278,12 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| per-split-threshold | AC-001 | 未検証 | タスク5.2: Ubuntu 24.04 LTS・Windows 11の実画像でグループ単位の閾値と判定の従来互換を確認する。 |
+| per-split-threshold | AC-002 | 未検証 | タスク5.2: 両OSの実スコアから分割ID別の算出値と件数不足時のグループ代替・警告を照合する。 |
+| per-split-threshold | AC-003 | 未検証 | タスク5.2: 両OSの実画像で分割ID別の手動上書きと学習由来の暫定値が変わらないことを確認する。 |
+| per-split-threshold | AC-004 | 未検証 | タスク5.2: 両OSの結果JSONから各分割の適用閾値・由来と元画像の異常優先集約を読み戻す。 |
+| per-split-threshold | AC-005 | 未検証 | タスク5.3: 対象環境で不正設定・成果物不一致の拒否理由と旧成果物・結果の保持を確認する。 |
+| per-split-threshold | AC-006 | 未検証 | タスク5.2: Ubuntu 24.04 LTS・Windows 11の実画像と利用可能なCPU/GPUで学習・検査し、保存値とJSONを照合する。 |
 | out-of-fold-threshold-and-refit | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11で指定分割数と1枚ずつ方式の元画像非重複、全件被覆、結果読戻しを確認する。 |
 | out-of-fold-threshold-and-refit | AC-002 | 未検証 | タスク4.2: 両OSで実画像の学習対象外スコア、パーセンタイル、マージン、元画像別記録を再計算して確認する。 |
 | out-of-fold-threshold-and-refit | AC-003 | 未検証 | タスク4.2: 両OSで全正常データによる最終checkpointと検査時の読戻しを確認する。 |
