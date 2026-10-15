@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -84,15 +85,20 @@ def _train_pre_command(
 
 def _test_pre_command(
     model: str = typer.Option(..., "--model", help="処理対象の型番"),
+    group: Annotated[
+        int | None, typer.Option("--group", help="処理対象のグループID")
+    ] = None,
 ) -> None:
     """試験画像を位置合わせして分割する。"""
 
     def action(paths: ProjectPaths, recorder: RunRecorder) -> str:
         show_stage("設定読込と試験元画像の列挙・位置合わせ・切り出し")
         config = load_config(paths.root, model)
-        recorder.groups = [item.id for item in config.part.select_groups()]
+        recorder.groups = [item.id for item in config.part.select_groups(group)]
         with PreparationProgress() as progress:
-            manifest = prepare_testing(config, paths, on_progress=progress.update)
+            manifest = prepare_testing(
+                config, paths, group=group, on_progress=progress.update
+            )
         recorder.warnings.extend(
             alignment_warning(
                 source.source_image,

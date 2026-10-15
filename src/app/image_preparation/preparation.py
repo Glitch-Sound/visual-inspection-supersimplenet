@@ -20,6 +20,7 @@ from app.common.contracts import (
     PreparationManifest,
     PreparedSource,
     PreparedSplit,
+    load_preparation_manifest,
 )
 from app.common.image_io import ImageArray, read_image, write_image
 from app.common.paths import ProjectPaths
@@ -248,7 +249,22 @@ def prepare_testing(
     *,
     aligner: Callable[..., AlignedImage] = align_orb,
     on_progress: ProgressCallback | None = None,
+    group: int | None = None,
 ) -> PreparationManifest:
+    selected = config.part.select_groups(group)[0] if group is not None else None
+    selected_ranges = (
+        config.part.ranges_for(selected) if selected is not None else config.part.ranges
+    )
+    selected_ids = {item.id for item in selected_ranges}
+    target = paths.prepared_test(config.model)
+    previous: PreparationManifest | None = None
+    if selected is not None and target.exists():
+        previous = load_preparation_manifest(
+            target,
+            model=config.model,
+            allowed_split_ids={item.id for item in config.part.ranges},
+            fingerprint=preparation_fingerprint(config),
+        )
     source_dir = paths.original_test(config.model)
     images = list_images(source_dir)
     if on_progress is not None:
@@ -258,11 +274,31 @@ def prepare_testing(
         config.image_resize,
     )
     manifest: PreparationManifest | None = None
+    previous_sources = (
+        {source.source_image: source for source in previous.sources}
+        if previous is not None
+        else {}
+    )
 
     def populate(stage: Path) -> None:
         nonlocal manifest
         sources: list[PreparedSource] = []
         for source_path in images:
+            old_source = previous_sources.get(source_path.name)
+            retained = (
+                [
+                    split
+                    for split in old_source.splits
+                    if split.split_id not in selected_ids
+                ]
+                if old_source is not None
+                else []
+            )
+            for split in retained:
+                old_image = target / split.image
+                if not old_image.is_file():
+                    raise ValueError(f"prepared split image not found: {old_image}")
+                shutil.copy2(old_image, stage / split.image)
             source = resize_image(read_image(source_path), config.image_resize)
             try:
                 aligned = aligner(source, reference, config.part.alignment)
@@ -277,13 +313,14 @@ def prepare_testing(
                             matches=error.matches,
                             inlier_ratio=error.inlier_ratio,
                         ),
+                        splits=retained,
                     )
                 )
                 if on_progress is not None:
                     on_progress(len(sources), len(images))
                 continue
-            splits: list[PreparedSplit] = []
-            for crop in config.part.ranges:
+            splits: list[PreparedSplit] = list(retained)
+            for crop in selected_ranges:
                 split = _prepared_crop(
                     aligned.image,
                     crop,
@@ -322,7 +359,7 @@ def prepare_testing(
         )
         manifest.write_json(stage / "manifest.json")
 
-    _atomic_replace_directory(paths.prepared_test(config.model), populate)
+    _atomic_replace_directory(target, populate)
     if manifest is None:  # pragma: no cover
         raise RuntimeError("testing manifest was not created")
     return manifest

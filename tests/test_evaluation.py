@@ -135,6 +135,76 @@ def test_group_req_023_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert set(_current(paths)) == {1}
 
 
+def test_req_003_s07_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, paths = project(tmp_path, two=True)
+    retained = (paths.prepared_test("XX") / "sample_01.png").read_bytes()
+    prepare_testing(config, paths, group=1, aligner=aligned)
+    _run(monkeypatch, paths, group=1, score=0.1)
+    result_dir = paths.results("XX") / _current(paths)[1]
+    result = json.loads((result_dir / "sample.png.json").read_text())
+    assert result["overall_status"] == "normal"
+    assert [split["split_id"] for split in result["splits"]] == [0]
+    assert (paths.prepared_test("XX") / "sample_01.png").read_bytes() == retained
+
+
+def test_req_003_s08_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, paths = project(tmp_path, two=True, prepare=False)
+    prepare_testing(config, paths, group=1, aligner=aligned)
+    _run(monkeypatch, paths, group=1, score=0.1)
+    result_dir = paths.results("XX") / _current(paths)[1]
+    result = json.loads((result_dir / "sample.png.json").read_text())
+    assert result["overall_status"] == "normal"
+    assert [split["split_id"] for split in result["splits"]] == [0]
+    assert not (paths.prepared_test("XX") / "sample_01.png").exists()
+    prepare_testing(config, paths, group=0, aligner=aligned)
+    _run(monkeypatch, paths, group=None, score=0.1)
+    assert set(_current(paths)) == {0, 1}
+    for result_dir in _current(paths).values():
+        result = json.loads(
+            (paths.results("XX") / result_dir / "sample.png.json").read_text()
+        )
+        assert result["overall_status"] == "normal"
+
+
+def test_req_011_s05_retained_splits_undetermined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, paths = project(tmp_path, two=True, disjoint=True)
+    prepared = paths.prepared_test("XX")
+    retained = (prepared / "sample_01.png").read_bytes()
+
+    def fail(_image, _reference, _settings):
+        raise AlignmentError("too few matches")
+
+    prepare_testing(config, paths, group=1, aligner=fail)
+    assert (prepared / "sample_01.png").read_bytes() == retained
+    calls = []
+
+    class TrackingPredictor(FakePredictor):
+        def __call__(self, image):
+            calls.append(image)
+            return super().__call__(image)
+
+    _run(
+        monkeypatch,
+        paths,
+        group=0,
+        predictor_factory=lambda *_args, **_kwargs: TrackingPredictor(score=0.1),
+    )
+    assert not calls
+    result_dir = paths.results("XX") / _current(paths)[0]
+    result = json.loads((result_dir / "sample.png.json").read_text())
+    assert result["overall_status"] == "undetermined"
+    assert result["splits"] == []
+    assert result["alignment"]["recapture_required"] is True
+    assert result["alignment"]["reason"] == "too few matches"
+    assert result["next_action"] is not None
+
+
 def test_group_req_023_s04(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _, paths = project(tmp_path)
     with pytest.raises(ValueError, match="available groups"):

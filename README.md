@@ -201,14 +201,22 @@ uv run --locked test --model XX
 
 `check`は全分割と各グループの確認画像を作る。<br />
 `train-pre`と`train`は省略時に全グループをID昇順で処理する。<br />
-`test-pre`は常に全分割を一度準備し、`test`は省略時に全グループを検査する。<br />
+`test-pre`は省略時に全分割を一度準備し、`test`は省略時に全グループを検査する。<br />
 単独グループを操作する場合は次のように指定する。
 
 ```bash
 uv run --locked train-pre --model XX --group 1
 uv run --locked train --model XX --group 1
+uv run --locked test-pre --model XX --group 1
 uv run --locked test --model XX --group 1
 ```
+
+`test-pre --group`は指定グループが参照する分割だけを再生成し、別グループだけが参照する既存分割を保持する。<br />
+複数グループで共有する分割は今回の結果に更新される。<br />
+単独準備で元画像の位置合わせに失敗した場合、他グループの旧分割画像は保持されるが、その元画像の検査では使用せず、未判定と再撮影要否を記録する。<br />
+初回に単独グループを準備した場合、他グループの分割はまだ存在しないため、全件検査の前に残りのグループも準備するか、`test-pre --model XX`で全分割を準備する。<br />
+準備指紋が既存結果と一致しない場合、単独準備は既存結果を保持して拒否するので、全件`test-pre`で作り直す。<br />
+元画像や型番共通の準備条件を変更した場合も、全件`test-pre`で分割を揃える。
 
 学習探索履歴とcheckpointを対象グループで作り直す場合は`train --restart`を使う。<br />
 探索目的、擬似欠陥条件、評価用seedを変えた場合は、異なる条件の試行を混ぜないよう対象グループで`train --restart`を使う。<br />
@@ -410,6 +418,9 @@ npx --no-install openspec update
 | restore-tv-backbone-and-improve-output | AC-002 | 未検証 | タスク5.2: 対象の全型番で旧成果物を退避し、`train --restart`、閾値と表示範囲の確認、`test`を実施する。 |
 | restore-tv-backbone-and-improve-output | AC-003 | 未検証 | タスク5.3: 両OSの実画像で正常分割と、異常分割の左原画像・右ヒートマップ付き画像を結果JSONと照合する。 |
 | restore-tv-backbone-and-improve-output | AC-004 | 未検証 | タスク5.4: 両OSの端末・非端末で試行条件表、終了状態、再開時の件数、標準出力JSONと終了コードを確認する。 |
+| test-pre-group-selection | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11の実画像で単独グループ準備後の対象・共有分割更新、他分割保持、単独検査を確認する。 |
+| test-pre-group-selection | AC-002 | 未検証 | タスク3.4: 両OSで全件準備、不明グループ・画像読込み失敗時の拒否と既存成果物保持を確認する。 |
+| test-pre-group-selection | AC-003 | 未検証 | タスク3.5: 両OSでREADMEの手順に沿って全グループの分割を準備し、全件検査を確認する。 |
 
 `show-test-progress-and-update-backbone` のAC-003にある`racm_in1k`確認は当時の未検証事項であり、現在の運用には適用しない。<br />
 現在の学習は`wide_resnet50_2.tv_in1k`とグループ別の新形式設定から開始する。<br />

@@ -290,7 +290,8 @@ def evaluate_model(
             warning = source.alignment.reason or "alignment_failed"
             warnings.append(warning)
             record_warning(f"group {group.id} {source.source_image}: {warning}")
-        for split in source.splits:
+        available_splits = source.splits if source.alignment.status == "aligned" else []
+        for split in available_splits:
             if split.split_id not in required_ids:
                 continue
             threshold_source: ThresholdSource

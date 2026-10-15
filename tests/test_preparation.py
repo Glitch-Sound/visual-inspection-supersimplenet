@@ -438,6 +438,102 @@ def test_req_003_s04(tmp_path: Path) -> None:
     assert {path.name: path.read_bytes() for path in prepared.iterdir()} == before
 
 
+def test_req_003_s07(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from app.image_preparation import cli as preparation_cli
+
+    config, paths = _two_groups(tmp_path)
+    _train_images(paths)
+    write_test_image(paths.original_test("XX") / "sample.png", size=32)
+    prepare_testing(config, paths, aligner=aligned)
+    prepared = paths.prepared_test("XX")
+    other_before = (prepared / "sample_01.png").read_bytes()
+
+    def changed(image, _reference, _settings):
+        return AlignedImage(np.zeros_like(image), 20, 0.8, 0.0)
+
+    monkeypatch.setattr(
+        preparation_cli,
+        "prepare_testing",
+        lambda config, paths, **kwargs: prepare_testing(
+            config, paths, aligner=changed, **kwargs
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+    capsys.readouterr()
+    preparation_cli._test_pre_command(model="XX", group=1)
+    assert json.loads(capsys.readouterr().out)["groups"] == [1]
+    manifest = load_preparation_manifest(
+        prepared,
+        model="XX",
+        allowed_split_ids={0, 1},
+        fingerprint=preparation_fingerprint(config),
+    )
+    assert (prepared / "sample_01.png").read_bytes() == other_before
+    selected_image = cv2.imread(str(prepared / "sample_00.png"))
+    assert selected_image is not None
+    assert selected_image.max() == 0
+    assert {split.split_id for split in manifest.sources[0].splits} == {0, 1}
+
+
+def test_req_003_s08(tmp_path: Path) -> None:
+    config, paths = _two_groups(tmp_path)
+    _train_images(paths)
+    write_test_image(paths.original_test("XX") / "sample.png", size=32)
+    manifest = prepare_testing(config, paths, group=1, aligner=aligned)
+    assert {split.split_id for split in manifest.sources[0].splits} == {0}
+    assert (paths.prepared_test("XX") / "sample_00.png").is_file()
+    assert not (paths.prepared_test("XX") / "sample_01.png").exists()
+
+
+def test_req_003_s09(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.image_preparation import cli as preparation_cli
+
+    config, paths = _two_groups(tmp_path)
+    _train_images(paths)
+    write_test_image(paths.original_test("XX") / "sample.png", size=32)
+    prepare_testing(config, paths, aligner=aligned)
+    before = {
+        path.name: path.read_bytes() for path in paths.prepared_test("XX").iterdir()
+    }
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(typer.Exit) as error:
+        preparation_cli._test_pre_command(model="XX", group=99)
+    assert error.value.exit_code == 2
+    assert {
+        path.name: path.read_bytes() for path in paths.prepared_test("XX").iterdir()
+    } == before
+
+
+def test_req_003_s10(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from app.image_preparation import cli as preparation_cli
+
+    config, paths = _two_groups(tmp_path)
+    _train_images(paths)
+    write_test_image(paths.original_test("XX") / "sample.png", size=32)
+    prepare_testing(config, paths, aligner=aligned)
+    before = {
+        path.name: path.read_bytes() for path in paths.prepared_test("XX").iterdir()
+    }
+    (tmp_path / "config" / "setting.ini").write_text(
+        "[IMAGE]\nSIZE = 8\nRESIZE = 0.5\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    capsys.readouterr()
+    with pytest.raises(typer.Exit) as error:
+        preparation_cli._test_pre_command(model="XX", group=1)
+    captured = capsys.readouterr()
+    assert error.value.exit_code == 2
+    assert "fingerprint" in captured.err
+    assert json.loads(captured.out)["exit_code"] == 2
+    assert {
+        path.name: path.read_bytes() for path in paths.prepared_test("XX").iterdir()
+    } == before
+
+
 @pytest.mark.parametrize("command", ["train-pre", "test-pre"])
 def test_req_017_s01(
     tmp_path: Path,

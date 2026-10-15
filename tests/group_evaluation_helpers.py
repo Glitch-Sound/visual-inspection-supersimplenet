@@ -21,7 +21,15 @@ def aligned(
     return AlignedImage(image, 20, 0.8, 0.0)
 
 
-def project(root: Path, *, two: bool = False, three: bool = False, score: float = 0.5):
+def project(
+    root: Path,
+    *,
+    two: bool = False,
+    three: bool = False,
+    score: float = 0.5,
+    prepare: bool = True,
+    disjoint: bool = False,
+):
     ranges = [{"id": 0, "x": 0, "y": 0}, {"id": 1, "x": 8, "y": 0}]
     if three:
         ranges.append({"id": 2, "x": 16, "y": 0})
@@ -33,6 +41,8 @@ def project(root: Path, *, two: bool = False, three: bool = False, score: float 
     payload = json.loads(path.read_text())
     payload["groups"][0]["range_ids"] = [item["id"] for item in ranges]
     if two:
+        if disjoint:
+            payload["groups"][0]["range_ids"] = [1]
         second = json.loads(json.dumps(payload["groups"][0]))
         second["id"] = 1
         second["range_ids"] = [0]
@@ -49,7 +59,8 @@ def project(root: Path, *, two: bool = False, three: bool = False, score: float 
     for name in ("base.png", "a.png", "b.png"):
         write_test_image(paths.original_train("XX") / name, size=32)
     write_test_image(paths.original_test("XX") / "sample.png", size=32)
-    prepare_testing(config, paths, aligner=aligned)
+    if prepare:
+        prepare_testing(config, paths, aligner=aligned)
     for group in config.part.groups:
         make_model_artifacts(config, paths, group.id)
     return config, paths
