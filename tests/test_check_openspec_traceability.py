@@ -444,7 +444,7 @@ def test_complete_rejects_invalid_acceptance_evidence(
     elif fault == "unverified":
         text = text.replace("検証済み", "未検証")
     elif fault == "remaining":
-        text = text.replace("| なし |", "| Windows実機試験 |")
+        text = text.replace("| なし |", "| 実機試験 |")
     elif fault == "missing-evidence":
         text = text.replace("`report.md`", "`missing.md`")
     elif fault == "empty-evidence":

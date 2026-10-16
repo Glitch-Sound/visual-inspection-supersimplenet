@@ -51,7 +51,7 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 ## 動作環境
 
 - Python 3.13と`uv`
-- Ubuntu 24.04 LTSまたはWindows 11 (x86-64)
+- Ubuntu 24.04 LTS (x86-64)
 - CUDA対応GPUは任意。利用できない場合はCPUを使う
 - Node.js 22とnpm (OpenSpec操作と開発時の品質検査)
 
@@ -269,7 +269,7 @@ uv run --locked test --model XX --group 1
 
 ## 実機スモーク試験
 
-Ubuntu 24.04 LTSとWindows 11の対象実機で、CPUと利用可能なGPUによる全件・単独グループの実行と成果物読戻しを確認する。<br />
+Ubuntu 24.04 LTSの対象実機で、CPUと利用可能なGPUによる全件・単独グループの実行と成果物読戻しを確認する。<br />
 `--output`には実行ごとに異なるパスを指定する。
 
 ```bash
@@ -363,71 +363,74 @@ npx --no-install openspec update
 実機確認を延期している change と AC-ID を記録する。<br />
 検証後は状態と証跡を更新し、change の受け入れ検証記録にも結果を反映する。
 
+過去のarchiveにある受け入れ条件は当時の記録として保持し、現在の確認対象環境は本表に従う。
+
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
-| alinment-robustness | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTS・Windows 11の対象実機で旧版と既定設定の分割画素を比較する。 |
-| alinment-robustness | AC-002 | 未検証 | タスク4.2: 両OSの位置ズレ実画像で端画素複製により黒埋め由来の帯が消えることを確認する。 |
-| alinment-robustness | AC-003 | 未検証 | タスク4.3: 両OSの実画像で両変換の成功・失敗と不正設定時の旧成果物保持を確認する。 |
-| alinment-robustness | AC-004 | 未検証 | タスク4.4: 両OSの学習・試験実画像でRMSE、失敗画像のnull、分布を確認する。 |
-| alinment-robustness | AC-005 | 未検証 | タスク4.5: 両OSの対象型番でREADMEに沿った再準備・再学習・再検査と指紋不一致時の扱いを確認する。 |
-| alinment-robustness | AC-006 | 未検証 | タスク4.6: 両OSの実画像で現行・新設定の検査結果と所要時間を比較し、採用判断を記録する。 |
-| per-split-threshold | AC-001 | 未検証 | タスク5.2: Ubuntu 24.04 LTS・Windows 11の実画像でグループ単位の閾値と判定の従来互換を確認する。 |
-| per-split-threshold | AC-002 | 未検証 | タスク5.2: 両OSの実スコアから分割ID別の算出値と件数不足時のグループ代替・警告を照合する。 |
-| per-split-threshold | AC-003 | 未検証 | タスク5.2: 両OSの実画像で分割ID別の手動上書きと学習由来の暫定値が変わらないことを確認する。 |
-| per-split-threshold | AC-004 | 未検証 | タスク5.2: 両OSの結果JSONから各分割の適用閾値・由来と元画像の異常優先集約を読み戻す。 |
+| alinment-robustness | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTSの対象実機で旧版と既定設定の分割画素を比較する。 |
+| alinment-robustness | AC-002 | 未検証 | タスク4.2: Ubuntuの位置ズレ実画像で端画素複製により黒埋め由来の帯が消えることを確認する。 |
+| alinment-robustness | AC-003 | 未検証 | タスク4.3: Ubuntuの実画像で両変換の成功・失敗と不正設定時の旧成果物保持を確認する。 |
+| alinment-robustness | AC-004 | 未検証 | タスク4.4: Ubuntuの学習・試験実画像でRMSE、失敗画像のnull、分布を確認する。 |
+| alinment-robustness | AC-005 | 未検証 | タスク4.5: Ubuntuの対象型番でREADMEに沿った再準備・再学習・再検査と指紋不一致時の扱いを確認する。 |
+| alinment-robustness | AC-006 | 未検証 | タスク4.6: Ubuntuの実画像で現行・新設定の検査結果と所要時間を比較し、採用判断を記録する。 |
+| per-split-threshold | AC-001 | 未検証 | タスク5.2: Ubuntu 24.04 LTSの実画像でグループ単位の閾値と判定の従来互換を確認する。 |
+| per-split-threshold | AC-002 | 未検証 | タスク5.2: Ubuntuの実スコアから分割ID別の算出値と件数不足時のグループ代替・警告を照合する。 |
+| per-split-threshold | AC-003 | 未検証 | タスク5.2: Ubuntuの実画像で分割ID別の手動上書きと学習由来の暫定値が変わらないことを確認する。 |
+| per-split-threshold | AC-004 | 未検証 | タスク5.2: Ubuntuの結果JSONから各分割の適用閾値・由来と元画像の異常優先集約を読み戻す。 |
 | per-split-threshold | AC-005 | 未検証 | タスク5.3: 対象環境で不正設定・成果物不一致の拒否理由と旧成果物・結果の保持を確認する。 |
-| per-split-threshold | AC-006 | 未検証 | タスク5.2: Ubuntu 24.04 LTS・Windows 11の実画像と利用可能なCPU/GPUで学習・検査し、保存値とJSONを照合する。 |
-| out-of-fold-threshold-and-refit | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11で指定分割数と1枚ずつ方式の元画像非重複、全件被覆、結果読戻しを確認する。 |
-| out-of-fold-threshold-and-refit | AC-002 | 未検証 | タスク4.2: 両OSで実画像の学習対象外スコア、パーセンタイル、マージン、元画像別記録を再計算して確認する。 |
-| out-of-fold-threshold-and-refit | AC-003 | 未検証 | タスク4.2: 両OSで全正常データによる最終checkpointと検査時の読戻しを確認する。 |
-| out-of-fold-threshold-and-refit | AC-004 | 未検証 | タスク4.2: 両OSで全件再学習checkpointの学習集合スコアから算出した従来方式の閾値を確認する。 |
-| out-of-fold-threshold-and-refit | AC-005 | 未検証 | タスク4.2: 両OSで3成果物の閾値一致、不正入力・処理失敗・中断後の旧一式復旧を確認する。 |
-| out-of-fold-threshold-and-refit | AC-006 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11の実画像と利用可能なCPU/GPUでtrainからtestまで実行し、分割・スコア・checkpointを読み戻す。 |
-| synthetic-anomaly-validation | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11で4種類の擬似画像、強度・seed、同条件での画像と探索結果の再現、原本不変を確認する。 |
-| synthetic-anomaly-validation | AC-002 | 未検証 | タスク4.2: 両OSで実モデルの正常・擬似スコアとAUROC最大化による最良試行を確認する。 |
-| synthetic-anomaly-validation | AC-003 | 未検証 | タスク4.2: 両OSで旧設定の百分位最小化、枝刈り、最良試行が従来と一致することを確認する。 |
-| synthetic-anomaly-validation | AC-004 | 未検証 | タスク4.2: 両OSで目的名・各指標・再現条件のCLI表示と結果JSON読戻しを確認する。 |
-| synthetic-anomaly-validation | AC-005 | 未検証 | タスク4.2: 両OSで不正設定、評価失敗、条件不一致の再開拒否、保存復旧と旧成果物保持を確認する。 |
-| split-group-config-details | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11の対象環境で新形式の複数グループ設定を使い、5 CLIの全件・単独実行と成果物読戻しを確認する。 |
-| split-group-config-details | AC-002 | 未検証 | タスク3.4: 両OSで詳細の欠落・余分・非標準IDキーと旧形式混在を入力不備として拒否し、既存成果物が変わらないことを確認する。 |
-| split-group-config-details | AC-003 | 未検証 | タスク3.5: 両OSで実モデルの単独グループ学習を行い、対象の暫定閾値だけが詳細設定へ書き戻されることを確認する。 |
-| pad-group-artifact-names | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11の対象環境でID 0・10のグループ別成果物名と整数IDを全CLIで確認する。 |
-| pad-group-artifact-names | AC-002 | 未検証 | タスク3.4: 両OSで旧名成果物を退避後に準備・学習・全件検査を再実行し、新名の現行参照と結果を読み戻す。 |
+| per-split-threshold | AC-006 | 未検証 | タスク5.2: Ubuntu 24.04 LTSの実画像と利用可能なCPU/GPUで学習・検査し、保存値とJSONを照合する。 |
+| out-of-fold-threshold-and-refit | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTSで指定分割数と1枚ずつ方式の元画像非重複、全件被覆、結果読戻しを確認する。 |
+| out-of-fold-threshold-and-refit | AC-002 | 未検証 | タスク4.2: Ubuntuで実画像の学習対象外スコア、パーセンタイル、マージン、元画像別記録を再計算して確認する。 |
+| out-of-fold-threshold-and-refit | AC-003 | 未検証 | タスク4.2: Ubuntuで全正常データによる最終checkpointと検査時の読戻しを確認する。 |
+| out-of-fold-threshold-and-refit | AC-004 | 未検証 | タスク4.2: Ubuntuで全件再学習checkpointの学習集合スコアから算出した従来方式の閾値を確認する。 |
+| out-of-fold-threshold-and-refit | AC-005 | 未検証 | タスク4.2: Ubuntuで3成果物の閾値一致、不正入力・処理失敗・中断後の旧一式復旧を確認する。 |
+| out-of-fold-threshold-and-refit | AC-006 | 未検証 | タスク4.2: Ubuntu 24.04 LTSの実画像と利用可能なCPU/GPUでtrainからtestまで実行し、分割・スコア・checkpointを読み戻す。 |
+| synthetic-anomaly-validation | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTSで4種類の擬似画像、強度・seed、同条件での画像と探索結果の再現、原本不変を確認する。 |
+| synthetic-anomaly-validation | AC-002 | 未検証 | タスク4.2: Ubuntuで実モデルの正常・擬似スコアとAUROC最大化による最良試行を確認する。 |
+| synthetic-anomaly-validation | AC-003 | 未検証 | タスク4.2: Ubuntuで旧設定の百分位最小化、枝刈り、最良試行が従来と一致することを確認する。 |
+| synthetic-anomaly-validation | AC-004 | 未検証 | タスク4.2: Ubuntuで目的名・各指標・再現条件のCLI表示と結果JSON読戻しを確認する。 |
+| synthetic-anomaly-validation | AC-005 | 未検証 | タスク4.2: Ubuntuで不正設定、評価失敗、条件不一致の再開拒否、保存復旧と旧成果物保持を確認する。 |
+| split-group-config-details | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTSの対象環境で新形式の複数グループ設定を使い、5 CLIの全件・単独実行と成果物読戻しを確認する。 |
+| split-group-config-details | AC-002 | 未検証 | タスク3.4: Ubuntuで詳細の欠落・余分・非標準IDキーと旧形式混在を入力不備として拒否し、既存成果物が変わらないことを確認する。 |
+| split-group-config-details | AC-003 | 未検証 | タスク3.5: Ubuntuで実モデルの単独グループ学習を行い、対象の暫定閾値だけが詳細設定へ書き戻されることを確認する。 |
+| pad-group-artifact-names | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTSの対象環境でID 0・10のグループ別成果物名と整数IDを全CLIで確認する。 |
+| pad-group-artifact-names | AC-002 | 未検証 | タスク3.4: Ubuntuで旧名成果物を退避後に準備・学習・全件検査を再実行し、新名の現行参照と結果を読み戻す。 |
 | align-inspection-progress-and-scenario-tests | AC-001 | 未検証 | タスク4.1: 対象OSの実端末・非端末で全・単独グループ検査の元画像進捗、途中失敗、標準出力JSONを確認する。 |
 | align-inspection-progress-and-scenario-tests | AC-002 | 未検証 | タスク4.2: 対象OSの実画像と実GPU/CPUで準備、判定画像、色尺度、CLI表示を確認する。 |
 | align-inspection-progress-and-scenario-tests | AC-003 | 未検証 | タスク4.3: 実重みで指定グループを再学習し、checkpointによる検査と他グループ保持を確認する。 |
-| group-scoped-inspection-models | AC-007 | 未検証 | タスク6.7: Ubuntu 24.04 LTS・Windows 11の対象実機でCPUと利用可能なGPUを使い、全件・単独グループの5 CLIと成果物読戻しを確認する。 |
-| group-scoped-inspection-models | AC-008 | 未検証 | タスク6.8: 両OSで同一型番・別型番の同時起動、終了コード3の拒否、中断後の復旧を確認する。 |
-| organize-app-by-capability | AC-002 | 未検証 | タスク4.3: Ubuntu 24.04 LTS・Windows 11 の実機で5 CLIの名前・引数・終了コード・出力を確認する。 |
-| organize-app-by-capability | AC-003 | 未検証 | タスク4.4: 両OSの実機でmanifest・checkpoint・検査結果の形式、保存先、読戻しを確認する。 |
-| organize-app-by-capability | AC-004 | 未検証 | タスク4.5: 両OSでGPU有効・無効の計4条件を実行し、学習・推論で実際に使用したデバイスを確認する。 |
-| resize-and-knn-image-alignment | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTS・Windows 11の実機で倍率0.5の確認・学習・試験を実行し、縮小後の寸法、座標、切り出しSIZE、元画像の不変を確認する。 |
-| resize-and-knn-image-alignment | AC-002 | 未検証 | タスク4.2: 両OSの実機で運用画像によるKNN比率判定と位置合わせの成功・失敗、処理時間、縮小・分割画像の画質を確認する。 |
-| resize-and-knn-image-alignment | AC-003 | 未検証 | タスク4.3: 両OSの実機で不正設定、範囲外・0寸法、位置合わせ失敗を確認し、終了コード、旧成果物維持、学習除外と試験未判定を確認する。 |
+| group-scoped-inspection-models | AC-007 | 未検証 | タスク6.7: Ubuntu 24.04 LTSの対象実機でCPUと利用可能なGPUを使い、全件・単独グループの5 CLIと成果物読戻しを確認する。 |
+| group-scoped-inspection-models | AC-008 | 未検証 | タスク6.8: Ubuntuで同一型番・別型番の同時起動、終了コード3の拒否、中断後の復旧を確認する。 |
+| organize-app-by-capability | AC-002 | 未検証 | タスク4.3: Ubuntu 24.04 LTSの実機で5 CLIの名前・引数・終了コード・出力を確認する。 |
+| organize-app-by-capability | AC-003 | 未検証 | タスク4.4: Ubuntuの実機でmanifest・checkpoint・検査結果の形式、保存先、読戻しを確認する。 |
+| organize-app-by-capability | AC-004 | 未検証 | タスク4.5: UbuntuでGPU有効・無効の2条件を実行し、学習・推論で実際に使用したデバイスを確認する。 |
+| resize-and-knn-image-alignment | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTSの実機で倍率0.5の確認・学習・試験を実行し、縮小後の寸法、座標、切り出しSIZE、元画像の不変を確認する。 |
+| resize-and-knn-image-alignment | AC-002 | 未検証 | タスク4.2: Ubuntuの実機で運用画像によるKNN比率判定と位置合わせの成功・失敗、処理時間、縮小・分割画像の画質を確認する。 |
+| resize-and-knn-image-alignment | AC-003 | 未検証 | タスク4.3: Ubuntuの実機で不正設定、範囲外・0寸法、位置合わせ失敗を確認し、終了コード、旧成果物維持、学習除外と試験未判定を確認する。 |
 | fix-anomalib-training-checkpoint | AC-001 | 未検証 | タスク3.1: Ubuntu 24.04 LTSで元画像単位に分けた検証画像が追加分割されず全件利用されることを確認する。 |
 | fix-anomalib-training-checkpoint | AC-002 | 未検証 | タスク3.2: Ubuntu 24.04 LTSで試行ごとの学習率倍率を維持してcheckpointを保存できることを確認する。 |
 | fix-anomalib-training-checkpoint | AC-003 | 未検証 | タスク3.3: Ubuntu 24.04 LTSでPreProcessor入りcheckpointのメタデータを読み込み、契約照合を通過して検査を開始できることを確認する。 |
 | fix-anomalib-training-checkpoint | AC-004 | 未検証 | タスク3.4: Ubuntu 24.04 LTSで学習から検査までを実行し、報告された3件のエラーなく完了することを確認する。 |
 | improve-inspection-configuration-and-cli | AC-001 | 未検証 | タスク4.1: 対象OSと実モデルで暫定・検査用閾値による判定と学習成果物の整合を確認する。 |
-| improve-inspection-configuration-and-cli | AC-003 | 未検証 | タスク4.2: Ubuntu 24.04 LTSとWindows 11で5 CLIの段階表示、準備進捗、標準出力JSON、終了コードを確認する。 |
+| improve-inspection-configuration-and-cli | AC-003 | 未検証 | タスク4.2: Ubuntu 24.04 LTSで5 CLIの段階表示、準備進捗、標準出力JSON、終了コードを確認する。 |
 | improve-inspection-configuration-and-cli | AC-004 | 未検証 | タスク4.3: 実際の基準画像で縮小前座標、確認画像、学習・試験の切り出し位置と`SIZE`を照合する。 |
 | improve-inspection-configuration-and-cli | AC-005 | 未検証 | タスク4.4: 対象環境で不正設定・位置合わせ失敗・途中処理失敗の理由、終了状態、旧成果物保全と未判定を確認する。 |
 | improve-inspection-configuration-and-cli | AC-006 | 未検証 | タスク4.5: 対象型番の旧座標と分割画像を比較し、必要な再学習・検査結果再生成と旧成果物の退避を確認する。 |
-| comparable-heatmap-scale | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11で同一学習済みモデルと表示範囲を確認し、異なる異常マップの同値同色をヒートマップ層で確認する。 |
-| comparable-heatmap-scale | AC-002 | 未検証 | タスク4.3: 両OSで正常画像の非着色、異常画像の着色、スコア・閾値・判定の独立性を確認する。 |
-| comparable-heatmap-scale | AC-003 | 未検証 | タスク4.4: 両OSで表示範囲変更後の`test`と結果JSONの表示範囲を確認する。 |
-| comparable-heatmap-scale | AC-004 | 未検証 | タスク4.5: 両OSで未指定・不正な表示範囲のCLI拒否と新結果が作られないことを確認する。 |
-| show-test-progress-and-update-backbone | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTS・Windows 11の端末・非端末で`test`の元画像進捗、標準出力JSONと終了コードを確認する。 |
-| show-test-progress-and-update-backbone | AC-002 | 未検証 | タスク4.2: 両OSの実画像で未判定・個別分割エラー・全体失敗時の進捗と終了状態を確認する。 |
+| comparable-heatmap-scale | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTSで同一学習済みモデルと表示範囲を確認し、異なる異常マップの同値同色をヒートマップ層で確認する。 |
+| comparable-heatmap-scale | AC-002 | 未検証 | タスク4.3: Ubuntuで正常画像の非着色、異常画像の着色、スコア・閾値・判定の独立性を確認する。 |
+| comparable-heatmap-scale | AC-003 | 未検証 | タスク4.4: Ubuntuで表示範囲変更後の`test`と結果JSONの表示範囲を確認する。 |
+| comparable-heatmap-scale | AC-004 | 未検証 | タスク4.5: Ubuntuで未指定・不正な表示範囲のCLI拒否と新結果が作られないことを確認する。 |
+| show-test-progress-and-update-backbone | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTSの端末・非端末で`test`の元画像進捗、標準出力JSONと終了コードを確認する。 |
+| show-test-progress-and-update-backbone | AC-002 | 未検証 | タスク4.2: Ubuntuの実画像で未判定・個別分割エラー・全体失敗時の進捗と終了状態を確認する。 |
 | show-test-progress-and-update-backbone | AC-003 | 未検証 | タスク4.3: 対象型番で`racm_in1k`実重みの取得、再学習、checkpointによる検査を確認する。 |
 | show-test-progress-and-update-backbone | AC-004 | 未検証 | タスク4.4: 全型番で旧探索履歴・checkpointの破棄、閾値・表示範囲の見直し、旧検査結果の再生成を確認する。 |
-| restore-tv-backbone-and-improve-output | AC-001 | 未検証 | タスク5.1: Ubuntu 24.04 LTSとWindows 11で`tv_in1k`の実重みを取得して学習し、checkpointによる検査を確認する。 |
+| restore-tv-backbone-and-improve-output | AC-001 | 未検証 | タスク5.1: Ubuntu 24.04 LTSで`tv_in1k`の実重みを取得して学習し、checkpointによる検査を確認する。 |
 | restore-tv-backbone-and-improve-output | AC-002 | 未検証 | タスク5.2: 対象の全型番で旧成果物を退避し、`train --restart`、閾値と表示範囲の確認、`test`を実施する。 |
-| restore-tv-backbone-and-improve-output | AC-003 | 未検証 | タスク5.3: 両OSの実画像で正常分割と、異常分割の左原画像・右ヒートマップ付き画像を結果JSONと照合する。 |
-| restore-tv-backbone-and-improve-output | AC-004 | 未検証 | タスク5.4: 両OSの端末・非端末で試行条件表、終了状態、再開時の件数、標準出力JSONと終了コードを確認する。 |
-| test-pre-group-selection | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11の実画像で単独グループ準備後の対象・共有分割更新、他分割保持、単独検査を確認する。 |
-| test-pre-group-selection | AC-002 | 未検証 | タスク3.4: 両OSで全件準備、不明グループ・画像読込み失敗時の拒否と既存成果物保持を確認する。 |
-| test-pre-group-selection | AC-003 | 未検証 | タスク3.5: 両OSでREADMEの手順に沿って全グループの分割を準備し、全件検査を確認する。 |
+| restore-tv-backbone-and-improve-output | AC-003 | 未検証 | タスク5.3: Ubuntuの実画像で正常分割と、異常分割の左原画像・右ヒートマップ付き画像を結果JSONと照合する。 |
+| restore-tv-backbone-and-improve-output | AC-004 | 未検証 | タスク5.4: Ubuntuの端末・非端末で試行条件表、終了状態、再開時の件数、標準出力JSONと終了コードを確認する。 |
+| test-pre-group-selection | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTSの実画像で単独グループ準備後の対象・共有分割更新、他分割保持、単独検査を確認する。 |
+| test-pre-group-selection | AC-002 | 未検証 | タスク3.4: Ubuntuで全件準備、不明グループ・画像読込み失敗時の拒否と既存成果物保持を確認する。 |
+| test-pre-group-selection | AC-003 | 未検証 | タスク3.5: UbuntuでREADMEの手順に沿って全グループの分割を準備し、全件検査を確認する。 |
+| remove-windows-support | AC-001 | 未検証 | タスク3.2: Ubuntu 24.04 LTS x86-64で依存関係の導入、CPUと利用可能なGPUの5 CLIスモーク、成果物読戻しを確認する。 |
 
 `show-test-progress-and-update-backbone` のAC-003にある`racm_in1k`確認は当時の未検証事項であり、現在の運用には適用しない。<br />
 現在の学習は`wide_resnet50_2.tv_in1k`とグループ別の新形式設定から開始する。<br />

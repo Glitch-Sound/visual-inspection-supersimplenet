@@ -25,6 +25,9 @@ train = "app.model_training.cli:train_cli"
 test-pre = "app.image_preparation.cli:test_pre_cli"
 test = "app.model_evaluation.cli:test_cli"
 
+[tool.uv]
+environments = ["sys_platform == 'linux'", "sys_platform == 'darwin'"]
+
 [[tool.uv.index]]
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
@@ -32,10 +35,10 @@ explicit = true
 
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
 ]
 torchvision = [
-    { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
 ]
 
 [build-system]

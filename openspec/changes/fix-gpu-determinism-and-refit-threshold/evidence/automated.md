@@ -10,5 +10,5 @@
 - `uv run --locked python scripts/check_openspec_traceability.py --change fix-gpu-determinism-and-refit-threshold --phase implementation`: 成功。参照pytestの収集も成功。
 - `git diff --check`: 成功。
 
-実CUDA演算、Ubuntu 24.04 LTS・Windows 11での一連の学習、実画像・実checkpointによる再計算は未実施。<br />
+実CUDA演算、Ubuntu 24.04 LTSでの一連の学習、実画像・実checkpointによる再計算は未実施。<br />
 AC-001〜AC-006の状態は「未検証」のままとする。

@@ -7,7 +7,7 @@ import math
 import re
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -29,7 +29,6 @@ def _safe_filename(value: str) -> str:
         or "/" in value
         or "\\" in value
         or Path(value).is_absolute()
-        or PureWindowsPath(value).drive
     ):
         raise ValueError("must be a filename without path components")
     return value

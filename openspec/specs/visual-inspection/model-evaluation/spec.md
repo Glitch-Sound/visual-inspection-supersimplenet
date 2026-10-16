@@ -214,7 +214,7 @@
 
 ### Requirement: NREQ-001 対象環境と実行記録
 
-システムは、Ubuntu 24.04 LTS および Windows 11 の x86-64、Python 3.13 で学習、推論、結果保存および GPU から CPU への切り替えを実行でき、各コマンドの結果、処理時間、警告・エラー、主要依存関係およびデバイス情報を記録できなければならない(MUST)。
+システムは、Ubuntu 24.04 LTS x86-64、Python 3.13 で学習、推論、結果保存および GPU から CPU への切り替えを実行でき、各コマンドの結果、処理時間、警告・エラー、主要依存関係およびデバイス情報を記録できなければならない(MUST)。
 
 #### Scenario: NREQ-001-S01 対象 OS の実行契約を確認する
 
@@ -469,7 +469,7 @@
 | 推論・可視化 | unit / integration | `pred_score`、PostProcessor無効、スコア契約不一致、閾値未満・一致・超過、共通決定的前処理、データ拡張無効、`anomaly_map`ヒートマップ | 小規模モデルまたはテストダブルと固定画像で全 Scenario を自動検証する |
 | 異常分割の結果画像 | unit / integration | 正常分割の画素一致、異常分割の左右配置と色、スコア・判定不変 | 固定画像と予測ダブルで全Scenarioをpytestで検証し、対象OSで実画像を確認する |
 | 集約・結果契約 | unit / integration | 正常、異常、未判定、エラー、固定スコア契約、共通実行記録、必須項目、タイムゾーン付き日時、null スコア、同stem・異拡張子、再検査 | 判定組合せ、契約違反とファイル状態を pytest で自動検証する |
-| 環境互換性 | integration / e2e | Ubuntu・Windows、GPU・CPU、成果物読戻し | OS 非依存部分は CI で自動化し、対象実機のスモーク試験結果を運用記録として必須化する |
+| 環境互換性 | integration / e2e | Ubuntu、GPU・CPU、成果物読戻し | OS 非依存部分は CI で自動化し、対象実機のスモーク試験結果を運用記録として必須化する |
 | checkpoint契約 | unit / integration | メタデータを含むcheckpointの読込、欠落時の拒否 | 各Scenarioをpytestで検証し、Ubuntu実機の検査実行を別途確認する |
 | 検査用閾値 | unit / integration | 未指定、null、通常値、0、1、範囲外、非数値、真偽値、暫定閾値不一致、結果JSONの使用値 | 各Scenarioをpytestで自動検証し、判定と保存値、既存成果物の不変を照合する |
 | CLI 実行表示 | integration | 5 CLI の正常終了、入力不備、処理失敗、警告、機械可読な標準出力と終了コード | 各Scenarioをpytestで自動検証し、対象OSでの表示は別途確認する |
