@@ -358,6 +358,8 @@ class BestTrialResult(ContractModel):
     synthetic_scores_summary: dict[str, float | int] | None = None
     synthetic_validation: dict[str, object] | None = None
     checkpoint: str
+    threshold_score_model: Literal["final_checkpoint", "cross_validation"] | None = None
+    threshold_model_checkpoint: str | None = None
     score_contract: ScoreContract
     threshold: float = Field(ge=0.0, le=1.0)
     threshold_method: Literal["training_percentile", "out_of_fold_percentile"] = (
@@ -404,6 +406,23 @@ class BestTrialResult(ContractModel):
 
     @model_validator(mode="after")
     def datasets_are_disjoint(self) -> BestTrialResult:
+        if self.threshold_score_model is not None:
+            expected = (
+                "final_checkpoint"
+                if self.threshold_method == "training_percentile"
+                else "cross_validation"
+            )
+            if self.threshold_score_model != expected:
+                raise ValueError("threshold score model does not match method")
+            if expected == "final_checkpoint":
+                if self.threshold_model_checkpoint != self.checkpoint:
+                    raise ValueError(
+                        "threshold model checkpoint does not match checkpoint"
+                    )
+            elif self.threshold_model_checkpoint is not None:
+                raise ValueError("cross-validation threshold has no single checkpoint")
+        elif self.threshold_model_checkpoint is not None:
+            raise ValueError("threshold model checkpoint requires score model")
         if len(self.range_ids) != len(set(self.range_ids)):
             raise ValueError("best_trial range_ids must be unique")
         if self.threshold_unit == "split":

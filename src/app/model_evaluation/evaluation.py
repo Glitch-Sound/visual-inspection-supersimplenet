@@ -136,6 +136,11 @@ def validate_best_trial_contract(
             "best_trial checkpoint mismatch: "
             f"expected {expected_checkpoint}, got {best.checkpoint}"
         )
+    if (
+        best.threshold_score_model == "final_checkpoint"
+        and best.threshold_model_checkpoint != expected_checkpoint
+    ):
+        raise ValueError("best_trial threshold model checkpoint mismatch")
     if threshold is None or not np.isclose(best.threshold, threshold):
         raise ValueError("best_trial threshold does not match model config")
     settings = group.optuna_settings.threshold

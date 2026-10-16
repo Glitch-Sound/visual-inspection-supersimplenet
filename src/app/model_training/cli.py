@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import numpy as np
 import optuna
 import typer
 from rich.console import Console
@@ -217,7 +218,7 @@ def _train_command(
                             f"cross-validation fold {fold_number} failed: {error}"
                         ) from error
                 show_stage(f"グループ {selected.id}: 全正常データで最終学習")
-                final_checkpoint, _ = fit_selected_parameters(
+                final_checkpoint, final_training_scores = fit_selected_parameters(
                     parameters,
                     train_images=final_images,
                     validation_images=final_images,
@@ -226,6 +227,16 @@ def _train_command(
                     group=selected,
                     seed=selected.optuna_settings.execution.seed,
                 )
+                if threshold_settings.method == "training_percentile" and (
+                    len(final_training_scores) != len(final_images)
+                    or not np.isfinite(final_training_scores).all()
+                    or any(
+                        score < 0.0 or score > 1.0 for score in final_training_scores
+                    )
+                ):
+                    raise ValueError(
+                        "final training scores must match all images and be finite in [0, 1]"
+                    )
                 result = persist_best_trial(
                     config=config,
                     group=selected,
@@ -234,6 +245,7 @@ def _train_command(
                     study=study,
                     outcomes=outcomes,
                     final_checkpoint=final_checkpoint,
+                    final_training_scores=final_training_scores,
                     final_train_sources=final_sources,
                     cross_validation=fold_records,
                     score_by_source=score_records,

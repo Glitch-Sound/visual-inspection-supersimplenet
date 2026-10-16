@@ -40,6 +40,7 @@ def persist_best_trial(
     study: optuna.Study,
     outcomes: dict[int, TrialOutcome],
     final_checkpoint: Path | None = None,
+    final_training_scores: list[float] | None = None,
     final_train_sources: tuple[str, ...] | None = None,
     cross_validation: list[FoldRecord] | None = None,
     score_by_source: list[SourceScore] | None = None,
@@ -71,14 +72,16 @@ def persist_best_trial(
             + threshold_settings.margin,
         )
     else:
-        if (
-            not outcome.training_scores
-            or not np.isfinite(outcome.training_scores).all()
-        ):
-            raise ValueError("training scores must be nonempty and finite")
-        threshold = float(
-            np.percentile(outcome.training_scores, threshold_settings.percentile)
+        if final_checkpoint is not None and final_training_scores is None:
+            raise ValueError("final checkpoint training scores are required")
+        training_scores = (
+            final_training_scores
+            if final_training_scores is not None
+            else outcome.training_scores
         )
+        if not training_scores or not np.isfinite(training_scores).all():
+            raise ValueError("final training scores must be nonempty and finite")
+        threshold = float(np.percentile(training_scores, threshold_settings.percentile))
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("calculated threshold must be in [0, 1]")
     split_thresholds: dict[str, SplitThreshold] = {}
@@ -173,6 +176,16 @@ def persist_best_trial(
             synthetic_scores_summary=best.user_attrs.get("synthetic_scores_summary"),
             synthetic_validation=group.optuna_settings.synthetic_validation.model_dump(),
             checkpoint=str(target_checkpoint.relative_to(paths.root)),
+            threshold_score_model=(
+                "final_checkpoint"
+                if threshold_settings.method == "training_percentile"
+                else "cross_validation"
+            ),
+            threshold_model_checkpoint=(
+                str(target_checkpoint.relative_to(paths.root))
+                if threshold_settings.method == "training_percentile"
+                else None
+            ),
             score_contract=ScoreContract(),
             threshold=threshold,
             threshold_method=threshold_settings.method,

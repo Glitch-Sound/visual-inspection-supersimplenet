@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,20 @@ from app.common.model_adapter import create_supersimplenet
 from app.common.runtime import DeviceSelection
 from app.model_training.augmentation import AnomalibTrainingAugmentation
 from app.model_training.search import DatasetSplit, TrialOutcome, TrialParameters
+
+
+@contextmanager
+def nondeterministic_trial_algorithms() -> Iterator[None]:
+    """Keep PyTorch's process-wide deterministic setting local to a trial."""
+    import torch
+
+    enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    try:
+        torch.use_deterministic_algorithms(False)
+        yield
+    finally:
+        torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
 
 
 def create_pruning_callback(
@@ -91,7 +106,6 @@ class AnomalibTrialRunner:
         trial: optuna.Trial,
     ) -> TrialOutcome:
         from anomalib.data import Folder
-        from anomalib.engine import Engine
 
         trial_dir = self.work_dir / f"trial-{trial.number:04d}"
         if trial_dir.exists():
@@ -125,9 +139,38 @@ class AnomalibTrialRunner:
             from lightning.pytorch import seed_everything
 
             seed_everything(pruning.execution.seed + trial.number, workers=True)
-            import torch
+        scope = (
+            nondeterministic_trial_algorithms()
+            if synthetic_objective
+            else nullcontext()
+        )
+        with scope:
+            return self._fit_trial(
+                parameters,
+                split,
+                trial,
+                trial_dir,
+                train_dir,
+                validation_dir,
+                datamodule,
+            )
 
-            torch.use_deterministic_algorithms(True)
+    def _fit_trial(
+        self,
+        parameters: TrialParameters,
+        split: DatasetSplit,
+        trial: optuna.Trial,
+        trial_dir: Path,
+        train_dir: Path,
+        validation_dir: Path,
+        datamodule: Any,
+    ) -> TrialOutcome:
+        from anomalib.engine import Engine
+
+        pruning = self.group.optuna_settings if self.group is not None else None
+        synthetic_objective = (
+            pruning is not None and pruning.objective == "synthetic_auroc"
+        )
         model = create_supersimplenet(
             layers=parameters.feature_layers,
             image_size=parameters.image_size,
@@ -186,7 +229,7 @@ def fit_selected_parameters(
     group: GroupConfig,
     seed: int,
 ) -> tuple[Path, list[float]]:
-    """Fit the selected settings independently and score only held-out images."""
+    """Fit selected settings and evaluate the supplied images without augmentation."""
     from anomalib.data import Folder
     from anomalib.engine import Engine
     from lightning.pytorch import seed_everything
@@ -228,6 +271,7 @@ def fit_selected_parameters(
     engine.fit(model, datamodule=datamodule)
     checkpoint = work_dir / "model.ckpt"
     engine.trainer.save_checkpoint(checkpoint)
+    model.eval()
     predictions = engine.predict(
         model=model, data_path=validation_dir, return_predictions=True
     )
@@ -237,6 +281,10 @@ def fit_selected_parameters(
             f"selected fit returned {len(scores)} scores for "
             f"{len(validation_images)} validation images"
         )
+    if not np.isfinite(scores).all() or any(
+        score < 0.0 or score > 1.0 for score in scores
+    ):
+        raise ValueError("selected fit returned non-finite or out-of-range scores")
     return checkpoint, scores
 
 

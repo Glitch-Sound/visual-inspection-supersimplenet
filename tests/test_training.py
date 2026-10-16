@@ -28,6 +28,7 @@ from app.model_training.augmentation import (
 )
 from app.model_training.cli import _train_command
 from app.model_training.search import (
+    DatasetSplit,
     TrialOutcome,
     TrialParameters,
     create_study,
@@ -38,6 +39,150 @@ from app.model_training.search import (
 from app.model_training.trainer import AnomalibTrialRunner
 
 _real_fit_selected_parameters = training_cli.fit_selected_parameters
+
+
+def _fake_synthetic_trial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail: bool = False,
+    fail_prediction: bool = False,
+) -> tuple[AnomalibTrialRunner, TrialParameters, DatasetSplit, list[bool]]:
+    from anomalib import data, engine
+
+    config, paths = _project(tmp_path)
+    group = config.part.groups[0]
+    group.optuna_settings.objective = "synthetic_auroc"
+    train_image = next(paths.prepared_train("XX", 0).glob("a_*.png"))
+    validation_image = next(paths.prepared_train("XX", 0).glob("b_*.png"))
+    synthetic_image = tmp_path / "synthetic.png"
+    synthetic_image.write_bytes(b"synthetic")
+    split = DatasetSplit(
+        train_sources=("a.png",),
+        validation_sources=("b.png",),
+        train_images=(train_image,),
+        validation_images=(validation_image,),
+        synthetic_images=(synthetic_image,),
+    )
+    observed: list[bool] = []
+
+    def fake_model(**_kwargs):
+        observed.append(torch.are_deterministic_algorithms_enabled())
+        return object()
+
+    class FakeEngine:
+        def __init__(self, **_kwargs):
+            self.trainer = self
+
+        def fit(self, _model, *, datamodule):
+            del datamodule
+            observed.append(torch.are_deterministic_algorithms_enabled())
+            if fail:
+                raise RuntimeError("injected fit failure")
+            self.score = float(torch.rand(1).item())
+
+        def save_checkpoint(self, checkpoint):
+            observed.append(torch.are_deterministic_algorithms_enabled())
+            checkpoint.write_bytes(b"checkpoint")
+
+        def predict(self, *, model, data_path, return_predictions):
+            del model, return_predictions
+            observed.append(torch.are_deterministic_algorithms_enabled())
+            if fail_prediction:
+                raise RuntimeError("injected prediction failure")
+            offset = 0.1 if data_path == tmp_path else 0.0
+            return [{"pred_score": [min(1.0, self.score + offset)]}]
+
+    monkeypatch.setattr(data, "Folder", lambda **_kwargs: object())
+    monkeypatch.setattr(engine, "Engine", FakeEngine)
+    monkeypatch.setattr("app.model_training.trainer.create_supersimplenet", fake_model)
+    runner = AnomalibTrialRunner(
+        tmp_path / "trials", DeviceSelection("cpu", "CPU", "test"), group
+    )
+    parameters = TrialParameters(1.0, 4, 1, ["layer2"], 256)
+    return runner, parameters, split, observed
+
+
+def test_synthetic_trial_scopes_determinism(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, parameters, split, observed = _fake_synthetic_trial(tmp_path, monkeypatch)
+    enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        runner(parameters, split, optuna.create_study().ask())
+        assert observed == [False] * 6
+        assert torch.are_deterministic_algorithms_enabled()
+        assert torch.is_deterministic_algorithms_warn_only_enabled()
+    finally:
+        torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
+
+
+def test_synthetic_trial_restores_determinism_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, parameters, split, observed = _fake_synthetic_trial(
+        tmp_path, monkeypatch, fail=True
+    )
+    enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=False)
+        with pytest.raises(RuntimeError, match="injected fit failure"):
+            runner(parameters, split, optuna.create_study().ask())
+        assert observed == [False, False]
+        assert torch.are_deterministic_algorithms_enabled()
+        assert not torch.is_deterministic_algorithms_warn_only_enabled()
+    finally:
+        torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
+
+
+def test_synthetic_trial_restores_determinism_on_prediction_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, parameters, split, observed = _fake_synthetic_trial(
+        tmp_path, monkeypatch, fail_prediction=True
+    )
+    enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        with pytest.raises(RuntimeError, match="injected prediction failure"):
+            runner(parameters, split, optuna.create_study().ask())
+        assert observed == [False] * 4
+        assert torch.are_deterministic_algorithms_enabled()
+        assert torch.is_deterministic_algorithms_warn_only_enabled()
+    finally:
+        torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
+
+
+def test_synthetic_search_repeats_with_seed_on_cpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, _, split, _ = _fake_synthetic_trial(tmp_path, monkeypatch)
+    group = runner.group
+    assert group is not None
+    group.optuna_settings.execution.trials = 2
+
+    def search_twice_snapshot() -> tuple[list[dict[str, Any]], list[float], int]:
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(
+                seed=group.optuna_settings.execution.seed
+            ),
+        )
+        study, _ = run_search(group, split, study, runner)
+        return (
+            [trial.params for trial in study.trials],
+            [float(trial.value) for trial in study.trials if trial.value is not None],
+            study.best_trial.number,
+        )
+
+    first = search_twice_snapshot()
+    second = search_twice_snapshot()
+    assert len(first[0]) == len(first[1]) == 2
+    assert first == second
 
 
 def _aligned(
@@ -493,7 +638,9 @@ def test_legacy_threshold_with_full_refit(
     _run_cli(monkeypatch, paths, group=0)
     best = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
     assert best.threshold_method == "training_percentile"
-    assert best.threshold == pytest.approx(0.199)
+    assert best.threshold == pytest.approx(0.497)
+    assert best.threshold_score_model == "final_checkpoint"
+    assert best.threshold_model_checkpoint == best.checkpoint
     assert len(calls) == 1 and len(calls[0][1]) == 4
     assert len(best.final_train_sources) == 4
 
@@ -547,7 +694,78 @@ def test_final_artifact_threshold_contract(
     assert (
         best.threshold == group.optuna_settings.threshold.value == metadata["threshold"]
     )
+    assert best.threshold_score_model == "cross_validation"
+    assert best.threshold_model_checkpoint is None
     validate_best_trial_contract(config, group, paths, best)
+
+
+def test_training_percentile_uses_final_checkpoint_scores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _project(tmp_path)
+    _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    best = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    config = load_config(tmp_path, "XX")
+    metadata = torch.load(paths.checkpoint("XX", 0), weights_only=False)[
+        "visual_inspection"
+    ]
+    assert best.threshold == pytest.approx(0.497)
+    assert best.threshold != pytest.approx(0.199)
+    assert config.part.groups[0].optuna_settings.threshold.value == best.threshold
+    assert metadata["threshold"] == best.threshold
+    assert best.threshold_model_checkpoint == best.checkpoint
+
+
+def test_threshold_model_mismatch_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.model_evaluation.evaluation import validate_best_trial_contract
+
+    _, paths = _project(tmp_path)
+    _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    config = load_config(tmp_path, "XX")
+    group = config.part.groups[0]
+    best = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    with pytest.raises(ValueError, match="threshold model checkpoint"):
+        BestTrialResult.model_validate(
+            {**best.model_dump(), "threshold_model_checkpoint": "other.ckpt"}
+        )
+    with pytest.raises(ValueError, match="threshold model checkpoint"):
+        validate_best_trial_contract(
+            config,
+            group,
+            paths,
+            best.model_copy(update={"threshold_model_checkpoint": "other.ckpt"}),
+        )
+    validate_best_trial_contract(config, group, paths, best)
+
+
+@pytest.mark.parametrize("invalid_scores", [[], [float("nan")], [0.2]])
+def test_final_scores_invalid_preserve_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_scores: list[float]
+) -> None:
+    _, paths = _project(tmp_path)
+    _fake_oof_training(monkeypatch)
+    _run_cli(monkeypatch, paths, group=0)
+    targets = (
+        paths.checkpoint("XX", 0),
+        paths.study_dir("XX", 0) / "best_trial.json",
+        paths.model_config("XX"),
+    )
+    before = tuple(path.read_bytes() for path in targets)
+
+    def invalid_final(_parameters, *, validation_images, work_dir, **_kwargs):
+        work_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint = work_dir / "model.ckpt"
+        torch.save({"state_dict": {}}, checkpoint)
+        return checkpoint, invalid_scores
+
+    monkeypatch.setattr(training_cli, "fit_selected_parameters", invalid_final)
+    with pytest.raises(ValueError, match="final training scores"):
+        _run_cli(monkeypatch, paths, group=0, restart=True)
+    assert tuple(path.read_bytes() for path in targets) == before
 
 
 def test_training_reuses_pretrained_cache(
@@ -1443,12 +1661,10 @@ def test_group_restart_uses_tv_backbone(
     assert not checkpoint.read_bytes().startswith(b"previous")
     best = json.loads((paths.study_dir("XX", 0) / "best_trial.json").read_text())
     assert best["group"] == 0
-    assert best["threshold"] == pytest.approx(0.199)
-    assert load_checkpoint_metadata(checkpoint)["threshold"] == pytest.approx(0.199)
+    assert best["threshold"] == pytest.approx(0.2)
+    assert load_checkpoint_metadata(checkpoint)["threshold"] == pytest.approx(0.2)
     reloaded = load_config(tmp_path, "XX")
-    assert reloaded.part.groups[0].optuna_settings.threshold.value == pytest.approx(
-        0.199
-    )
+    assert reloaded.part.groups[0].optuna_settings.threshold.value == pytest.approx(0.2)
 
     class InferenceModel:
         def __call__(self, tensor):
@@ -1546,11 +1762,11 @@ def test_group_restart_replaces_only_selected_history(
     assert (paths.study_dir("XX", 1) / "study.db").is_file()
     assert load_checkpoint_metadata(paths.checkpoint("XX", 1))[
         "threshold"
-    ] == pytest.approx(0.199)
+    ] == pytest.approx(0.2)
 
     reloaded = load_config(tmp_path, "XX")
     selected = reloaded.part.select_groups(1)[0]
-    assert selected.optuna_settings.threshold.value == pytest.approx(0.199)
+    assert selected.optuna_settings.threshold.value == pytest.approx(0.2)
     assert selected.heatmap_range is not None
     assert selected.heatmap_range.model_dump() == {"min": 0.1, "max": 0.9}
     assert reloaded.part.select_groups(0)[0].optuna_settings.threshold.value == 0.4
@@ -1563,7 +1779,7 @@ def test_group_restart_replaces_only_selected_history(
     new_group_one_result = json.loads(
         (paths.results("XX") / after_results[1] / "sample.png.json").read_text()
     )
-    assert new_group_one_result["threshold"] == pytest.approx(0.199)
+    assert new_group_one_result["threshold"] == pytest.approx(0.2)
     assert new_group_one_result["heatmap_range"] == {"min": 0.1, "max": 0.9}
     assert new_group_one_result["overall_status"] == "anomaly"
 

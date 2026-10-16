@@ -119,9 +119,12 @@ npm ci
 検査結果JSONの各 `splits` 要素には、適用した `threshold` と `threshold_source` を記録する。<br />
 由来は `split_calculated`、`group_fallback`、`manual_override`、またはグループ単位の `group_calculated`、`group_manual_override` である。<br />
 `folds`には2以上の分割数、または元画像を1枚ずつ検証する`leave_one_out`を指定する。<br />
-`training_percentile`では従来どおり探索時の学習集合のスコアから閾値を決める。<br />
+`training_percentile`では、全正常データで再学習した最終checkpointを評価モード・データ拡張なしで同じ学習集合に再適用し、そのスコアの指定パーセンタイルから閾値を決める。<br />
+最良試行結果には閾値算出に使ったモデルの種類と、従来方式では最終checkpointの参照を記録する。<br />
 どちらの方式でも探索は従来の1分割で行い、最良条件で全正常データ(ブラックリスト除外後)を再学習したcheckpointを検査に使う。<br />
 新方式では探索後に分割数分と全件再学習1回、従来方式では全件再学習1回の学習が増える。<br />
+従来方式では最終モデルの全正常分割画像への再推論時間も加わる。<br />
+旧方式で作成した閾値は最終モデルのスコア由来と見なさず、対象グループを`train --restart`で再学習し、`test`で検査結果を再生成する。<br />
 方式や分割条件を変更したグループは`train --restart`で再学習し、検査結果を再生成する。<br />
 閾値単位または最少件数を変更したグループも `train --restart` で再学習し、`test` で結果を再生成する。<br />
 `split` から `group` に戻す場合は、学習が書き戻した `min_score_count` と `split_values`、不要になった `inspection_threshold_by_split` を設定から削除してから再学習する。<br />
@@ -377,7 +380,7 @@ npx --no-install openspec update
 | out-of-fold-threshold-and-refit | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11で指定分割数と1枚ずつ方式の元画像非重複、全件被覆、結果読戻しを確認する。 |
 | out-of-fold-threshold-and-refit | AC-002 | 未検証 | タスク4.2: 両OSで実画像の学習対象外スコア、パーセンタイル、マージン、元画像別記録を再計算して確認する。 |
 | out-of-fold-threshold-and-refit | AC-003 | 未検証 | タスク4.2: 両OSで全正常データによる最終checkpointと検査時の読戻しを確認する。 |
-| out-of-fold-threshold-and-refit | AC-004 | 未検証 | タスク4.2: 両OSで従来方式の閾値と全件再学習checkpointを確認する。 |
+| out-of-fold-threshold-and-refit | AC-004 | 未検証 | タスク4.2: 両OSで全件再学習checkpointの学習集合スコアから算出した従来方式の閾値を確認する。 |
 | out-of-fold-threshold-and-refit | AC-005 | 未検証 | タスク4.2: 両OSで3成果物の閾値一致、不正入力・処理失敗・中断後の旧一式復旧を確認する。 |
 | out-of-fold-threshold-and-refit | AC-006 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11の実画像と利用可能なCPU/GPUでtrainからtestまで実行し、分割・スコア・checkpointを読み戻す。 |
 | synthetic-anomaly-validation | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11で4種類の擬似画像、強度・seed、同条件での画像と探索結果の再現、原本不変を確認する。 |
