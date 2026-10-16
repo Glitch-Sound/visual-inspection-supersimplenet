@@ -38,6 +38,7 @@ from app.model_training.search import (
     create_study,
     cross_validation_splits,
     run_search,
+    select_best_trial,
     split_by_source,
 )
 from app.model_training.synthetic_validation import create_synthetic_validation
@@ -172,7 +173,10 @@ def _train_command(
                         ),
                         on_trial_finish=show_trial_outcome,
                     )
-                selected_contract = _trial_parameters_contract(study.best_trial.params)
+                selected_trial = select_best_trial(
+                    study, selected.optuna_settings.objective
+                )
+                selected_contract = _trial_parameters_contract(selected_trial.params)
                 parameters = TrialParameters(**selected_contract.model_dump())
                 fold_records: list[FoldRecord] = []
                 score_records: list[SourceScore] = []

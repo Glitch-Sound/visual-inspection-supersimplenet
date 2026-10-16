@@ -270,6 +270,10 @@ def _stub_search(
 
     monkeypatch.setattr("app.model_training.cli.create_study", lambda *_args: Study())
     monkeypatch.setattr(
+        "app.model_training.cli.select_best_trial",
+        lambda study, _objective: study.best_trial,
+    )
+    monkeypatch.setattr(
         "app.model_training.cli.run_search",
         lambda group, _split, study, _runner, **_kw: (study, {}),
     )
@@ -994,6 +998,32 @@ def test_legacy_normal_study_resumes_without_evaluation_contract(
     assert resumed.user_attrs["evaluation_contract"]["objective"] == "normal_percentile"
 
 
+def test_legacy_synthetic_contract_resumes_only_with_same_conditions(
+    tmp_path: Path,
+) -> None:
+    config, paths = _project(tmp_path)
+    selected = config.part.groups[0]
+    selected.optuna_settings.objective = "synthetic_auroc"
+    storage = paths.study_dir("XX", 0) / "study.db"
+    study = create_study(config, selected, storage)
+    study.add_trial(
+        optuna.create_trial(
+            value=0.9,
+            params={},
+            distributions={},
+            user_attrs={"normal_p99": 0.2},
+        )
+    )
+    old_contract = study.user_attrs["evaluation_contract"]
+    for field in ("size_px", "intensity_range", "images_per_validation_image"):
+        old_contract["synthetic_validation"].pop(field)
+    study.set_user_attr("evaluation_contract", old_contract)
+    assert len(create_study(config, selected, storage).trials) == 1
+    selected.optuna_settings.synthetic_validation.images_per_validation_image = 2
+    with pytest.raises(ValueError, match="train --restart"):
+        create_study(config, selected, storage)
+
+
 def test_req_031_s02(tmp_path: Path) -> None:
     config, paths = _project(tmp_path)
     selected, _ = _study(config, paths, trials=1)
@@ -1145,6 +1175,154 @@ def test_req_005_s03(tmp_path: Path) -> None:
     assert selected.optuna_settings.objective == "normal_percentile"
     assert study.direction == optuna.study.StudyDirection.MINIMIZE
     assert study.best_trial.number == 0
+
+
+def test_synthetic_auroc_tie_break(tmp_path: Path) -> None:
+    from app.model_training.search import select_best_trial
+
+    config, paths = _project(tmp_path)
+    selected, split, study, outcomes = _synthetic_study(
+        config, paths, [(0.4, 0.8), (0.2, 0.8), (0.2, 0.8)]
+    )
+    assert study.best_trial.number == 0
+    assert select_best_trial(study, selected.optuna_settings.objective).number == 1
+    best = persist_best_trial(
+        config=config,
+        group=selected,
+        paths=paths,
+        split=split,
+        study=study,
+        outcomes=outcomes,
+    )
+    assert best.trial_number == 1
+    assert best.normal_p99 == 0.2
+
+
+def test_cli_refits_selected_tied_trial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _project(tmp_path)
+    config_path = paths.model_config("XX")
+    payload = json.loads(config_path.read_text())
+    settings = payload["group_detail"]["0"]["optuna_settings"]
+    settings["objective"] = "synthetic_auroc"
+    settings["execution"]["trials"] = 3
+    config_path.write_text(json.dumps(payload))
+    config = load_config(tmp_path, "XX")
+    _, _, study, _ = _synthetic_study(
+        config, paths, [(0.4, 0.8), (0.2, 0.8), (0.2, 0.8)]
+    )
+    observed: list[dict[str, object]] = []
+    original_contract = training_cli._trial_parameters_contract
+
+    def record_contract(parameters: dict[str, object]):
+        observed.append(parameters)
+        return original_contract(parameters)
+
+    def fit(parameters, *, work_dir, validation_images, **_kwargs):
+        del parameters
+        work_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint = work_dir / "model.ckpt"
+        torch.save({"state_dict": {}}, checkpoint)
+        return checkpoint, [0.2] * len(validation_images)
+
+    monkeypatch.setattr(training_cli, "_trial_parameters_contract", record_contract)
+    monkeypatch.setattr(training_cli, "fit_selected_parameters", fit)
+    _run_cli(monkeypatch, paths, group=0)
+    best = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    assert best.trial_number == 1
+    assert observed == [study.trials[1].params]
+
+
+def test_best_trial_contains_synthetic_ceiling_count(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected, split, study, outcomes = _synthetic_study(
+        config, paths, [(0.4, 0.8), (0.2, 0.8)]
+    )
+    best = persist_best_trial(
+        config=config,
+        group=selected,
+        paths=paths,
+        split=split,
+        study=study,
+        outcomes=outcomes,
+    )
+    saved = BestTrialResult.read_json(paths.study_dir("XX", 0) / "best_trial.json")
+    assert best.trial_number == saved.trial_number == 1
+    assert best.synthetic_auroc_ceiling_trial_count == 2
+    assert saved.synthetic_auroc_ceiling_trial_count == 2
+
+
+def test_synthetic_auroc_ceiling_warning(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected, split, study, outcomes = _synthetic_study(
+        config, paths, [(0.4, 0.8), (0.2, 0.8)]
+    )
+    warnings: list[str] = []
+    persist_best_trial(
+        config=config,
+        group=selected,
+        paths=paths,
+        split=split,
+        study=study,
+        outcomes=outcomes,
+        record_warning=warnings.append,
+    )
+    assert len(warnings) == 1
+    assert "1.0" in warnings[0] and "2 completed trials" in warnings[0]
+
+
+def test_synthetic_ceiling_zero_and_legacy(tmp_path: Path) -> None:
+    config, paths = _project(tmp_path)
+    selected, split, study, outcomes = _synthetic_study(config, paths, [(0.4, 0.4)])
+    warnings: list[str] = []
+    best = persist_best_trial(
+        config=config,
+        group=selected,
+        paths=paths,
+        split=split,
+        study=study,
+        outcomes=outcomes,
+        record_warning=warnings.append,
+    )
+    assert best.synthetic_auroc_ceiling_trial_count == 0
+    assert warnings == []
+    legacy = best.model_dump()
+    legacy.pop("synthetic_auroc_ceiling_trial_count")
+    assert (
+        BestTrialResult.model_validate(legacy).synthetic_auroc_ceiling_trial_count
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"size_px": {"min": 12, "max": 4}},
+        {"intensity_range": {"min": 0.5, "max": 0.05}},
+        {"images_per_validation_image": 0},
+        {"intensity": 0.5, "intensity_range": {"min": 0.1, "max": 0.5}},
+    ],
+)
+def test_invalid_synthetic_ranges_preserve_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid: dict
+) -> None:
+    _, paths = _project(tmp_path)
+    checkpoint = paths.checkpoint("XX", 0)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b"previous checkpoint")
+    best = paths.study_dir("XX", 0) / "best_trial.json"
+    best.parent.mkdir(parents=True, exist_ok=True)
+    best.write_bytes(b"previous result")
+    config_path = paths.model_config("XX")
+    payload = json.loads(config_path.read_text())
+    settings = payload["group_detail"]["0"]["optuna_settings"]
+    settings["synthetic_validation"] = {"types": ["scratch"], "seed": 42, **invalid}
+    config_path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="synthetic_validation"):
+        _run_cli(monkeypatch, paths, group=0)
+    assert checkpoint.read_bytes() == b"previous checkpoint"
+    assert best.read_bytes() == b"previous result"
 
 
 def test_req_007_s01_synthetic(tmp_path: Path) -> None:

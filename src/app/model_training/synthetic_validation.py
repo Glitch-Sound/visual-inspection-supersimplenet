@@ -17,11 +17,63 @@ def _image_seed(seed: int, group: int, name: str) -> int:
     return int.from_bytes(digest[:8], "big")
 
 
+def _pixel_sized_defect(
+    original: Image.Image,
+    *,
+    defect: str,
+    strength: float,
+    size: int,
+    rng: np.random.Generator,
+) -> Image.Image:
+    width, height = original.size
+    side = min(size, width, height)
+    left = int(rng.integers(width - side + 1))
+    top = int(rng.integers(height - side + 1))
+    cx, cy = left + side // 2, top + side // 2
+    image = original.copy()
+    pixel = np.asarray(original, dtype=np.uint8)[cy, cx]
+    target = 255 if float(np.mean(pixel)) < 128 else 0
+
+    def blended_channel(channel: np.uint8) -> int:
+        original_channel = int(channel)
+        blended = round((1 - strength) * original_channel + strength * target)
+        if blended == original_channel:
+            return original_channel + (1 if target > original_channel else -1)
+        return blended
+
+    color = tuple(blended_channel(channel) for channel in pixel)
+    draw = ImageDraw.Draw(image)
+    right, bottom = left + side - 1, top + side - 1
+    if defect == "scratch":
+        draw.line(
+            (left, cy, right, cy),
+            fill=color,
+            width=min(side, max(1, round(1 + 4 * strength))),
+        )
+    elif defect == "stain":
+        mask = Image.new("L", (side, side))
+        ImageDraw.Draw(mask).ellipse((0, 0, side - 1, side - 1), fill=255)
+        mask = mask.filter(ImageFilter.GaussianBlur(max(0.5, side * 0.2)))
+        image.paste(Image.new("RGB", (side, side), color), (left, top), mask)
+    elif defect == "spot":
+        dot = max(1, side // 6)
+        for _ in range(max(1, round(2 + 8 * strength))):
+            x = int(rng.integers(left, right - dot + 2))
+            y = int(rng.integers(top, bottom - dot + 2))
+            draw.ellipse((x, y, x + dot - 1, y + dot - 1), fill=color)
+    else:
+        draw.rectangle((left, top, right, bottom), fill=color)
+    if np.array_equal(np.asarray(original), np.asarray(image)):
+        image.putpixel((cx, cy), color)
+    return image
+
+
 def synthesize_image(
     source: Path,
     *,
     group: int,
     settings: SyntheticValidationSettings,
+    sample_index: int = 0,
 ) -> Image.Image:
     """Return a changed RGB copy, leaving the prepared image untouched."""
     with Image.open(source) as opened:
@@ -29,9 +81,26 @@ def synthesize_image(
     width, height = original.size
     if min(width, height) < 1:
         raise ValueError(f"synthetic validation image is empty: {source.name}")
-    rng = np.random.default_rng(_image_seed(settings.seed, group, source.name))
+    legacy = (
+        settings.size_px is None
+        and settings.intensity_range is None
+        and settings.images_per_validation_image == 1
+    )
+    seed_name = source.name if legacy else f"{source.name}:{sample_index}"
+    rng = np.random.default_rng(_image_seed(settings.seed, group, seed_name))
     defect = settings.types[int(rng.integers(len(settings.types)))]
-    strength = settings.intensity
+    strength = (
+        settings.intensity
+        if settings.intensity_range is None
+        else float(
+            rng.uniform(settings.intensity_range.min, settings.intensity_range.max)
+        )
+    )
+    if settings.size_px is not None:
+        size = int(rng.integers(settings.size_px.min, settings.size_px.max + 1))
+        return _pixel_sized_defect(
+            original, defect=defect, strength=strength, size=size, rng=rng
+        )
     image = original.copy()
     draw = ImageDraw.Draw(image)
     cx = int(rng.integers(1, width - 1)) if width > 2 else int(rng.integers(width))
@@ -92,7 +161,15 @@ def create_synthetic_validation(
     destination.mkdir(parents=True, exist_ok=True)
     outputs: list[Path] = []
     for index, source in enumerate(images):
-        target = destination / f"{index:06d}_{source.stem}.png"
-        synthesize_image(source, group=group, settings=settings).save(target)
-        outputs.append(target)
+        for sample_index in range(settings.images_per_validation_image):
+            suffix = (
+                ""
+                if settings.images_per_validation_image == 1
+                else f"_{sample_index:04d}"
+            )
+            target = destination / f"{index:06d}_{source.stem}{suffix}.png"
+            synthesize_image(
+                source, group=group, settings=settings, sample_index=sample_index
+            ).save(target)
+            outputs.append(target)
     return tuple(outputs)

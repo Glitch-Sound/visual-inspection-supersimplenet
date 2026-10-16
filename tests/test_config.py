@@ -51,6 +51,22 @@ def test_template_values_and_omitted_augmentation_strengths(tmp_path: Path) -> N
     assert loaded.rotation.max_degrees == 1.0
 
 
+def test_synthetic_template_defaults() -> None:
+    root = Path(__file__).parents[1]
+    settings = load_config(root, "XX").part.groups[0].optuna_settings
+    assert settings.objective == "synthetic_auroc"
+    synthetic = settings.synthetic_validation
+    assert synthetic.size_px is not None
+    assert (synthetic.size_px.min, synthetic.size_px.max) == (4, 128)
+    assert synthetic.intensity_range is not None
+    assert (synthetic.intensity_range.min, synthetic.intensity_range.max) == (
+        0.05,
+        0.5,
+    )
+    assert synthetic.images_per_validation_image == 4
+    assert "intensity" not in synthetic.evaluation_contract()
+
+
 def test_synthetic_objective_defaults_and_validation(tmp_path: Path) -> None:
     build_project(tmp_path)
     path, payload = _payload(tmp_path)

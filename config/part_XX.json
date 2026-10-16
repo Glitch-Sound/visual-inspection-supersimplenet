@@ -109,10 +109,12 @@
                     "validation_ratio": 0.2,
                     "seed": 42
                 },
-                "objective": "normal_percentile",
+                "objective": "synthetic_auroc",
                 "synthetic_validation": {
                     "types": ["scratch", "stain", "spot", "foreign_patch"],
-                    "intensity": 0.5,
+                    "size_px": {"min": 4, "max": 128},
+                    "intensity_range": {"min": 0.05, "max": 0.5},
+                    "images_per_validation_image": 4,
                     "seed": 42
                 },
                 "execution": {

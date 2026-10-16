@@ -94,7 +94,7 @@ npm ci
 | `group_detail` | グループIDの通常の10進文字列をキーにする詳細設定。`groups`のIDと一対一に対応 |
 | `group_detail["<id>"].optuna_settings` | グループ別の探索、学習・検証分離、暫定閾値 |
 | `group_detail["<id>"].optuna_settings.objective` | `normal_percentile` または `synthetic_auroc`。省略時は従来の `normal_percentile` |
-| `group_detail["<id>"].optuna_settings.synthetic_validation` | 擬似欠陥の `types`、`intensity`、`seed`。種類は `scratch`、`stain`、`spot`、`foreign_patch` |
+| `group_detail["<id>"].optuna_settings.synthetic_validation` | 擬似欠陥の `types`、`seed`、旧方式の単一 `intensity`、任意の `size_px`・`intensity_range`・`images_per_validation_image`。種類は `scratch`、`stain`、`spot`、`foreign_patch` |
 | `group_detail["<id>"].optuna_settings.threshold` | `training_percentile` または `out_of_fold_percentile`。新方式では `percentile`、絶対加算値の `margin`、分割数または `leave_one_out` の `folds` を指定 |
 | `group_detail["<id>"].optuna_settings.threshold.unit` | `group` または `split`。省略時は `group` |
 | `group_detail["<id>"].optuna_settings.threshold.min_score_count` | `split` 単位で必須の1以上の整数。件数未満の分割はグループ暫定閾値を使用 |
@@ -175,6 +175,8 @@ PY
 
 学習・試験の分布が大きく異なる場合は、撮影条件や位置合わせ失敗画像も確認する。<br />
 高い誤差の元画像と対応する分割画像を開き、縁の黒帯、実際の位置ズレ、欠陥の見え方を確認する。<br />
+位置ズレ由来の異常は検出対象外なので、平行移動・回転の学習拡張強度は、残り誤差の実測分布と実画像のずれを確認してから決める。<br />
+設定雛形の各軸±1%と±1度は調整の開始例であり、対象型番の実測値ではない。<br />
 `group_detail["<id>"].augmentation.translation.max_ratio`は分割画像の幅・高さに対する各軸の移動割合である。<br />
 たとえば分割サイズ1000pxで目安とするずれが10pxなら、`10 / 1000 = 0.01`を強度の検討開始点にできる。<br />
 RMSEは平行移動成分だけの測定値ではないため、その値を機械的に設定へ転記しない。<br />
@@ -228,7 +230,14 @@ uv run --locked test --model XX --group 1
 学習探索履歴とcheckpointを対象グループで作り直す場合は`train --restart`を使う。<br />
 探索目的、擬似欠陥条件、評価用seedを変えた場合は、異なる条件の試行を混ぜないよう対象グループで`train --restart`を使う。<br />
 `synthetic_auroc`は正常な検証分割画像から作る擬似欠陥との分離度を最大化する。<br />
-最良試行結果には目的名・目的値、正常スコアの99パーセンタイル、擬似AUROC、擬似スコアの分布要約と生成条件を記録する。<br />
+`size_px`の`min`と`max`は1以上の画素数で、傷の長さ、シミ・斑点の直径、異物の一辺を指定する。<br />
+`intensity_range`の`min`と`max`は0より大きく1以下とし、旧方式の`intensity`と同時には指定しない。<br />
+`images_per_validation_image`は正常な検証分割画像1枚から作る擬似画像の枚数で、1以上の整数を指定する。<br />
+新項目を省略した既存設定では、従来の画像辺長に応じた大きさ、単一強度、1枚生成を維持する。<br />
+雛形の画素範囲4〜128px、強度範囲0.05〜0.5、4枚生成は初期評価用の例であり、実異常の大きさと見え方に合わせて調整する。<br />
+最良試行結果には目的名・目的値、正常スコアの99パーセンタイル、擬似AUROC、擬似スコアの分布要約、AUROCが1.0の正常完了試行数と生成条件を記録する。<br />
+AUROCが同点なら正常スコアの99パーセンタイルが小さい試行、それも同点なら試行番号が小さい試行を選ぶ。<br />
+AUROCが1.0の試行がある場合は警告が出るため、擬似画像の大きさ・強度と実異常画像での結果を確認する。<br />
 擬似AUROCは実際の異常画像による検出性能や本番利用の承認を意味しない。<br />
 `test`は実行のたびに対象グループの結果を新しく作るため、`--restart`は受け付けない。<br />
 全件学習で後続グループが失敗した場合、コマンドはエラー終了し、失敗グループIDを表示する。<br />
@@ -367,6 +376,11 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| tune-synthetic-validation | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTSの対象実画像で4種類、大小の画素範囲、強度範囲、複数枚、同seed再現と原本不変を確認する。 |
+| tune-synthetic-validation | AC-002 | 未検証 | タスク4.2: Ubuntuの実学習でAUROCと正常p99の同点選択を結果JSONと照合する。 |
+| tune-synthetic-validation | AC-003 | 未検証 | タスク4.2: UbuntuでAUROC 1.0の正常完了試行数とCLI警告を読み戻す。 |
+| tune-synthetic-validation | AC-004 | 未検証 | タスク4.2: Ubuntuで旧設定の画像・スコア互換と条件変更時の再開拒否・旧成果物保持を確認する。 |
+| tune-synthetic-validation | AC-005 | 未検証 | タスク4.3: Ubuntuの対象型番の実画像と残り誤差から雛形と平行移動・回転の拡張強度を評価する。 |
 | alinment-robustness | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTSの対象実機で旧版と既定設定の分割画素を比較する。 |
 | alinment-robustness | AC-002 | 未検証 | タスク4.2: Ubuntuの位置ズレ実画像で端画素複製により黒埋め由来の帯が消えることを確認する。 |
 | alinment-robustness | AC-003 | 未検証 | タスク4.3: Ubuntuの実画像で両変換の成功・失敗と不正設定時の旧成果物保持を確認する。 |

@@ -135,10 +135,12 @@ CUDA非対応演算で中断しない設定にして学習・評価し、成功�
 | TC-006 | REQ-007 | REQ-007-S03 | integration | 更新中断 | 旧3成果物復旧 | `tests/test_training.py::test_refit_artifact_transaction_recovers` | はい | 既存試験 | 実機中断、3.3 | 未作成 |
 | TC-007 | REQ-007 | REQ-007-S04 | integration | モデル系統と参照の不一致 | 推論前拒否 | `tests/test_training.py::test_threshold_model_mismatch_rejected` | はい | 読戻し契約 | 実機読戻し、3.3 | 未作成 |
 | TC-008 | REQ-007 | REQ-007-S05 | integration | 2グループで学習 | 閾値独立 | `tests/test_training.py::test_refit_group_thresholds_are_independent` | はい | 既存試験 | 実機読戻し、3.3 | 未作成 |
-| TC-009 | REQ-007 | REQ-007-S06 | integration | 最終スコア欠落・非有限値 | 理由と旧一式保持 | `tests/test_training.py::test_final_scores_invalid_preserve_artifacts` | はい | 公開前検証 | 実機エラー、3.3 | 未作成 |
+| TC-009 | REQ-007 | REQ-007-S08 | integration | 最終スコア欠落・非有限値 | 理由と旧一式保持 | `tests/test_training.py::test_final_scores_invalid_preserve_artifacts` | はい | 公開前検証 | 実機エラー、3.3 | 未作成 |
 | TC-010 | REQ-035 | REQ-035-S01 | integration | 新方式で学習 | 全件モデルとOOF閾値 | `tests/test_training.py::test_oof_final_refit_uses_all_sources` | はい | 既存試験 | 実重み、3.3 | 未作成 |
 | TC-011 | REQ-035 | REQ-035-S02 | integration | 従来方式で学習 | 最終モデルの全件スコア百分位 | `tests/test_training.py::test_training_percentile_uses_final_checkpoint_scores` | はい | 計算とモデル由来 | 実重み、3.3 | 未作成 |
 | TC-012 | REQ-035 | REQ-035-S03 | integration | 全件学習の失敗 | 理由と旧一式保持 | `tests/test_training.py::test_refit_failure_preserves_artifacts` | はい | 既存試験 | 実機失敗、3.3 | 未作成 |
+| TC-013 | REQ-007 | REQ-007-S06 | integration | AUROC 1.0の試行が複数 | 上限到達件数と警告 | `tests/test_training.py::test_synthetic_auroc_ceiling_warning` | はい | 既存試験 | 対象OSでの読戻し | `openspec/changes/archive/2026-10-16-tune-synthetic-validation/evidence/acceptance.md` |
+| TC-014 | REQ-007 | REQ-007-S07 | unit | 上限未到達と旧結果 | 0と未記録を区別 | `tests/test_training.py::test_synthetic_ceiling_zero_and_legacy` | はい | 既存試験 | 対象OSでの読戻し | `openspec/changes/archive/2026-10-16-tune-synthetic-validation/evidence/acceptance.md` |
 
 証跡には自動試験のコマンド・結果と、実機のOS・GPU・Python・依存版・seed・結果を分けて記録する。<br />
 テストダブルだけでCUDA演算の実行結果を確認済みとはしない。
@@ -148,7 +150,7 @@ CUDA非対応演算で中断しない設定にして学習・評価し、成功�
 | 要件ID | Scenario数 | 対応TC数 | 未対応Scenario | 状態 |
 | --- | --- | --- | --- | --- |
 | REQ-038 | 3 | 3 | なし | 設計上網羅 |
-| REQ-007 | 6 | 6 | なし | 設計上網羅 |
+| REQ-007 | 8 | 8 | なし | 設計上網羅 |
 | REQ-035 | 3 | 3 | なし | 設計上網羅 |
 
 ## 受け入れ検証

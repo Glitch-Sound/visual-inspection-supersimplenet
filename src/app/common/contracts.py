@@ -354,6 +354,7 @@ class BestTrialResult(ContractModel):
     synthetic_auroc: float | None = Field(
         default=None, ge=0.0, le=1.0, allow_inf_nan=False
     )
+    synthetic_auroc_ceiling_trial_count: int | None = Field(default=None, ge=0)
     synthetic_scores_summary: dict[str, float | int] | None = None
     synthetic_validation: dict[str, object] | None = None
     checkpoint: str

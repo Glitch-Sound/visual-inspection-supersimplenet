@@ -8,7 +8,11 @@ import optuna
 from conftest import build_project
 from PIL import Image
 
-from app.common.config import SyntheticValidationSettings
+from app.common.config import (
+    SyntheticIntensityRange,
+    SyntheticSizeRange,
+    SyntheticValidationSettings,
+)
 from app.model_training.search import DatasetSplit, TrialOutcome, run_search
 from app.model_training.synthetic_validation import (
     create_synthetic_validation,
@@ -23,14 +27,22 @@ def test_req_030_s01(tmp_path: Path) -> None:
     image = tmp_path / "normal.png"
     Image.fromarray(np.full((32, 32, 3), 100, dtype=np.uint8)).save(image)
     original_hash = hashlib.sha256(image.read_bytes()).hexdigest()
-    settings = SyntheticValidationSettings(seed=71)
+    settings = SyntheticValidationSettings(
+        seed=71,
+        size_px=SyntheticSizeRange(min=4, max=12),
+        intensity_range=SyntheticIntensityRange(min=0.05, max=0.5),
+        images_per_validation_image=3,
+    )
     first = create_synthetic_validation(
         (image,), tmp_path / "first", group=0, settings=settings
     )
     second = create_synthetic_validation(
         (image,), tmp_path / "second", group=0, settings=settings
     )
-    assert first[0].read_bytes() == second[0].read_bytes()
+    assert len(first) == len(second) == 3
+    assert [path.read_bytes() for path in first] == [
+        path.read_bytes() for path in second
+    ]
     assert hashlib.sha256(image.read_bytes()).hexdigest() == original_hash
 
     split = DatasetSplit(("a",), ("b",), (image,), (image,))
@@ -80,6 +92,45 @@ def test_req_030_s02(tmp_path: Path) -> None:
         assert np.count_nonzero(np.asarray(large) != pixels) >= np.count_nonzero(
             np.asarray(small) != pixels
         )
+
+
+def test_pixel_ranges_and_multiple_images(tmp_path: Path) -> None:
+    image = tmp_path / "normal.png"
+    pixels = np.full((48, 48, 3), 100, dtype=np.uint8)
+    Image.fromarray(pixels).save(image)
+    for defect in ("scratch", "stain", "spot", "foreign_patch"):
+        settings = SyntheticValidationSettings(
+            types=[defect],
+            size_px=SyntheticSizeRange(min=8, max=8),
+            intensity_range=SyntheticIntensityRange(min=0.2, max=0.2),
+            images_per_validation_image=4,
+        )
+        generated = create_synthetic_validation(
+            (image,), tmp_path / defect, group=0, settings=settings
+        )
+        assert len(generated) == 4
+        for path in generated:
+            changed = np.any(np.asarray(Image.open(path)) != pixels, axis=2)
+            ys, xs = np.where(changed)
+            assert len(xs) > 0
+            assert int(np.ptp(xs)) + 1 <= 8
+            assert int(np.ptp(ys)) + 1 <= 8
+    assert np.array_equal(np.asarray(Image.open(image)), pixels)
+
+
+def test_legacy_synthetic_bytes(tmp_path: Path) -> None:
+    image = tmp_path / "normal.png"
+    Image.fromarray(np.full((48, 48, 3), 100, dtype=np.uint8)).save(image)
+    settings = SyntheticValidationSettings(
+        types=["foreign_patch"], intensity=0.5, seed=42
+    )
+    generated = create_synthetic_validation(
+        (image,), tmp_path / "legacy", group=0, settings=settings
+    )
+    assert generated[0].name == "000000_normal.png"
+    assert hashlib.sha256(generated[0].read_bytes()).hexdigest() == (
+        "8f0551609dcb2805f1457d25e7f99d333b3f84f00e26fbf82cb58e77004fbb58"
+    )
 
 
 def test_small_validation_images_generate_for_all_defects(tmp_path: Path) -> None:

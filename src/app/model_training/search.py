@@ -201,7 +201,7 @@ def create_study(config: AppConfig, group: GroupConfig, storage: Path) -> optuna
     )
     contract = {
         "objective": settings.objective,
-        "synthetic_validation": settings.synthetic_validation.model_dump(),
+        "synthetic_validation": settings.synthetic_validation.evaluation_contract(),
         "split_seed": settings.normal_only.seed,
         "sampler_seed": settings.sampler.seed,
         "execution_seed": settings.execution.seed,
@@ -220,11 +220,22 @@ def create_study(config: AppConfig, group: GroupConfig, storage: Path) -> optuna
         raise ValueError(
             "invalid evaluation contract in existing study; use train --restart"
         )
-    elif previous is not None and previous != contract:
-        differing = [key for key in contract if previous.get(key) != contract[key]]
-        raise ValueError(
-            f"evaluation contract differs ({', '.join(differing)}); use train --restart"
-        )
+    elif previous is not None:
+        comparable = dict(previous)
+        synthetic = comparable.get("synthetic_validation")
+        if isinstance(synthetic, dict):
+            normalized = dict(synthetic)
+            normalized.setdefault("size_px", None)
+            normalized.setdefault("intensity_range", None)
+            normalized.setdefault("images_per_validation_image", 1)
+            if normalized["intensity_range"] is not None:
+                normalized.pop("intensity", None)
+            comparable["synthetic_validation"] = normalized
+        differing = [key for key in contract if comparable.get(key) != contract[key]]
+        if differing:
+            raise ValueError(
+                f"evaluation contract differs ({', '.join(differing)}); use train --restart"
+            )
     threshold_contract = {
         "method": settings.threshold.method,
         "percentile": settings.threshold.percentile,
@@ -247,6 +258,42 @@ def create_study(config: AppConfig, group: GroupConfig, storage: Path) -> optuna
     study.set_user_attr("evaluation_contract", contract)
     study.set_user_attr("threshold_contract", threshold_contract)
     return study
+
+
+def select_best_trial(study: optuna.Study, objective: str) -> optuna.trial.FrozenTrial:
+    if objective != "synthetic_auroc":
+        return study.best_trial
+    complete = [
+        trial
+        for trial in study.trials
+        if trial.state == optuna.trial.TrialState.COMPLETE and trial.value is not None
+    ]
+    if not complete:
+        raise RuntimeError("all Optuna trials failed or were pruned")
+
+    def key(trial: optuna.trial.FrozenTrial) -> tuple[float, float, int]:
+        value = trial.value
+        p99 = trial.user_attrs.get("normal_p99")
+        if (
+            value is None
+            or not np.isfinite(value)
+            or not isinstance(p99, (int, float))
+            or isinstance(p99, bool)
+            or not np.isfinite(p99)
+        ):
+            raise ValueError(
+                f"trial {trial.number} has invalid AUROC or normal_p99; use train --restart"
+            )
+        return (-float(value), float(p99), trial.number)
+
+    return min(complete, key=key)
+
+
+def synthetic_auroc_ceiling_trial_count(study: optuna.Study) -> int:
+    return sum(
+        trial.state == optuna.trial.TrialState.COMPLETE and trial.value == 1.0
+        for trial in study.trials
+    )
 
 
 def synthetic_auroc(normal: list[float], synthetic: list[float]) -> float:
@@ -341,6 +388,5 @@ def run_search(
     study.optimize(
         objective, n_trials=remaining, catch=(Exception,), callbacks=callbacks
     )
-    if not study.best_trials:
-        raise RuntimeError("all Optuna trials failed or were pruned")
+    select_best_trial(study, settings.objective)
     return study, outcomes

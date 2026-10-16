@@ -158,12 +158,37 @@ class NormalOnlySettings(StrictModel):
 SyntheticDefect = Literal["scratch", "stain", "spot", "foreign_patch"]
 
 
+class SyntheticSizeRange(StrictModel):
+    min: Annotated[StrictInt, Field(ge=1)]
+    max: Annotated[StrictInt, Field(ge=1)]
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> SyntheticSizeRange:
+        if self.min > self.max:
+            raise ValueError("synthetic_validation.size_px.min must be <= max")
+        return self
+
+
+class SyntheticIntensityRange(StrictModel):
+    min: Annotated[float, Field(gt=0.0, le=1.0, allow_inf_nan=False)]
+    max: Annotated[float, Field(gt=0.0, le=1.0, allow_inf_nan=False)]
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> SyntheticIntensityRange:
+        if self.min > self.max:
+            raise ValueError("synthetic_validation.intensity_range.min must be <= max")
+        return self
+
+
 class SyntheticValidationSettings(StrictModel):
     types: list[SyntheticDefect] = Field(
         default_factory=lambda: ["scratch", "stain", "spot", "foreign_patch"],
         min_length=1,
     )
     intensity: Annotated[float, Field(gt=0.0, le=1.0, allow_inf_nan=False)] = 0.5
+    size_px: SyntheticSizeRange | None = None
+    intensity_range: SyntheticIntensityRange | None = None
+    images_per_validation_image: Annotated[StrictInt, Field(ge=1)] = 1
     seed: StrictInt = 42
 
     @field_validator("types")
@@ -172,6 +197,19 @@ class SyntheticValidationSettings(StrictModel):
         if len(value) != len(set(value)):
             raise ValueError("synthetic_validation.types must not contain duplicates")
         return value
+
+    @model_validator(mode="after")
+    def validate_intensity_choice(self) -> SyntheticValidationSettings:
+        if self.intensity_range is not None and "intensity" in self.model_fields_set:
+            raise ValueError(
+                "synthetic_validation.intensity and intensity_range cannot be combined"
+            )
+        return self
+
+    def evaluation_contract(self) -> dict[str, object]:
+        return self.model_dump(
+            exclude={"intensity"} if self.intensity_range is not None else None
+        )
 
 
 class ExecutionSettings(StrictModel):

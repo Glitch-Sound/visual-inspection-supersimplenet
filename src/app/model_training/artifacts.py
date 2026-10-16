@@ -28,7 +28,12 @@ from app.common.contracts import (
 )
 from app.common.paths import ProjectPaths
 from app.common.runtime import package_versions
-from app.model_training.search import DatasetSplit, TrialOutcome
+from app.model_training.search import (
+    DatasetSplit,
+    TrialOutcome,
+    select_best_trial,
+    synthetic_auroc_ceiling_trial_count,
+)
 
 
 def persist_best_trial(
@@ -47,7 +52,7 @@ def persist_best_trial(
     record_warning: Callable[[str], None] | None = None,
 ) -> BestTrialResult:
     recover_artifact_transaction(paths, config.model, group.id)
-    best = study.best_trial
+    best = select_best_trial(study, group.optuna_settings.objective)
     if best.value is None:
         raise RuntimeError("best trial does not have an objective value")
     outcome = outcomes.get(best.number)
@@ -173,8 +178,15 @@ def persist_best_trial(
             objective_name=group.optuna_settings.objective,
             normal_p99=best.user_attrs.get("normal_p99"),
             synthetic_auroc=best.user_attrs.get("synthetic_auroc"),
+            synthetic_auroc_ceiling_trial_count=(
+                synthetic_auroc_ceiling_trial_count(study)
+                if group.optuna_settings.objective == "synthetic_auroc"
+                else None
+            ),
             synthetic_scores_summary=best.user_attrs.get("synthetic_scores_summary"),
-            synthetic_validation=group.optuna_settings.synthetic_validation.model_dump(),
+            synthetic_validation=(
+                group.optuna_settings.synthetic_validation.evaluation_contract()
+            ),
             checkpoint=str(target_checkpoint.relative_to(paths.root)),
             threshold_score_model=(
                 "final_checkpoint"
@@ -229,6 +241,12 @@ def persist_best_trial(
             _remove_transaction_files((*stages.values(), *backups.values()))
         raise
     _remove_transaction_files(backups.values())
+    if result.synthetic_auroc_ceiling_trial_count and record_warning is not None:
+        record_warning(
+            f"group {group.id}: synthetic AUROC reached 1.0 in "
+            f"{result.synthetic_auroc_ceiling_trial_count} completed trials; "
+            "review synthetic validation conditions and real anomalies"
+        )
     return result
 
 
