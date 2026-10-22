@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 
 import optuna
 import typer
@@ -19,7 +20,7 @@ from app.common.contracts import (
 from app.common.model_adapter import BACKBONE_NAME
 from app.common.paths import ProjectPaths
 from app.common.runtime import RunRecorder
-from app.model_training.artifacts import persist_best_trial, restart_training
+from app.model_training.artifacts import new_training_stage, persist_best_trial
 from app.model_training.search import (
     TrialParameters,
     create_study,
@@ -69,7 +70,6 @@ def show_trial_outcome(trial: optuna.trial.FrozenTrial) -> None:
 def _train_command(
     model: str = typer.Option(..., "--model", help="処理対象の型番"),
     group: int | None = typer.Option(None, "--group", help="処理対象のグループID"),
-    restart: bool = typer.Option(False, "--restart", help="探索とモデルを再生成する"),
 ) -> None:
     """型番別・グループ別モデルを学習する。"""
 
@@ -81,7 +81,9 @@ def _train_command(
         os.environ.setdefault("TORCH_HOME", str(paths.pretrained))
         summaries: list[str] = []
         for selected in groups:
+            study_dir = None
             try:
+                study_dir = new_training_stage(paths, model, selected.id)
                 prepared = paths.prepared_train(model, selected.id)
                 manifest = load_preparation_manifest(
                     prepared,
@@ -94,17 +96,13 @@ def _train_command(
                 split = split_by_source(
                     manifest, prepared, train_ratio=normal.train_ratio, seed=normal.seed
                 )
-                if restart:
-                    restart_training(paths, model, selected.id)
-                study_dir = paths.study_dir(model, selected.id)
                 show_stage(f"グループ {selected.id}: Optuna 探索を実行")
                 study = create_study(config, selected, study_dir / "study.db")
-                existing = len(study.trials)
                 total = selected.optuna_settings.execution.trials
                 show_stage(
                     f"探索条件: バックボーン={BACKBONE_NAME} "
                     f"学習画像={len(split.train_images)} 検証画像={len(split.validation_images)} "
-                    f"既存試行={existing} 今回の試行={max(0, total - existing)}"
+                    f"今回の試行={total}"
                 )
                 runner = AnomalibTrialRunner(
                     study_dir / "trials", recorder.device, selected
@@ -128,6 +126,7 @@ def _train_command(
                     split=split,
                     study=study,
                     outcomes=outcomes,
+                    study_dir=study_dir,
                 )
                 show_trial_conditions(
                     f"グループ {selected.id} 最良試行 {result.trial_number + 1} の条件",
@@ -142,8 +141,12 @@ def _train_command(
                 )
                 config = load_config(paths.root, model)
             except (ValueError, FileNotFoundError) as error:
+                if study_dir is not None and study_dir.exists():
+                    shutil.rmtree(study_dir)
                 raise ValueError(f"group {selected.id} failed: {error}") from error
             except Exception as error:
+                if study_dir is not None and study_dir.exists():
+                    shutil.rmtree(study_dir)
                 raise RuntimeError(f"group {selected.id} failed: {error}") from error
         return "; ".join(summaries)
 

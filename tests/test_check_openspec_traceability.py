@@ -518,6 +518,37 @@ def test_limited_archive_accepts_deferred_acceptance(tmp_path: Path) -> None:
     assert strict.returncode == 1
 
 
+def test_limited_archive_accepts_multiple_acceptances_for_one_task(
+    tmp_path: Path,
+) -> None:
+    change = write_limited_change(tmp_path)
+    proposal = change / "proposal.md"
+    proposal.write_text(
+        proposal.read_text() + "- AC-002: 別の条件を実機で検証できる。\n",
+        encoding="utf-8",
+    )
+    tasks = change / "tasks.md"
+    tasks.write_text(
+        tasks.read_text().replace("AC-001 を対象OS", "AC-001 と AC-002 を対象OS"),
+        encoding="utf-8",
+    )
+    design = change / "design.md"
+    design.write_text(
+        design.read_text()
+        + "| AC-002 | 別の実機条件 | 対象OS実行 | 対象OSの実機試験 | 未検証 | 未作成 |\n",
+        encoding="utf-8",
+    )
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        readme.read_text()
+        + "| example | AC-002 | 未検証 | タスク3.3: 別の対象OS実機確認 |\n",
+        encoding="utf-8",
+    )
+
+    result = run_check(tmp_path, "--change", "example", "--phase", "limited-archive")
+    assert result.returncode == 0, result.stderr
+
+
 def test_limited_archive_accepts_archived_change(tmp_path: Path) -> None:
     change = write_limited_change(tmp_path)
     archive = change.parent / "archive"

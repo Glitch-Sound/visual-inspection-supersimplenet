@@ -74,6 +74,19 @@ def create_generation(paths: ProjectPaths, model: str) -> Path:
     return generation
 
 
+def create_result_stage(paths: ProjectPaths, model: str) -> Path:
+    root = _result_root(paths, model)
+    root.mkdir(parents=True, exist_ok=True)
+    for stale in root.iterdir():
+        if stale.name.startswith(".stage-") and _RUN_ID.fullmatch(stale.name[7:]):
+            if stale.is_symlink() or not stale.is_dir():
+                raise ValueError(f"invalid result temporary area: {stale}")
+            shutil.rmtree(stale)
+    stage = root / f".stage-{uuid4().hex}"
+    stage.mkdir()
+    return stage
+
+
 def publish_current(paths: ProjectPaths, model: str, groups: dict[int, str]) -> None:
     root = _result_root(paths, model)
     root.mkdir(parents=True, exist_ok=True)

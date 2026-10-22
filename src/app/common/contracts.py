@@ -240,6 +240,10 @@ def load_preparation_manifest(
     manifest_path = prepared_dir / "manifest.json"
     if manifest_path.is_symlink():
         raise ValueError(f"prepared manifest must not be a symlink: {manifest_path}")
+    if not manifest_path.is_file():
+        raise ValueError(
+            f"prepared manifest is missing: {manifest_path}; rerun train-pre or test-pre"
+        )
     manifest = PreparationManifest.read_json(manifest_path)
     if manifest.model != model:
         raise ValueError(

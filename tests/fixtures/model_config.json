@@ -111,8 +111,7 @@
                 },
                 "execution": {
                     "trials": 10,
-                    "seed": 42,
-                    "resume": true
+                    "seed": 42
                 }
             },
             "score": {

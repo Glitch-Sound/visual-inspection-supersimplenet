@@ -126,7 +126,7 @@ def create_study(config: AppConfig, group: GroupConfig, storage: Path) -> optuna
     return optuna.create_study(
         study_name=f"visual-inspection-{config.model}-group-{group.id}",
         storage=f"sqlite:///{storage}",
-        load_if_exists=settings.execution.resume,
+        load_if_exists=False,
         direction="minimize",
         sampler=sampler,
         pruner=pruner,

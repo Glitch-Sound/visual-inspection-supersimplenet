@@ -9,6 +9,7 @@ import typer
 from conftest import build_project, write_test_image
 
 from app.common.config import load_config, preparation_fingerprint
+from app.common.contracts import load_preparation_manifest
 from app.common.image_io import ImageReadError
 from app.image_preparation.imaging import AlignedImage, AlignmentError
 from app.image_preparation.preparation import (
@@ -44,6 +45,52 @@ def _two_groups(root: Path):
 def _train_images(paths) -> None:
     for name in ("base.png", "a.png", "b.png"):
         write_test_image(paths.original_train("XX") / name, size=32)
+
+
+def test_req_002_s09(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    _train_images(paths)
+    target = paths.prepared_train("XX", 0)
+    target.mkdir(parents=True)
+    (target / "old.txt").write_text("old")
+    stale = target.with_name(f".{target.name}-stage-{'a' * 32}")
+    stale.mkdir()
+    (stale / "interrupted.txt").write_text("partial")
+
+    prepare_training(config, paths, group=0, aligner=aligned)
+
+    assert not stale.exists()
+    assert not (target / "old.txt").exists()
+    assert (target / "manifest.json").is_file()
+
+
+def test_req_002_s10(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    _train_images(paths)
+    prepare_training(config, paths, group=0, aligner=aligned)
+    target = paths.prepared_train("XX", 0)
+    (target / "manifest.json").unlink()
+
+    with pytest.raises(ValueError, match="rerun train-pre"):
+        load_preparation_manifest(target, model="XX", group=0, allowed_split_ids={0})
+
+
+def test_req_003_s05(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    _train_images(paths)
+    write_test_image(paths.original_test("XX") / "sample.png", size=32)
+    target = paths.prepared_test("XX")
+    target.mkdir(parents=True)
+    (target / "old.txt").write_text("old")
+    stale = target.with_name(f".{target.name}-stage-{'b' * 32}")
+    stale.mkdir()
+    from app.image_preparation.preparation import prepare_testing
+
+    prepare_testing(config, paths, aligner=aligned)
+
+    assert not stale.exists()
+    assert not (target / "old.txt").exists()
+    assert (target / "manifest.json").is_file()
 
 
 def test_group_req_001_s01(tmp_path: Path) -> None:
@@ -182,7 +229,20 @@ def test_group_req_002_s07(tmp_path: Path) -> None:
 def test_group_req_002_s08(tmp_path: Path) -> None:
     config, paths = _two_groups(tmp_path)
     _train_images(paths)
-    prepare_training(config, paths, aligner=aligned)
+    calls = 0
+
+    def changing_aligner(
+        image: np.ndarray, _reference: np.ndarray, _settings: object
+    ) -> AlignedImage:
+        nonlocal calls
+        calls += 1
+        return AlignedImage(image, 20 + calls, 0.5 + calls / 100)
+
+    manifests = prepare_training(config, paths, aligner=changing_aligner)
+    assert calls == 3
+    assert [source.alignment for source in manifests[0].sources] == [
+        source.alignment for source in manifests[1].sources
+    ]
     assert (paths.prepared_train("XX", 0) / "a_00.png").read_bytes() == (
         paths.prepared_train("XX", 1) / "a_00.png"
     ).read_bytes()

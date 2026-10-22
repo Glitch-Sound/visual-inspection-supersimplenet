@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
 import sys
 from typing import Any
+from uuid import uuid4
 
 import typer
 from rich.console import Console
@@ -15,7 +17,7 @@ from app.common.contracts import BestTrialResult, load_preparation_manifest
 from app.common.paths import ProjectPaths
 from app.common.result_index import (
     cleanup_generations,
-    create_generation,
+    create_result_stage,
     publish_current,
     read_current,
 )
@@ -77,100 +79,115 @@ def _test_command(
             allowed_split_ids={item.id for item in config.part.ranges},
             fingerprint=preparation_fingerprint(config),
         )
-        validated: dict[int, tuple[BestTrialResult, dict[str, object]]] = {}
-        problems: list[str] = []
-        for selected in groups:
-            try:
-                require_heatmap_range(selected)
-                best = BestTrialResult.read_json(
-                    paths.study_dir(model, selected.id) / "best_trial.json"
-                )
-                validate_best_trial_contract(config, selected, paths, best)
-                metadata = load_checkpoint_metadata(
-                    paths.checkpoint(model, selected.id)
-                )
-                validate_score_contract(config, selected, metadata)
-                validated[selected.id] = (best, metadata)
-            except (ValueError, FileNotFoundError) as error:
-                problems.append(f"group {selected.id}: {error}")
-        if problems:
-            raise ValueError("training artifacts invalid: " + "; ".join(problems))
-        old_current = (
-            read_current(
+        if group is not None:
+            current = read_current(
                 paths, model, allowed_group_ids={item.id for item in config.part.groups}
             )
-            if group is not None
-            else {}
-        )
-        generation = create_generation(paths, model)
+        else:
+            try:
+                current = read_current(
+                    paths,
+                    model,
+                    allowed_group_ids={item.id for item in config.part.groups},
+                )
+            except ValueError:
+                current = {}
+        stage = create_result_stage(paths, model)
         all_results = []
-        with EvaluationProgress() as progress:
-            progress.update(0, len(manifest.sources))
-            for selected in groups:
-                try:
-                    best, metadata = validated[selected.id]
-                    params = best.parameters
-                    predictor = CheckpointPredictor(
-                        paths.checkpoint(model, selected.id),
-                        layers=list(params.feature_layers),
-                        image_size=params.image_size,
-                        learning_rate_multiplier=params.learning_rate_multiplier,
-                        device=recorder.device.device,
-                    )
-                    source = (
-                        "暫定閾値"
-                        if selected.inspection_threshold is None
-                        else "検査用設定"
-                    )
-
-                    def show_threshold(
-                        threshold: float,
-                        *,
-                        group_id: int = selected.id,
-                        threshold_source: str = source,
-                    ) -> None:
-                        show_stage(
-                            f"グループ {group_id} 判定閾値: {threshold} ({threshold_source})"
+        try:
+            with EvaluationProgress() as progress:
+                progress.update(0, len(manifest.sources))
+                for selected in groups:
+                    try:
+                        require_heatmap_range(selected)
+                        best = BestTrialResult.read_json(
+                            paths.study_dir(model, selected.id) / "best_trial.json"
+                        )
+                        validate_best_trial_contract(config, selected, paths, best)
+                        metadata = load_checkpoint_metadata(
+                            paths.checkpoint(model, selected.id)
+                        )
+                        validate_score_contract(config, selected, metadata)
+                        params = best.parameters
+                        predictor = CheckpointPredictor(
+                            paths.checkpoint(model, selected.id),
+                            layers=list(params.feature_layers),
+                            image_size=params.image_size,
+                            learning_rate_multiplier=params.learning_rate_multiplier,
+                            device=recorder.device.device,
+                        )
+                        source = (
+                            "暫定閾値"
+                            if selected.inspection_threshold is None
+                            else "検査用設定"
                         )
 
-                    def show_progress(processed: int, total: int) -> None:
-                        if 0 < processed < total:
-                            progress.update(processed, total)
+                        def show_threshold(
+                            threshold: float,
+                            *,
+                            group_id: int = selected.id,
+                            threshold_source: str = source,
+                        ) -> None:
+                            show_stage(
+                                f"グループ {group_id} 判定閾値: {threshold} ({threshold_source})"
+                            )
 
-                    results = evaluate_model(
-                        config,
-                        selected,
-                        paths,
-                        predictor=predictor,
-                        output_dir=generation / paths.group_name(selected.id),
-                        finish_runtime=lambda: recorder.snapshot(ExitCode.SUCCESS),
-                        record_warning=recorder.warnings.append,
-                        record_error=recorder.errors.append,
-                        on_threshold_selected=show_threshold,
-                        on_progress=show_progress if selected is groups[-1] else None,
-                        checkpoint_metadata=metadata,
-                    )
-                    all_results.extend(results)
-                except Exception as error:
-                    raise RuntimeError(
-                        f"group {selected.id} failed: {error}"
-                    ) from error
-            final_runtime = recorder.snapshot(ExitCode.SUCCESS)
-            for result in all_results:
-                result.runtime = final_runtime
-                result.write_json(
-                    generation
-                    / paths.group_name(result.group)
-                    / f"{result.source_image}.json"
-                )
-            new_paths = {
-                item.id: f"generations/{generation.name}/{paths.group_name(item.id)}"
-                for item in groups
-            }
-            current = {**old_current, **new_paths}
-            publish_current(paths, model, current)
-            if manifest.sources:
-                progress.update(len(manifest.sources), len(manifest.sources))
+                        def show_progress(processed: int, total: int) -> None:
+                            if 0 < processed < total:
+                                progress.update(processed, total)
+
+                        results = evaluate_model(
+                            config,
+                            selected,
+                            paths,
+                            predictor=predictor,
+                            output_dir=stage / paths.group_name(selected.id),
+                            finish_runtime=lambda: recorder.snapshot(ExitCode.SUCCESS),
+                            record_warning=recorder.warnings.append,
+                            record_error=recorder.errors.append,
+                            on_threshold_selected=show_threshold,
+                            on_progress=show_progress
+                            if selected is groups[-1]
+                            else None,
+                            checkpoint_metadata=metadata,
+                        )
+                        all_results.extend(results)
+                        for result in results:
+                            result.runtime = recorder.snapshot(ExitCode.SUCCESS)
+                            result.write_json(
+                                stage
+                                / paths.group_name(selected.id)
+                                / f"{result.source_image}.json"
+                            )
+                        paths.result_generations(model).mkdir(
+                            parents=True, exist_ok=True
+                        )
+                        generation = paths.result_generations(model) / uuid4().hex
+                        generation.mkdir(parents=True, exist_ok=False)
+                        old = current.get(selected.id)
+                        if old is not None:
+                            shutil.rmtree(paths.results(model) / old)
+                        (stage / paths.group_name(selected.id)).replace(
+                            generation / paths.group_name(selected.id)
+                        )
+                        current[selected.id] = (
+                            f"generations/{generation.name}/{paths.group_name(selected.id)}"
+                        )
+                        publish_current(paths, model, current)
+                    except (ValueError, FileNotFoundError) as error:
+                        raise ValueError(
+                            f"group {selected.id} failed: {error}; "
+                            "rerun train or test-pre if artifacts are missing or inconsistent"
+                        ) from error
+                    except Exception as error:
+                        raise RuntimeError(
+                            f"group {selected.id} failed: {error}"
+                        ) from error
+                if manifest.sources:
+                    progress.update(len(manifest.sources), len(manifest.sources))
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
         try:
             cleanup_generations(paths, model, current)
         except (OSError, ValueError) as error:

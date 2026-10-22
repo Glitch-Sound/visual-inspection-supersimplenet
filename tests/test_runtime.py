@@ -9,7 +9,6 @@ import typer
 from conftest import build_project
 from filelock import FileLock
 
-from app.common.artifact_transaction import _transaction_path
 from app.common.cli import _run
 from app.common.runtime import select_device
 
@@ -36,32 +35,6 @@ def test_group_req_024_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     with FileLock(lock_path):
         _run("check", "YY", lambda *_args: called.append("YY"))
     assert called == ["YY"]
-
-
-def test_group_req_024_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, paths = build_project(tmp_path)
-    monkeypatch.chdir(tmp_path)
-    targets = {
-        "checkpoint": paths.checkpoint("XX", 0),
-        "config": paths.model_config("XX"),
-        "best_trial": paths.study_dir("XX", 0) / "best_trial.json",
-    }
-    for name, target in targets.items():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if name != "config":
-            target.write_text(f"old {name}")
-        shutil.copy2(target, _transaction_path(target, "backup"))
-    journal = paths.study_dir("XX", 0) / ".artifact-transaction.json"
-    journal.write_text(
-        json.dumps({"version": 1, "existed": {key: True for key in targets}})
-    )
-    targets["checkpoint"].write_text("partial new")
-    observed = []
-    _run(
-        "check", "XX", lambda *_args: observed.append(targets["checkpoint"].read_text())
-    )
-    assert observed == ["old checkpoint"]
-    assert not journal.exists()
 
 
 def test_select_device_falls_back_to_cpu() -> None:
@@ -185,7 +158,7 @@ def test_nreq_002_s01(
     commands = {
         "check": lambda: preparation_cli._check_command(model="XX"),
         "train-pre": lambda: preparation_cli._train_pre_command(model="XX", group=None),
-        "train": lambda: training_cli._train_command(model="XX", group=0, restart=True),
+        "train": lambda: training_cli._train_command(model="XX", group=0),
         "test-pre": lambda: preparation_cli._test_pre_command(model="XX"),
         "test": lambda: evaluation_cli._test_command(model="XX", group=0),
     }

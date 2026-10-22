@@ -36,7 +36,7 @@ OpenSpecでは、`openspec/specs/<capability-path>/spec.md`が1つのcapability�
 | Capability | 正式仕様 | 提供する能力 |
 | --- | --- | --- |
 | `visual-inspection/image-preparation` | [画像準備仕様](image-preparation/spec.md) | 元画像を位置合わせ・分割し、学習・検査で使用できる追跡可能な入力を準備する |
-| `visual-inspection/model-training` | [モデル学習仕様](model-training/spec.md) | 正常画像中心のデータから、型番別モデル、探索結果、暫定閾値を再現可能に生成・再開する |
+| `visual-inspection/model-training` | [モデル学習仕様](model-training/spec.md) | 正常画像中心のデータから、型番別モデル、探索結果、暫定閾値を毎回新規に生成する |
 | `visual-inspection/model-evaluation` | [モデル評価仕様](model-evaluation/spec.md) | モデルを使って分割画像と元画像を判定し、可視化、未判定、実行環境を含む結果を保存する |
 
 `visual-inspection/spec.md`を追加した場合、それは3仕様の目次ではなく、`visual-inspection`という第4のcapabilityとして扱われる。<br />
@@ -84,7 +84,7 @@ flowchart LR
 複数の処理に関わる場合は、既存の横断要件も確認する。
 
 - 元画像から学習・検査入力を作るまでの要件は、`image-preparation`へ配置する。
-- 学習データの構成、探索、データ拡張、モデル・閾値の生成と再開は、`model-training`へ配置する。
+- 学習データの構成、探索、データ拡張、モデル・閾値の新規生成は、`model-training`へ配置する。
 - 推論、可視化、判定集約、検査結果、再検査は、`model-evaluation`へ配置する。
 - 複数仕様に影響する変更でも、同じ要件を重複して記載しない。主な責務を持つcapabilityへ要件を置き、必要に応じて他仕様の入力・出力契約との関係を明記する。
 - 既存3仕様に属さない独立した横断能力が必要になった場合は、新しいcapabilityとして定義するかをOpenSpec changeで検討する。

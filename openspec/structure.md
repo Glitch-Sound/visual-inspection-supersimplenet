@@ -43,9 +43,9 @@ project/
 | `image-preparation/spec.md` | `src/app/image_preparation/` | `check`・`train-pre`・`test-pre`、位置合わせ、分割、準備 manifest |
 | `model-training/spec.md` | `src/app/model_training/` | `train`、探索、学習、checkpoint と最良試行の保存 |
 | `model-evaluation/spec.md` | `src/app/model_evaluation/` | `test`、checkpoint 推論、可視化、判定集約 |
-| 3能力に共通する契約・実行基盤 | `src/app/common/` | 設定、保存先、manifest・結果の型、CLI 実行記録、画像入出力、学習成果物の復旧 |
+| 3能力に共通する契約・実行基盤 | `src/app/common/` | 設定、保存先、manifest・結果の型、CLI 実行記録、画像入出力、整合確認 |
 
-各能力の CLI は自身の処理と `common/` を参照する。能力パッケージ間の直接 import と `common/` から能力への import は置かない。画像準備から学習へは `PreparationManifest`、学習から評価へは `BestTrialResult`、checkpoint、設定を既存の保存先で引き渡す。共有する型と検証規則は `common/contracts.py`、パスは `common/paths.py`、中断した学習成果物一式の復旧は `common/artifact_transaction.py` に置く。学習成果物の書込み処理は `model_training/artifacts.py` が担う。
+各能力の CLI は自身の処理と `common/` を参照する。能力パッケージ間の直接 import と `common/` から能力への import は置かない。画像準備から学習へは `PreparationManifest`、学習から評価へは `BestTrialResult`、checkpoint、設定を既存の保存先で引き渡す。共有する型と検証規則は `common/contracts.py`、パスは `common/paths.py` に置く。学習成果物の一時作成と公開は `model_training/artifacts.py` が担う。
 
 ## 複数 capability の構成
 

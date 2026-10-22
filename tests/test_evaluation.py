@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import cv2
@@ -10,7 +11,6 @@ import torch
 import typer
 from conftest import write_test_image
 from group_evaluation_helpers import FakePredictor, aligned, project, recorder
-from typer.testing import CliRunner
 
 from app.common.config import load_config
 from app.common.result_index import (
@@ -87,17 +87,39 @@ def test_group_req_023_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     _, paths = project(tmp_path, two=True)
     _run(monkeypatch, paths)
     before = _current(paths)
-    old_result = paths.results("XX") / before[1] / "sample.png.json"
-    old_contents = old_result.read_bytes()
     paths.checkpoint("XX", 1).unlink()
-    with pytest.raises(ValueError, match="group 1"):
-        _run(
-            monkeypatch,
-            paths,
-            predictor_factory=lambda *_a, **_kw: pytest.fail("predictor started"),
-        )
-    assert _current(paths) == before
-    assert old_result.read_bytes() == old_contents
+    with pytest.raises(ValueError, match="group 1 failed.*group_01.ckpt"):
+        _run(monkeypatch, paths)
+    after = _current(paths)
+    assert after[0] != before[0]
+    assert after[1] == before[1]
+
+
+@pytest.mark.parametrize("missing", ["checkpoint", "best_trial"])
+def test_req_023_s03_cli_input_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    missing: str,
+) -> None:
+    _, paths = project(tmp_path, two=True)
+    missing_path = (
+        paths.checkpoint("XX", 1)
+        if missing == "checkpoint"
+        else paths.study_dir("XX", 1) / "best_trial.json"
+    )
+    missing_path.unlink()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("app.common.cli.select_device", lambda: recorder().device)
+
+    with pytest.raises(typer.Exit) as error:
+        _test_command(model="XX", group=1)
+
+    assert error.value.exit_code == 2
+    record = json.loads(capsys.readouterr().out)
+    assert record["exit_code"] == 2
+    assert "group 1 failed" in record["errors"][0]
+    assert str(missing_path) in record["errors"][0]
 
 
 @pytest.mark.parametrize("failure", ["evaluation", "result_image_write"])
@@ -129,7 +151,9 @@ def test_group_req_023_s05(
         monkeypatch.setattr(evaluation, "write_image", fail_image_write)
     with pytest.raises(RuntimeError, match="group 1 failed"):
         _run(monkeypatch, paths)
-    assert _current(paths) == before
+    after = _current(paths)
+    assert after[0] != before[0]
+    assert after[1] == before[1]
     assert old_result.read_bytes() == old_contents
 
 
@@ -262,10 +286,10 @@ def test_group_req_013_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     before = _current(paths)
     monkeypatch.setattr(
         evaluation_cli,
-        "publish_current",
-        lambda *_args: (_ for _ in ()).throw(OSError("interrupted")),
+        "evaluate_model",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("interrupted")),
     )
-    with pytest.raises(OSError):
+    with pytest.raises(RuntimeError, match="interrupted"):
         _run(monkeypatch, paths)
     assert _current(paths) == before
 
@@ -274,14 +298,13 @@ def test_group_req_013_s04(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     _, paths = project(tmp_path)
     _run(monkeypatch, paths)
     before = _current(paths)
-    monkeypatch.setattr(
-        evaluation_cli,
-        "cleanup_generations",
-        lambda *_args: (_ for _ in ()).throw(OSError("interrupted")),
-    )
-    _, run = _run(monkeypatch, paths)
-    assert _current(paths) != before
-    assert any("cleanup deferred" in item for item in run.warnings)
+    shutil.rmtree(paths.results("XX") / before[0])
+    with pytest.raises(ValueError, match="target missing"):
+        _current(paths)
+    with pytest.raises(ValueError, match="target missing"):
+        _run(monkeypatch, paths, group=0)
+    _run(monkeypatch, paths)
+    assert _current(paths)[0] != before[0]
 
 
 @pytest.mark.parametrize("bad", ["version", "path", "missing", "symlink", "group"])
@@ -311,14 +334,6 @@ def test_group_req_013_s05(
         read_current(paths, "XX", allowed_group_ids={0, 1})
     with pytest.raises(ValueError):
         _run(monkeypatch, paths, group=0)
-
-
-def test_group_req_013_s06() -> None:
-    app = typer.Typer()
-    app.command()(_test_command)
-    result = CliRunner().invoke(app, ["--model", "XX", "--restart"])
-    assert result.exit_code != 0
-    assert "restart" in result.output
 
 
 def test_group_req_013_s07(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -369,6 +384,40 @@ def test_group_req_013_s10(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
     execute("check", "XX", lambda _paths, _recorder: "ok")
     assert not orphan.exists()
+
+
+def test_req_013_s11(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path, two=True)
+    _run(monkeypatch, paths)
+    before = _current(paths)
+    original = evaluation_cli.evaluate_model
+
+    def fail_later(config, group, *args, **kwargs):
+        if group.id == 1:
+            raise RuntimeError("later group failed")
+        return original(config, group, *args, **kwargs)
+
+    monkeypatch.setattr(evaluation_cli, "evaluate_model", fail_later)
+    with pytest.raises(RuntimeError, match="group 1 failed: later group failed"):
+        _run(monkeypatch, paths)
+    after = _current(paths)
+    assert after[0] != before[0]
+    assert after[1] == before[1]
+
+
+def test_req_013_s12(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path)
+    _run(monkeypatch, paths)
+    before = _current(paths)
+    root = paths.results("XX")
+    stale = root / f".stage-{'a' * 32}"
+    stale.mkdir()
+    (stale / "partial.txt").write_text("partial")
+
+    _run(monkeypatch, paths)
+
+    assert not stale.exists()
+    assert _current(paths)[0] != before[0]
 
 
 def test_group_req_016_s01(tmp_path: Path) -> None:
@@ -674,7 +723,7 @@ def test_command_progress_cli_undetermined_exit_record(
             assert result["alignment"]["recapture_required"] is recapture_required
 
 
-@pytest.mark.parametrize("failure", ["later_group", "final_write", "publish"])
+@pytest.mark.parametrize("failure", ["later_group", "final_write"])
 def test_command_progress_cli_failure_exit_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -694,6 +743,7 @@ def test_command_progress_cli_failure_exit_record(
     old_result = paths.results("XX") / before[1] / "sample.png.json"
     old_bytes = old_result.read_bytes()
 
+    reason = ""
     if failure == "later_group":
         original_evaluate = evaluation_cli.evaluate_model
 
@@ -717,14 +767,7 @@ def test_command_progress_cli_failure_exit_record(
             return original_write(result, output)
 
         monkeypatch.setattr(evaluation.InspectionResult, "write_json", fail_final_write)
-        reason = "injected final write failure"
-    else:
-
-        def fail_publish(*_args):
-            raise OSError("injected publish failure")
-
-        monkeypatch.setattr(evaluation_cli, "publish_current", fail_publish)
-        reason = "injected publish failure"
+        reason = "group 1 failed: injected final write failure"
 
     capsys.readouterr()
     with pytest.raises(typer.Exit) as error:
@@ -743,7 +786,9 @@ def test_command_progress_cli_failure_exit_record(
     record = json.loads(captured.out)
     assert record["exit_code"] == 3
     assert reason in record["errors"]
-    assert _current(paths) == before
+    after = _current(paths)
+    assert after[0] != before[0]
+    assert after[1] == before[1]
     assert old_result.read_bytes() == old_bytes
 
 
@@ -767,7 +812,9 @@ def test_command_progress_stops_on_failure(
     stderr = capsys.readouterr().err
     assert stderr.count("検査進捗 0/2") == 1
     assert "検査進捗 1/2" not in stderr
-    assert _current(paths) == before
+    after = _current(paths)
+    assert after[0] != before[0]
+    assert after[1] == before[1]
 
 
 def test_command_progress_stops_before_failed_result_write(
@@ -792,7 +839,9 @@ def test_command_progress_stops_before_failed_result_write(
     stderr = capsys.readouterr().err
     assert stderr.count("検査進捗 1/2") == 1
     assert "検査進捗 2/2" not in stderr
-    assert _current(paths) == before
+    after = _current(paths)
+    assert after[0] != before[0]
+    assert after[1] == before[1]
 
 
 @pytest.mark.parametrize("failure", ["final_write", "publish"])
@@ -825,12 +874,18 @@ def test_command_progress_stops_before_failed_publication(
             lambda *_args: (_ for _ in ()).throw(OSError("injected publish failure")),
         )
     capsys.readouterr()
-    with pytest.raises(OSError, match="injected"):
+    with pytest.raises(RuntimeError, match="injected"):
         _run(monkeypatch, paths)
     stderr = capsys.readouterr().err
-    assert "検査進捗 1/2" in stderr
     assert "検査進捗 2/2" not in stderr
-    assert _current(paths) == before
+    if failure == "publish":
+        with pytest.raises(ValueError, match="missing"):
+            _current(paths)
+    else:
+        assert "検査進捗 1/2" in stderr
+        after = _current(paths)
+        assert after[0] != before[0]
+        assert after[1] == before[1]
 
 
 def test_command_progress_preserves_single_stdout_record(

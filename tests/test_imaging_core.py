@@ -1,33 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import cv2
 import numpy as np
 import pytest
 
-from app.common.atomic import recover_directory_swap
 from app.common.config import AlignmentSettings
 from app.image_preparation.imaging import AlignmentError, align_orb
-
-
-def test_atomic_directory_recovers_interrupted_swap(tmp_path: Path) -> None:
-    target = tmp_path / "derived"
-    backup = tmp_path / ".derived.backup"
-    backup.mkdir()
-    (backup / "keep.txt").write_text("old", encoding="utf-8")
-
-    returned = recover_directory_swap(target)
-
-    assert returned == backup
-    assert (target / "keep.txt").read_text(encoding="utf-8") == "old"
-    assert not backup.exists()
-
-    backup.mkdir()
-    (backup / "old.txt").write_text("old", encoding="utf-8")
-    recover_directory_swap(target)
-    assert target.is_dir()
-    assert not backup.exists()
 
 
 def test_align_orb_uses_configured_ransac_contract(

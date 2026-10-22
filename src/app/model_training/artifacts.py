@@ -1,25 +1,47 @@
-"""Training artifact persistence and restart."""
+"""Publish one complete group training result without restoring old artifacts."""
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import optuna
 
-from app.common.artifact_transaction import (
-    _remove_transaction_files,
-    _transaction_journal,
-    _transaction_path,
-    recover_artifact_transaction,
-)
 from app.common.config import AppConfig, GroupConfig, write_threshold
 from app.common.contracts import BestTrialResult, ScoreContract, TrialParametersContract
 from app.common.paths import ProjectPaths
 from app.common.runtime import package_versions
 from app.model_training.search import DatasetSplit, TrialOutcome
+
+
+def new_training_stage(paths: ProjectPaths, model: str, group: int) -> Path:
+    target = paths.study_dir(model, group)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    prefix = f".{target.name}-stage-"
+    for stale in target.parent.iterdir():
+        if stale.name.startswith(prefix) and re.fullmatch(
+            r"[0-9a-f]{32}", stale.name[len(prefix) :]
+        ):
+            if stale.is_symlink() or not stale.is_dir():
+                raise ValueError(f"invalid training temporary area: {stale}")
+            shutil.rmtree(stale)
+    checkpoint = paths.checkpoint(model, group)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_prefix = f".{checkpoint.name}-stage-"
+    for stale in checkpoint.parent.iterdir():
+        if stale.name.startswith(checkpoint_prefix) and re.fullmatch(
+            r"[0-9a-f]{32}", stale.name[len(checkpoint_prefix) :]
+        ):
+            if stale.is_symlink() or not stale.is_file():
+                raise ValueError(f"invalid checkpoint temporary file: {stale}")
+            stale.unlink()
+    stage = target.with_name(f"{prefix}{uuid4().hex}")
+    stage.mkdir()
+    return stage
 
 
 def persist_best_trial(
@@ -30,56 +52,32 @@ def persist_best_trial(
     split: DatasetSplit,
     study: optuna.Study,
     outcomes: dict[int, TrialOutcome],
+    study_dir: Path,
 ) -> BestTrialResult:
-    recover_artifact_transaction(paths, config.model, group.id)
     best = study.best_trial
     if best.value is None:
         raise RuntimeError("best trial does not have an objective value")
     outcome = outcomes.get(best.number)
     if outcome is None:
-        checkpoint = best.user_attrs.get("checkpoint")
-        training_scores = best.user_attrs.get("training_scores")
-        if not isinstance(checkpoint, str) or not isinstance(training_scores, list):
-            raise RuntimeError("best trial outcome is not available in this run")
-        outcome = TrialOutcome(
-            validation_scores=[],
-            training_scores=[float(score) for score in training_scores],
-            checkpoint=Path(checkpoint),
-        )
+        raise RuntimeError("best trial outcome is not available in this run")
     threshold = float(
         np.percentile(
-            outcome.training_scores,
-            group.optuna_settings.threshold.percentile,
+            outcome.training_scores, group.optuna_settings.threshold.percentile
         )
     )
     target_checkpoint = paths.checkpoint(config.model, group.id)
-    target_config = paths.model_config(config.model)
-    target_best = paths.study_dir(config.model, group.id) / "best_trial.json"
-    targets = {
-        "checkpoint": target_checkpoint,
-        "config": target_config,
-        "best_trial": target_best,
-    }
-    stages = {name: _transaction_path(path, "stage") for name, path in targets.items()}
-    backups = {
-        name: _transaction_path(path, "backup") for name, path in targets.items()
-    }
-    for path in (*stages.values(), *backups.values()):
-        if path.exists():
-            path.unlink()
-
+    target_study = paths.study_dir(config.model, group.id)
+    if study_dir.parent != target_study.parent or not study_dir.name.startswith(
+        f".{target_study.name}-stage-"
+    ):
+        raise ValueError(f"invalid training stage: {study_dir}")
+    checkpoint_stage = target_checkpoint.with_name(
+        f".{target_checkpoint.name}-stage-{uuid4().hex}"
+    )
     try:
-        target_checkpoint.parent.mkdir(parents=True, exist_ok=True)
-        target_best.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(outcome.checkpoint, stages["checkpoint"])
+        shutil.copy2(outcome.checkpoint, checkpoint_stage)
         _attach_checkpoint_metadata(
-            stages["checkpoint"],
-            model=config.model,
-            group=group.id,
-            threshold=threshold,
-        )
-        write_threshold(
-            target_config, threshold, group=group.id, destination=stages["config"]
+            checkpoint_stage, model=config.model, group=group.id, threshold=threshold
         )
         result = BestTrialResult(
             model=config.model,
@@ -96,29 +94,19 @@ def persist_best_trial(
             seed=group.optuna_settings.execution.seed,
             dependencies=package_versions(),
         )
-        result.write_json(stages["best_trial"])
-    except Exception:
-        _remove_transaction_files((*stages.values(), *backups.values()))
-        raise
-
-    existed = {name: path.exists() for name, path in targets.items()}
-    journal = _transaction_journal(paths, config.model, group.id)
-    try:
-        for name, path in targets.items():
-            if existed[name]:
-                shutil.copy2(path, backups[name])
-        _write_transaction_journal(journal, existed)
-        for name, target in targets.items():
-            _replace_staged_artifact(stages[name], target)
-        journal.unlink()
-    except Exception:
-        if journal.exists():
-            recover_artifact_transaction(paths, config.model, group.id)
-        else:
-            _remove_transaction_files((*stages.values(), *backups.values()))
-        raise
-    _remove_transaction_files(backups.values())
-    return result
+        result.write_json(study_dir / "best_trial.json")
+        if target_study.exists():
+            paths.remove_model_artifact(target_study, expected=target_study)
+        study_dir.replace(target_study)
+        if target_checkpoint.exists():
+            paths.remove_model_artifact(target_checkpoint, expected=target_checkpoint)
+        checkpoint_stage.replace(target_checkpoint)
+        write_threshold(paths.model_config(config.model), threshold, group=group.id)
+        return result
+    finally:
+        if study_dir.exists():
+            shutil.rmtree(study_dir)
+        checkpoint_stage.unlink(missing_ok=True)
 
 
 def _trial_parameters_contract(
@@ -132,24 +120,6 @@ def _trial_parameters_contract(
         except json.JSONDecodeError as error:
             raise ValueError("feature_layers must contain valid JSON") from error
     return TrialParametersContract.model_validate(normalized)
-
-
-def _write_transaction_journal(journal: Path, existed: dict[str, bool]) -> None:
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    temporary = journal.with_suffix(journal.suffix + ".tmp")
-    try:
-        temporary.write_text(
-            json.dumps({"version": 1, "existed": existed}, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(journal)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-
-def _replace_staged_artifact(source: Path, target: Path) -> None:
-    source.replace(target)
 
 
 def _attach_checkpoint_metadata(
@@ -166,12 +136,3 @@ def _attach_checkpoint_metadata(
         "threshold": threshold,
     }
     torch.save(payload, path)
-
-
-def restart_training(paths: ProjectPaths, model: str, group: int) -> None:
-    paths.remove_model_artifact(
-        paths.study_dir(model, group), expected=paths.study_dir(model, group)
-    )
-    paths.remove_model_artifact(
-        paths.checkpoint(model, group), expected=paths.checkpoint(model, group)
-    )

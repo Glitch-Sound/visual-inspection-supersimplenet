@@ -33,7 +33,7 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | 暫定閾値 | 学習集合の異常スコアから算出する、初期評価用の判定境界 |
 | 検査用閾値 | グループの`inspection_threshold`。指定時に暫定閾値に代えて使う |
 | `undetermined` | 位置合わせ失敗や分割不足などで正常と確定できないグループ内判定 |
-| 結果世代 | 1回の`test`で完成させる、グループ別の結果画像とJSONの一式 |
+| 結果世代 | `test`がグループごとに完成させる結果画像とJSONの一式 |
 | 現行参照 | `current.json`に記録する、各グループで現在使用する結果世代の相対パス |
 | capability | 継続して管理する機能・責務の単位。このプロジェクトでは画像準備、モデル学習、モデル評価の3つ |
 | OpenSpec change | 一回の変更を計画・実装・検証する単位 |
@@ -80,9 +80,8 @@ npm ci
 | `group_detail["<id>"].augmentation` | 学習入力だけに適用する拡張条件 |
 
 `blacklist`と`alignment`は型番共通である。<br />
-既存の型番設定では、各`groups`要素から`optuna_settings`、`score`、`augmentation`を取り出し、同じIDをキーとする`group_detail`へ移す。<br />
 例えば`id: 0`に対応するキーは`"0"`とし、`"00"`は使用しない。<br />
-旧形式の設定や、両領域で項目が重複する設定は入力不備として拒否される。<br />
+`groups` に置けない詳細項目や、両領域で項目が重複する設定は入力不備として拒否される。<br />
 暫定閾値の`group_detail["<id>"].optuna_settings.threshold.value`は学習完了時に対象グループだけ更新される。<br />
 checkpointと最良試行にも同じ値を保存するため、暫定閾値だけを手動で変更しない。<br />
 切り出し位置、サイズ、縮小倍率、位置合わせなどを変更したら、該当する`train-pre`または`test-pre`を再実行する。<br />
@@ -109,12 +108,15 @@ uv run --locked train --model XX --group 1
 uv run --locked test --model XX --group 1
 ```
 
-学習探索履歴とcheckpointを対象グループで作り直す場合は`train --restart`を使う。<br />
-`test`は実行のたびに対象グループの結果を新しく作るため、`--restart`は受け付けない。<br />
+`train`は実行のたびに対象グループの探索と学習を最初から行う。<br />
+`train-pre`、`train`、`test-pre`、`test`は一時領域で成果物を完成させ、対象の旧成果物を削除してから新成果物を公開する。<br />
+公開前に失敗・中断した場合は旧成果物を保持し、残った一時領域は次の実行時に削除する。<br />
+公開途中に中断して成果物が欠けたり整合しなくなった場合は、利用前の確認で拒否されるため、示された準備・学習・検査をやり直す。
 全件学習で後続グループが失敗した場合、コマンドはエラー終了し、失敗グループIDを表示する。<br />
 完了済みグループの成果物は保持する。<br />
-全件検査では対象グループのモデル一式を推論前に照合し、一つでも欠ければ結果を更新しない。<br />
-検査中に失敗した場合も`current.json`を切り替えず、旧結果を保持する。
+全件学習・検査では、成功したグループから成果物と結果を置き換える。<br />
+後続グループが失敗した場合は、失敗グループIDと理由を示して終了し、そのグループの旧成果物・旧結果を保持する。<br />
+各グループのモデル一式はそのグループの推論前に照合する。
 
 元画像の判定はグループごとに、`anomaly`が一つでもあれば`anomaly`、必要な全分割が`normal`なら`normal`、それ以外は`undetermined`とする。<br />
 グループ間の総合判定は作らない。
@@ -132,11 +134,11 @@ uv run --locked test --model XX --group 1
 | 検査結果画像と元画像・グループ別JSON | `data/06_result/<model>/generations/<実行ID>/group_<2桁以上のID>/` |
 
 グループ別成果物の名前だけIDを最低2桁で0埋めする (ID `0` は `group_00`、ID `100` は `group_100`)。<br />
-設定、CLI、各JSONのID値は従来どおり整数である。<br />
-旧名のグループ別成果物は自動移行しないため、必要なら退避したうえで`check`、`train-pre`、`train`、`test-pre`、全件`test`の順に再実行する。<br />
+設定、CLI、各JSONのID値は整数である。<br />
+破壊的変更後は既存の準備・学習・検査成果物および型番設定との互換性を前提とせず、`check`、`train-pre`、`train`、`test-pre`、全件`test`の順に再実行する。<br />
 `current.json`の`groups`は、グループIDを通常の10進文字列のキーとして`generations/<実行ID>/group_<2桁以上のID>`への相対パスを示す。<br />
 結果を読む側は、同じ型番の`test`が動いていない時に`current.json`を一度読み、示されたJSONと画像を読む。<br />
-単独検査では他グループの参照を保持する。<br />
+単独検査では他グループの参照を保持し、全件検査では成功したグループから参照を切り替える。<br />
 参照の切替後、参照されなくなったグループ結果と空の世代を整理し、現在の各グループ結果だけを残す。<br />
 整理に失敗した場合は警告を記録し、次の型番コマンドで再試行する。<br />
 現行参照が壊れている場合、単独検査と読戻しは拒否されるが、全件`test`で新しい結果一式を作って参照を再生成できる。
@@ -245,16 +247,20 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| drop-legacy-and-recovery-handling | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11で四CLIの公開前失敗、旧成果物の保持、残存一時領域の削除を確認する。 |
+| drop-legacy-and-recovery-handling | AC-002 | 未検証 | タスク3.3: 両OSの実モデルで毎回の新規探索と全グループ途中失敗時の部分成功、失敗グループIDと理由を確認する。 |
+| drop-legacy-and-recovery-handling | AC-003 | 未検証 | タスク3.3: 両OSで学習成果物公開後の対象閾値書戻しと他設定・別グループの保持を確認する。 |
+| drop-legacy-and-recovery-handling | AC-004 | 未検証 | タスク3.3: 両OSで公開途中の中断による成果物の欠落・不整合の拒否と、準備・学習・検査の再実行案内を確認する。 |
+| drop-legacy-and-recovery-handling | AC-005 | 未検証 | タスク3.3: 両OSで準備指紋、最良試行とcheckpointの整合、型番排他、シンボリックリンク拒否と四CLIの実行を確認する。 |
 | split-group-config-details | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11の対象環境で新形式の複数グループ設定を使い、5 CLIの全件・単独実行と成果物読戻しを確認する。 |
-| split-group-config-details | AC-002 | 未検証 | タスク3.4: 両OSで詳細の欠落・余分・非標準IDキーと旧形式混在を入力不備として拒否し、既存成果物が変わらないことを確認する。 |
+| split-group-config-details | AC-002 | 未検証 | タスク3.4: 両OSで詳細の欠落・余分・非標準IDキーと`groups`に置けない項目を入力不備として拒否し、既存成果物が変わらないことを確認する。 |
 | split-group-config-details | AC-003 | 未検証 | タスク3.5: 両OSで実モデルの単独グループ学習を行い、対象の暫定閾値だけが詳細設定へ書き戻されることを確認する。 |
 | pad-group-artifact-names | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11の対象環境でID 0・10のグループ別成果物名と整数IDを全CLIで確認する。 |
-| pad-group-artifact-names | AC-002 | 未検証 | タスク3.4: 両OSで旧名成果物を退避後に準備・学習・全件検査を再実行し、新名の現行参照と結果を読み戻す。 |
 | align-inspection-progress-and-scenario-tests | AC-001 | 未検証 | タスク4.1: 対象OSの実端末・非端末で全・単独グループ検査の元画像進捗、途中失敗、標準出力JSONを確認する。 |
 | align-inspection-progress-and-scenario-tests | AC-002 | 未検証 | タスク4.2: 対象OSの実画像と実GPU/CPUで準備、判定画像、色尺度、CLI表示を確認する。 |
 | align-inspection-progress-and-scenario-tests | AC-003 | 未検証 | タスク4.3: 実重みで指定グループを再学習し、checkpointによる検査と他グループ保持を確認する。 |
 | group-scoped-inspection-models | AC-007 | 未検証 | タスク6.7: Ubuntu 24.04 LTS・Windows 11の対象実機でCPUと利用可能なGPUを使い、全件・単独グループの5 CLIと成果物読戻しを確認する。 |
-| group-scoped-inspection-models | AC-008 | 未検証 | タスク6.8: 両OSで同一型番・別型番の同時起動、終了コード3の拒否、中断後の復旧を確認する。 |
+| group-scoped-inspection-models | AC-008 | 未検証 | タスク6.8: 両OSで同一型番・別型番の同時起動、終了コード3の拒否、中断後の欠落検出と再実行を確認する。 |
 | organize-app-by-capability | AC-002 | 未検証 | タスク4.3: Ubuntu 24.04 LTS・Windows 11 の実機で5 CLIの名前・引数・終了コード・出力を確認する。 |
 | organize-app-by-capability | AC-003 | 未検証 | タスク4.4: 両OSの実機でmanifest・checkpoint・検査結果の形式、保存先、読戻しを確認する。 |
 | organize-app-by-capability | AC-004 | 未検証 | タスク4.5: 両OSでGPU有効・無効の計4条件を実行し、学習・推論で実際に使用したデバイスを確認する。 |
@@ -269,7 +275,6 @@ npx --no-install openspec update
 | improve-inspection-configuration-and-cli | AC-003 | 未検証 | タスク4.2: Ubuntu 24.04 LTSとWindows 11で5 CLIの段階表示、準備進捗、標準出力JSON、終了コードを確認する。 |
 | improve-inspection-configuration-and-cli | AC-004 | 未検証 | タスク4.3: 実際の基準画像で縮小前座標、確認画像、学習・試験の切り出し位置と`SIZE`を照合する。 |
 | improve-inspection-configuration-and-cli | AC-005 | 未検証 | タスク4.4: 対象環境で不正設定・位置合わせ失敗・途中処理失敗の理由、終了状態、旧成果物保全と未判定を確認する。 |
-| improve-inspection-configuration-and-cli | AC-006 | 未検証 | タスク4.5: 対象型番の旧座標と分割画像を比較し、必要な再学習・検査結果再生成と旧成果物の退避を確認する。 |
 | comparable-heatmap-scale | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11で同一学習済みモデルと表示範囲を確認し、異なる異常マップの同値同色をヒートマップ層で確認する。 |
 | comparable-heatmap-scale | AC-002 | 未検証 | タスク4.3: 両OSで正常画像の非着色、異常画像の着色、スコア・閾値・判定の独立性を確認する。 |
 | comparable-heatmap-scale | AC-003 | 未検証 | タスク4.4: 両OSで表示範囲変更後の`test`と結果JSONの表示範囲を確認する。 |
@@ -279,13 +284,13 @@ npx --no-install openspec update
 | show-test-progress-and-update-backbone | AC-003 | 未検証 | タスク4.3: 対象型番で`racm_in1k`実重みの取得、再学習、checkpointによる検査を確認する。 |
 | show-test-progress-and-update-backbone | AC-004 | 未検証 | タスク4.4: 全型番で旧探索履歴・checkpointの破棄、閾値・表示範囲の見直し、旧検査結果の再生成を確認する。 |
 | restore-tv-backbone-and-improve-output | AC-001 | 未検証 | タスク5.1: Ubuntu 24.04 LTSとWindows 11で`tv_in1k`の実重みを取得して学習し、checkpointによる検査を確認する。 |
-| restore-tv-backbone-and-improve-output | AC-002 | 未検証 | タスク5.2: 対象の全型番で旧成果物を退避し、`train --restart`、閾値と表示範囲の確認、`test`を実施する。 |
 | restore-tv-backbone-and-improve-output | AC-003 | 未検証 | タスク5.3: 両OSの実画像で正常分割と、異常分割の左原画像・右ヒートマップ付き画像を結果JSONと照合する。 |
-| restore-tv-backbone-and-improve-output | AC-004 | 未検証 | タスク5.4: 両OSの端末・非端末で試行条件表、終了状態、再開時の件数、標準出力JSONと終了コードを確認する。 |
+| restore-tv-backbone-and-improve-output | AC-004 | 未検証 | タスク5.4: 両OSの端末・非端末で試行条件表、終了状態、毎回の新規探索件数、標準出力JSONと終了コードを確認する。 |
 
 `show-test-progress-and-update-backbone` のAC-003にある`racm_in1k`確認は当時の未検証事項であり、現在の運用には適用しない。<br />
 現在の学習は`wide_resnet50_2.tv_in1k`とグループ別の新形式設定から開始する。<br />
-運用開始前のため旧形式成果物の移行は対象外とし、上表の旧バックボーン・旧成果物に関する項目は当時の延期記録として残す。
+上表は対象環境で未検証の受け入れ確認を追跡する。<br />
+破壊的変更後は準備・学習・検査をすべて再実行する。
 
 `comparable-heatmap-scale` の実機確認時は、[アーカイブ済みchangeの検証記録](openspec/changes/archive/2026-10-08-comparable-heatmap-scale/verification.md)にモデル確認方法、使用範囲、結果画像・JSON、実行コマンド、環境、日付、制約を追記する。<br />
 AC-001〜AC-004 は未検証であり、自動試験の成功やアーカイブは運用開始の承認を意味しない。

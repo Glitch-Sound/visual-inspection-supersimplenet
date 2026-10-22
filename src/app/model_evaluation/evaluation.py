@@ -1,4 +1,4 @@
-"""Model evaluation, visualization, aggregation, and restart handling."""
+"""Model evaluation, visualization, and aggregation."""
 
 from __future__ import annotations
 

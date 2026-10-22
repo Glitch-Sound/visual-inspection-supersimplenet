@@ -119,7 +119,6 @@ class NormalOnlySettings(StrictModel):
 class ExecutionSettings(StrictModel):
     trials: Annotated[int, Field(gt=0)] = 10
     seed: int = 42
-    resume: bool = True
 
 
 class OptunaSettings(StrictModel):

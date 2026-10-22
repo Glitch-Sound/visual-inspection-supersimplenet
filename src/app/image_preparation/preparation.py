@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import re
 import shutil
-import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
-from app.common.atomic import recover_directory_swap
 from app.common.config import (
     AppConfig,
     CropRange,
@@ -82,21 +82,27 @@ def list_images(directory: Path) -> list[Path]:
 
 def _atomic_replace_directory(target: Path, populate: Callable[[Path], None]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    backup = recover_directory_swap(target)
-    stage = Path(tempfile.mkdtemp(prefix=f".{target.name}-", dir=target.parent))
+    prefix = f".{target.name}-stage-"
+    for stale in target.parent.iterdir():
+        if not stale.name.startswith(prefix):
+            continue
+        if not re.fullmatch(r"[0-9a-f]{32}", stale.name[len(prefix) :]):
+            continue
+        if stale.is_symlink() or not stale.is_dir():
+            raise ValueError(f"invalid preparation temporary area: {stale}")
+        shutil.rmtree(stale)
+    stage = target.with_name(f"{prefix}{uuid4().hex}")
+    stage.mkdir()
     try:
         populate(stage)
         if target.exists():
-            target.replace(backup)
+            if target.is_symlink() or not target.is_dir():
+                raise ValueError(f"invalid preparation target: {target}")
+            shutil.rmtree(target)
         stage.replace(target)
-        if backup.exists():
-            shutil.rmtree(backup)
-    except Exception:
+    finally:
         if stage.exists():
             shutil.rmtree(stage)
-        if backup.exists() and not target.exists():
-            backup.replace(target)
-        raise
 
 
 def create_check_image(config: AppConfig, paths: ProjectPaths) -> Path:
@@ -132,7 +138,26 @@ def prepare_training(
     aligner: Callable[..., AlignedImage] = align_orb,
     on_progress: ProgressCallback | None = None,
     group: int | None = None,
+    _alignment_cache: dict[str, AlignedImage | AlignmentError] | None = None,
 ) -> dict[int, PreparationManifest]:
+    if group is None:
+        manifests: dict[int, PreparationManifest] = {}
+        alignment_cache: dict[str, AlignedImage | AlignmentError] = {}
+        for selected in config.part.select_groups():
+            try:
+                manifests.update(
+                    prepare_training(
+                        config,
+                        paths,
+                        aligner=aligner,
+                        on_progress=on_progress,
+                        group=selected.id,
+                        _alignment_cache=alignment_cache,
+                    )
+                )
+            except Exception as error:
+                raise type(error)(f"group {selected.id} failed: {error}") from error
+        return manifests
     source_dir = paths.original_train(config.model)
     images = list_images(source_dir)
     if on_progress is not None:
@@ -148,6 +173,8 @@ def prepare_training(
     }
     groups = config.part.select_groups(group)
     manifests: dict[int, PreparationManifest] = {}
+    if _alignment_cache is None:
+        _alignment_cache = {}
 
     def populate(stage: Path) -> None:
         sources: dict[int, list[PreparedSource]] = {item.id: [] for item in groups}
@@ -159,9 +186,20 @@ def prepare_training(
         for target in targets.values():
             target.mkdir(parents=True, exist_ok=True)
         for index, source_path in enumerate(images, start=1):
-            source = resize_image(read_image(source_path), config.image_resize)
             try:
-                aligned = aligner(source, reference, config.part.alignment)
+                if source_path.name in _alignment_cache:
+                    cached = _alignment_cache[source_path.name]
+                    if isinstance(cached, AlignmentError):
+                        raise cached
+                    aligned = cached
+                else:
+                    source = resize_image(read_image(source_path), config.image_resize)
+                    try:
+                        aligned = aligner(source, reference, config.part.alignment)
+                    except AlignmentError as error:
+                        _alignment_cache[source_path.name] = error
+                        raise
+                    _alignment_cache[source_path.name] = aligned
             except AlignmentError as error:
                 for item in groups:
                     sources[item.id].append(

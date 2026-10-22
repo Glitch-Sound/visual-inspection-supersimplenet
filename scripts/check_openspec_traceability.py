@@ -220,7 +220,7 @@ def check_skip_specs_change(
     if phase in {"complete", "limited-archive"}:
         if not task_requirements:
             errors.append(f"{change_dir.name}: 完了検査に必要なタスクがありません")
-        deferred: dict[str, str] = {}
+        deferred: dict[str, set[str]] = {}
         if phase == "limited-archive":
             deferred, deferred_errors = check_deferred_record(
                 change_dir, tasks, repository_root
@@ -234,7 +234,10 @@ def check_skip_specs_change(
                     phase != "limited-archive"
                     or task is None
                     or task["task_id"] not in deferred
-                    or deferred[task["task_id"]] not in task["description"]
+                    or not all(
+                        acceptance_id in task["description"]
+                        for acceptance_id in deferred[task["task_id"]]
+                    )
                 ):
                     errors.append(f"{change_dir.name}: 未完了タスク: {checkbox[2]}")
         errors.extend(
@@ -242,7 +245,7 @@ def check_skip_specs_change(
                 change_dir,
                 design,
                 repository_root,
-                deferred_ids=set(deferred.values())
+                deferred_ids=set().union(*deferred.values())
                 if phase == "limited-archive"
                 else set(),
             )
@@ -457,7 +460,7 @@ def check_change(
     if phase in {"complete", "limited-archive"}:
         if not task_matches:
             errors.append(f"{change_dir.name}: 完了検査に必要なタスクがありません")
-        deferred: dict[str, str] = {}
+        deferred: dict[str, set[str]] = {}
         if phase == "limited-archive":
             deferred, deferred_errors = check_deferred_record(
                 change_dir, tasks, repository_root
@@ -471,7 +474,10 @@ def check_change(
                     phase != "limited-archive"
                     or task is None
                     or task["task_id"] not in deferred
-                    or deferred[task["task_id"]] not in task["description"]
+                    or not all(
+                        acceptance_id in task["description"]
+                        for acceptance_id in deferred[task["task_id"]]
+                    )
                 ):
                     errors.append(f"{change_dir.name}: 未完了タスク: {checkbox[2]}")
         errors.extend(
@@ -479,7 +485,7 @@ def check_change(
                 change_dir,
                 design,
                 repository_root,
-                deferred_ids=set(deferred.values())
+                deferred_ids=set().union(*deferred.values())
                 if phase == "limited-archive"
                 else set(),
             )
@@ -538,7 +544,7 @@ def check_test_collection(
 
 def check_deferred_record(
     change_dir: Path, tasks: str, root: Path
-) -> tuple[dict[str, str], list[str]]:
+) -> tuple[dict[str, set[str]], list[str]]:
     """Read deferred acceptance checks from the repository README."""
     path = root / "README.md"
     if not path.is_file():
@@ -547,7 +553,7 @@ def check_deferred_record(
         path.read_text(encoding="utf-8"), "## 延期中の受け入れ確認"
     )
     original_name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", change_dir.name)
-    deferred: dict[str, str] = {}
+    deferred: dict[str, set[str]] = {}
     errors: list[str] = []
     for row in rows:
         if row[0] == "change" or row[0] != original_name:
@@ -564,7 +570,7 @@ def check_deferred_record(
             errors.append(f"{change_dir.name}: README の延期行が不正です: {row}")
             continue
         task_id = task[1]
-        if task_id in deferred or row[1] in deferred.values():
+        if any(row[1] in ids for ids in deferred.values()):
             errors.append(f"{change_dir.name}: README の延期行が重複しています: {row}")
             continue
         task_line = next(
@@ -583,7 +589,7 @@ def check_deferred_record(
         ):
             errors.append(f"{change_dir.name}: README の延期タスクが不正です: {row}")
             continue
-        deferred[task_id] = row[1]
+        deferred.setdefault(task_id, set()).add(row[1])
     if not deferred:
         errors.append(f"{change_dir.name}: README に延期する検証の記録がありません")
     return deferred, errors

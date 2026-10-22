@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -20,7 +21,7 @@ from app.common.runtime import DeviceSelection, RunRecorder
 from app.image_preparation.imaging import AlignedImage
 from app.image_preparation.preparation import prepare_training
 from app.model_training import cli as training_cli
-from app.model_training.artifacts import persist_best_trial
+from app.model_training.artifacts import new_training_stage, persist_best_trial
 from app.model_training.augmentation import (
     AnomalibTrainingAugmentation,
     AugmentationPipeline,
@@ -62,13 +63,13 @@ def _project(root: Path, *, two: bool = False):
     return config, paths
 
 
-def _run_cli(monkeypatch: pytest.MonkeyPatch, paths, *, group=None, restart=False):
+def _run_cli(monkeypatch: pytest.MonkeyPatch, paths, *, group=None):
     recorder = RunRecorder("train", "XX", DeviceSelection("cpu", "CPU", "test"))
     monkeypatch.setattr(
         "app.model_training.cli._run",
         lambda _cmd, _model, action, **_kw: action(paths, recorder),
     )
-    return _train_command(model="XX", group=group, restart=restart), recorder
+    return _train_command(model="XX", group=group), recorder
 
 
 def _stub_search(
@@ -88,10 +89,15 @@ def _stub_search(
         "app.model_training.cli.show_trial_conditions", lambda *_args: None
     )
 
-    def persist(*, config, group, paths, split, study, outcomes):
+    def persist(*, config, group, paths, split, study, outcomes, study_dir):
         if group.id == fail_group:
             raise RuntimeError("injected failure")
         done.append(group.id)
+        target_study = paths.study_dir(config.model, group.id)
+        if target_study.exists():
+            shutil.rmtree(target_study)
+        study_dir.replace(target_study)
+        (target_study / "study.db").write_text("new")
         checkpoint = paths.checkpoint(config.model, group.id)
         checkpoint.parent.mkdir(parents=True, exist_ok=True)
         checkpoint.write_text(f"group {group.id}")
@@ -115,28 +121,33 @@ def _stub_search(
 def _study(config, paths, *, group=0, trials=1):
     selected = config.part.select_groups(group)[0]
     selected.optuna_settings.execution.trials = trials
-    study = create_study(config, selected, paths.study_dir("XX", group) / "study.db")
+    stage = new_training_stage(paths, "XX", group)
+    study = create_study(config, selected, stage / "study.db")
 
     def runner(parameters, split, trial):
         del parameters, split
-        checkpoint = paths.study_dir("XX", group) / f"trial_{trial.number}.ckpt"
+        checkpoint = stage / f"trial_{trial.number}.ckpt"
         torch.save({"state_dict": {}}, checkpoint)
         return TrialOutcome([0.2 + trial.number / 10], [0.1, 0.2], checkpoint)
 
-    return selected, run_search(
+    return (
         selected,
-        split_by_source(
-            load_preparation_manifest(
+        run_search(
+            selected,
+            split_by_source(
+                load_preparation_manifest(
+                    paths.prepared_train("XX", group),
+                    model="XX",
+                    group=group,
+                    allowed_split_ids=set(selected.range_ids),
+                    fingerprint=preparation_fingerprint(config, group=selected),
+                ),
                 paths.prepared_train("XX", group),
-                model="XX",
-                group=group,
-                allowed_split_ids=set(selected.range_ids),
-                fingerprint=preparation_fingerprint(config, group=selected),
             ),
-            paths.prepared_train("XX", group),
+            study,
+            runner,
         ),
-        study,
-        runner,
+        stage,
     )
 
 
@@ -221,7 +232,7 @@ def test_group_req_004_s04(tmp_path: Path) -> None:
 
 def test_group_req_005_s01(tmp_path: Path) -> None:
     config, paths = _project(tmp_path)
-    selected, (study, outcomes) = _study(config, paths, trials=2)
+    selected, (study, outcomes), _stage = _study(config, paths, trials=2)
     assert len(study.trials) == 2
     assert all(item.state == optuna.trial.TrialState.COMPLETE for item in study.trials)
     assert study.best_trial.number in outcomes
@@ -230,7 +241,7 @@ def test_group_req_005_s01(tmp_path: Path) -> None:
 
 def test_group_req_005_s02(tmp_path: Path) -> None:
     config, paths = _project(tmp_path)
-    selected, (study, outcomes) = _study(config, paths)
+    selected, (study, outcomes), stage = _study(config, paths)
     split = split_by_source(
         load_preparation_manifest(
             paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
@@ -244,6 +255,7 @@ def test_group_req_005_s02(tmp_path: Path) -> None:
         split=split,
         study=study,
         outcomes=outcomes,
+        study_dir=stage,
     )
     summary = training_cli.format_training_summary(best)
     assert "暫定探索指標=" in summary
@@ -358,7 +370,7 @@ def test_group_req_006_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_group_req_007_s01(tmp_path: Path) -> None:
     config, paths = _project(tmp_path)
-    selected, (study, outcomes) = _study(config, paths)
+    selected, (study, outcomes), stage = _study(config, paths)
     split = split_by_source(
         load_preparation_manifest(
             paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
@@ -372,6 +384,7 @@ def test_group_req_007_s01(tmp_path: Path) -> None:
         split=split,
         study=study,
         outcomes=outcomes,
+        study_dir=stage,
     )
     assert best.group == 0 and best.range_ids == [0]
     assert paths.checkpoint("XX", 0).exists()
@@ -390,7 +403,7 @@ def test_group_artifact_paths_are_distinct(tmp_path: Path) -> None:
 
 def test_group_req_007_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config, paths = _project(tmp_path)
-    selected, (study, outcomes) = _study(config, paths)
+    selected, (study, outcomes), stage = _study(config, paths)
     split = split_by_source(
         load_preparation_manifest(
             paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
@@ -401,6 +414,7 @@ def test_group_req_007_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     old_checkpoint.parent.mkdir(parents=True, exist_ok=True)
     old_checkpoint.write_bytes(b"old checkpoint")
     old_best = paths.study_dir("XX", 0) / "best_trial.json"
+    old_best.parent.mkdir(parents=True, exist_ok=True)
     old_best.write_bytes(b"old best")
     original = {
         "checkpoint": old_checkpoint.read_bytes(),
@@ -409,17 +423,13 @@ def test_group_req_007_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     }
     from app.model_training import artifacts
 
-    replace = artifacts._replace_staged_artifact
-    calls = 0
-
-    def fail_second(source, target):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise OSError("injected write failure")
-        replace(source, target)
-
-    monkeypatch.setattr(artifacts, "_replace_staged_artifact", fail_second)
+    monkeypatch.setattr(
+        artifacts,
+        "_attach_checkpoint_metadata",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("injected write failure")
+        ),
+    )
     with pytest.raises(OSError, match="injected write failure"):
         persist_best_trial(
             config=config,
@@ -428,6 +438,7 @@ def test_group_req_007_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
             split=split,
             study=study,
             outcomes=outcomes,
+            study_dir=stage,
         )
     assert old_checkpoint.read_bytes() == original["checkpoint"]
     assert old_best.read_bytes() == original["best"]
@@ -436,7 +447,7 @@ def test_group_req_007_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_group_req_007_s04(tmp_path: Path) -> None:
     config, paths = _project(tmp_path)
-    selected, (study, outcomes) = _study(config, paths)
+    selected, (study, outcomes), stage = _study(config, paths)
     split = split_by_source(
         load_preparation_manifest(
             paths.prepared_train("XX", 0), model="XX", group=0, allowed_split_ids={0}
@@ -450,6 +461,7 @@ def test_group_req_007_s04(tmp_path: Path) -> None:
         split=split,
         study=study,
         outcomes=outcomes,
+        study_dir=stage,
     )
     from app.model_evaluation.evaluation import validate_best_trial_contract
 
@@ -464,7 +476,7 @@ def test_group_req_007_s05(tmp_path: Path) -> None:
     config, paths = _project(tmp_path, two=True)
     saved = {}
     for group_id, scores in ((0, [0.1, 0.2]), (1, [0.6, 0.9])):
-        selected, (study, outcomes) = _study(config, paths, group=group_id)
+        selected, (study, outcomes), stage = _study(config, paths, group=group_id)
         outcome = outcomes[study.best_trial.number]
         outcomes[study.best_trial.number] = TrialOutcome(
             outcome.validation_scores, scores, outcome.checkpoint
@@ -485,6 +497,7 @@ def test_group_req_007_s05(tmp_path: Path) -> None:
             split=split,
             study=study,
             outcomes=outcomes,
+            study_dir=stage,
         )
     updated = load_config(tmp_path, "XX")
     assert saved[0].threshold != saved[1].threshold
@@ -507,35 +520,6 @@ def test_group_req_007_s05(tmp_path: Path) -> None:
         )
 
 
-def test_group_req_008_s01(tmp_path: Path) -> None:
-    config, paths = _project(tmp_path)
-    selected, (first_study, _) = _study(config, paths, trials=1)
-    assert [trial.number for trial in first_study.trials] == [0]
-    selected.optuna_settings.execution.trials = 3
-    resumed = create_study(config, selected, paths.study_dir("XX", 0) / "study.db")
-    assert [trial.number for trial in resumed.trials] == [0]
-    manifest = load_preparation_manifest(
-        paths.prepared_train("XX", 0),
-        model="XX",
-        group=0,
-        allowed_split_ids=set(selected.range_ids),
-        fingerprint=preparation_fingerprint(config, group=selected),
-    )
-    split = split_by_source(manifest, paths.prepared_train("XX", 0))
-    executed: list[int] = []
-
-    def runner(parameters, split, trial):
-        del parameters, split
-        executed.append(trial.number)
-        checkpoint = paths.study_dir("XX", 0) / f"trial_{trial.number}.ckpt"
-        torch.save({"state_dict": {}}, checkpoint)
-        return TrialOutcome([0.2 + trial.number / 10], [0.1, 0.2], checkpoint)
-
-    run_search(selected, split, resumed, runner)
-    assert executed == [1, 2]
-    assert [trial.number for trial in resumed.trials] == [0, 1, 2]
-
-
 def test_group_req_008_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _, paths = _project(tmp_path, two=True)
     for group in (0, 1):
@@ -547,7 +531,7 @@ def test_group_req_008_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
         study.write_text("old")
     config_before = paths.model_config("XX").read_bytes()
     _stub_search(monkeypatch, paths)
-    _run_cli(monkeypatch, paths, group=1, restart=True)
+    _run_cli(monkeypatch, paths, group=1)
     assert paths.checkpoint("XX", 0).read_text() == "old group 0"
     assert (paths.study_dir("XX", 0) / "old-study.txt").read_text() == "old"
     assert paths.checkpoint("XX", 1).read_text() == "group 1"
@@ -564,22 +548,74 @@ def test_group_req_008_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     )
     done = _stub_search(monkeypatch, paths, fail_group=1)
     with pytest.raises(typer.Exit) as error:
-        training_cli._train_command(model="XX", group=None, restart=False)
+        training_cli._train_command(model="XX", group=None)
     assert error.value.exit_code == 3
     assert done == [0]
     first_checkpoint = paths.checkpoint("XX", 0).read_bytes()
     assert not paths.checkpoint("XX", 1).exists()
 
     retried = _stub_search(monkeypatch, paths)
-    training_cli._train_command(model="XX", group=None, restart=False)
+    training_cli._train_command(model="XX", group=None)
     assert retried == [0, 1]
     assert paths.checkpoint("XX", 0).read_bytes() == first_checkpoint
     assert paths.checkpoint("XX", 1).is_file()
 
 
-def test_group_restart_uses_tv_backbone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_req_008_s04(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = _project(tmp_path)
+    old = paths.checkpoint("XX", 0)
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(b"old")
+    parent = paths.study_dir("XX", 0).parent
+    parent.mkdir(parents=True, exist_ok=True)
+    stale = parent / f".group_00-stage-{'a' * 32}"
+    stale.mkdir()
+    (stale / "study.db").write_text("interrupted")
+    _stub_search(monkeypatch, paths)
+
+    _run_cli(monkeypatch, paths, group=0)
+
+    assert not stale.exists()
+    assert old.read_text() == "group 0"
+    assert (paths.study_dir("XX", 0) / "study.db").read_text() == "new"
+
+
+def test_req_029_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, paths = _project(tmp_path)
+    selected, (study, outcomes), stage = _study(config, paths)
+    split = split_by_source(
+        load_preparation_manifest(
+            paths.prepared_train("XX", 0),
+            model="XX",
+            group=0,
+            allowed_split_ids={0},
+        ),
+        paths.prepared_train("XX", 0),
+    )
+    original_config = paths.model_config("XX").read_bytes()
+    from app.model_training import artifacts
+
+    monkeypatch.setattr(
+        artifacts,
+        "write_threshold",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed")),
+    )
+    with pytest.raises(OSError, match="write failed"):
+        persist_best_trial(
+            config=config,
+            group=selected,
+            paths=paths,
+            split=split,
+            study=study,
+            outcomes=outcomes,
+            study_dir=stage,
+        )
+    assert paths.model_config("XX").read_bytes() == original_config
+    assert paths.checkpoint("XX", 0).is_file()
+    assert (paths.study_dir("XX", 0) / "best_trial.json").is_file()
+
+
+def test_req_020_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.common import model_adapter
 
     observed = {}
@@ -626,7 +662,7 @@ def test_group_restart_uses_tv_backbone(
             return TrialOutcome([0.2], [0.1, 0.2], trial_checkpoint)
 
     monkeypatch.setattr(training_cli, "AnomalibTrialRunner", FakeRunner)
-    _run_cli(monkeypatch, paths, group=0, restart=True)
+    _run_cli(monkeypatch, paths, group=0)
     assert not checkpoint.read_bytes().startswith(b"previous")
     best = json.loads((paths.study_dir("XX", 0) / "best_trial.json").read_text())
     assert best["group"] == 0
@@ -671,9 +707,7 @@ def test_group_restart_uses_tv_backbone(
     assert prediction.anomaly_map.shape == (8, 8)
 
 
-def test_group_restart_replaces_only_selected_history(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_req_020_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from group_evaluation_helpers import FakePredictor
     from group_evaluation_helpers import project as evaluation_project
 
@@ -726,7 +760,7 @@ def test_group_restart_replaces_only_selected_history(
             return TrialOutcome([0.2], [0.1, 0.2], trial_checkpoint)
 
     monkeypatch.setattr(training_cli, "AnomalibTrialRunner", FakeRunner)
-    _run_cli(monkeypatch, paths, group=1, restart=True)
+    _run_cli(monkeypatch, paths, group=1)
     assert paths.checkpoint("XX", 0).read_bytes() == group_zero_checkpoint
     assert (paths.study_dir("XX", 0) / "history.txt").read_text() == "history 0"
     assert not (paths.study_dir("XX", 1) / "history.txt").exists()
@@ -791,35 +825,3 @@ def test_nreq_004_s02(capsys: pytest.CaptureFixture[str]) -> None:
         assert ("暫定探索指標=0.2" in message) == (
             state == optuna.trial.TrialState.COMPLETE
         )
-
-
-def test_nreq_004_s03(tmp_path: Path) -> None:
-    config, paths = _project(tmp_path)
-    selected, (study, _outcomes) = _study(config, paths, trials=1)
-    assert len(study.trials) == 1
-    selected.optuna_settings.execution.trials = 3
-    resumed = create_study(config, selected, paths.study_dir("XX", 0) / "study.db")
-    manifest = load_preparation_manifest(
-        paths.prepared_train("XX", 0),
-        model="XX",
-        group=0,
-        allowed_split_ids={0},
-        fingerprint=preparation_fingerprint(config, group=selected),
-    )
-    split = split_by_source(manifest, paths.prepared_train("XX", 0))
-    shown = []
-
-    def runner(parameters, split, trial):
-        del parameters, split
-        checkpoint = paths.study_dir("XX", 0) / f"resume_{trial.number}.ckpt"
-        torch.save({"state_dict": {}}, checkpoint)
-        return TrialOutcome([0.2], [0.1], checkpoint)
-
-    run_search(
-        selected,
-        split,
-        resumed,
-        runner,
-        on_trial_start=lambda number, _parameters: shown.append(number),
-    )
-    assert shown == [1, 2]
