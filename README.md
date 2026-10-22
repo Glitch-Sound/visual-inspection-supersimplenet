@@ -21,6 +21,7 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | 分割 / `range` | 基準画像上の左上座標と分割IDで定義する切り出し範囲 |
 | グループ / `group` | 共通の分割IDを参照し、学習・検査条件と学習済みモデルを独立して持つ単位 |
 | グループ詳細 / `group_detail` | グループIDをキーに、探索条件・スコア契約・データ拡張をまとめた型番設定の領域 |
+| 初期ランダム探索試行数 / `sampler.startup_trials` | グループの TPESampler が TPE による探索へ移る前の試行数。MedianPruner の同名項目とは別 |
 | 基準画像 | 元画像の位置合わせ先となる画像 |
 | 元画像 | 学習または検査に入力する、分割前の画像 |
 | 分割画像 | 元画像を位置合わせし、設定範囲で切り出した画像 |
@@ -78,6 +79,7 @@ npm ci
 | `groups[].heatmap_range` | 検査時に必須の有限な下限・上限。`min < max` |
 | `group_detail` | グループIDの通常の10進文字列をキーにする詳細設定。`groups`のIDと一対一に対応 |
 | `group_detail["<id>"].optuna_settings` | グループ別の探索、学習・検証分離、暫定閾値 |
+| `group_detail["<id>"].optuna_settings.sampler.startup_trials` | TPESampler の初期ランダム探索試行数。0以上の整数で、省略時は5 |
 | `group_detail["<id>"].score` | `supersimplenet.pred_score`と無効化したPostProcessor |
 | `group_detail["<id>"].augmentation` | 学習入力だけに適用する拡張条件 |
 
@@ -88,6 +90,9 @@ npm ci
 補正を無効にするには`enabled=false`を指定する。<br />
 例えば`id: 0`に対応するキーは`"0"`とし、`"00"`は使用しない。<br />
 `groups` に置けない詳細項目や、両領域で項目が重複する設定は入力不備として拒否される。<br />
+`sampler.startup_trials` はグループごとに設定する。<br />
+TPE による探索を行うには、`sampler.startup_trials` を合計試行回数の `execution.trials` より小さくする。<br />
+同じ値以上にすると、設定された試行はすべて初期ランダム探索となり、TPE による探索は行われない。<br />
 暫定閾値の`group_detail["<id>"].optuna_settings.threshold.value`は学習完了時に対象グループだけ更新される。<br />
 checkpointと最良試行にも同じ値を保存するため、暫定閾値だけを手動で変更しない。<br />
 切り出し位置、サイズ、縮小倍率、位置合わせなどを変更したら、該当する`train-pre`または`test-pre`を再実行する。<br />
@@ -256,6 +261,9 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| configure-tpe-startup-trials | AC-001 | 未検証 | タスク3.2: Ubuntu 24.04 LTS・Windows 11の実画像で指定値・省略時・合計試行回数以上の探索を確認する。 |
+| configure-tpe-startup-trials | AC-002 | 未検証 | タスク3.2: 両OSの学習CLIで負数・非整数の入力不備と修正後の再実行を確認する。 |
+| configure-tpe-startup-trials | AC-004 | 未検証 | タスク3.2: 両OSの実画像でMedianPrunerの条件と、準備・学習・検査の全工程を確認する。 |
 | drop-legacy-and-recovery-handling | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11で四CLIの公開前失敗、旧成果物の保持、残存一時領域の削除を確認する。 |
 | drop-legacy-and-recovery-handling | AC-002 | 未検証 | タスク3.3: 両OSの実モデルで毎回の新規探索と全グループ途中失敗時の部分成功、失敗グループIDと理由を確認する。 |
 | drop-legacy-and-recovery-handling | AC-003 | 未検証 | タスク3.3: 両OSで学習成果物公開後の対象閾値書戻しと他設定・別グループの保持を確認する。 |

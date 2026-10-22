@@ -230,6 +230,96 @@ def test_group_req_004_s04(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("startup_trials", [0, 2])
+def test_req_030_s01_sampler_startup_trials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, startup_trials: int
+) -> None:
+    _, paths = build_project(tmp_path)
+    config_path = paths.model_config("XX")
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["group_detail"]["0"]["optuna_settings"]["sampler"]["startup_trials"] = (
+        startup_trials
+    )
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    config = load_config(tmp_path, "XX")
+    group = config.part.select_groups(0)[0]
+    real_sampler = optuna.samplers.TPESampler
+    real_pruner = optuna.pruners.MedianPruner
+    captured: list[int] = []
+    captured_pruner: list[tuple[int, int, int]] = []
+
+    def capture_sampler(*args: Any, **kwargs: Any) -> optuna.samplers.TPESampler:
+        captured.append(kwargs["n_startup_trials"])
+        return real_sampler(*args, **kwargs)
+
+    def capture_pruner(*args: Any, **kwargs: Any) -> optuna.pruners.MedianPruner:
+        captured_pruner.append(
+            (
+                kwargs["n_startup_trials"],
+                kwargs["n_warmup_steps"],
+                kwargs["interval_steps"],
+            )
+        )
+        return real_pruner(*args, **kwargs)
+
+    monkeypatch.setattr(optuna.samplers, "TPESampler", capture_sampler)
+    monkeypatch.setattr(optuna.pruners, "MedianPruner", capture_pruner)
+    study = create_study(config, group, tmp_path / "study.db")
+    assert captured == [startup_trials]
+    assert captured_pruner == [(5, 40, 10)]
+    assert isinstance(study.sampler, real_sampler)
+    assert group.optuna_settings.pruner.startup_trials == 5
+    assert group.optuna_settings.execution.trials == 10
+
+
+def test_req_030_s02_default_startup_trials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = build_project(tmp_path)
+    config_path = paths.model_config("XX")
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["group_detail"]["0"]["optuna_settings"]["sampler"].pop(
+        "startup_trials", None
+    )
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    config = load_config(tmp_path, "XX")
+    assert config.part.select_groups(0)[0].optuna_settings.sampler.startup_trials == 5
+    real_sampler = optuna.samplers.TPESampler
+    captured: list[int] = []
+
+    def capture_sampler(*args: Any, **kwargs: Any) -> optuna.samplers.TPESampler:
+        captured.append(kwargs["n_startup_trials"])
+        return real_sampler(*args, **kwargs)
+
+    monkeypatch.setattr(optuna.samplers, "TPESampler", capture_sampler)
+    create_study(config, config.part.select_groups(0)[0], tmp_path / "study.db")
+    assert captured == [5]
+
+
+@pytest.mark.parametrize("startup_trials", [2, 3])
+def test_req_030_s03_trials_within_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, startup_trials: int
+) -> None:
+    config, _ = build_project(tmp_path)
+    group = config.part.select_groups(0)[0]
+    group.optuna_settings.sampler.startup_trials = startup_trials
+    group.optuna_settings.execution.trials = 2
+    study = create_study(config, group, tmp_path / "study.db")
+    real_sample = optuna.samplers.RandomSampler.sample_independent
+    random_calls: list[str] = []
+
+    def count_random(*args: Any, **kwargs: Any) -> Any:
+        random_calls.append(args[3])
+        return real_sample(*args, **kwargs)
+
+    monkeypatch.setattr(
+        optuna.samplers.RandomSampler, "sample_independent", count_random
+    )
+    study.optimize(lambda trial: trial.suggest_float("x", 0.0, 1.0), n_trials=2)
+    assert len(study.trials) == group.optuna_settings.execution.trials
+    assert random_calls == ["x", "x"]
+
+
 def test_group_req_005_s01(tmp_path: Path) -> None:
     config, paths = _project(tmp_path)
     selected, (study, outcomes), _stage = _study(config, paths, trials=2)

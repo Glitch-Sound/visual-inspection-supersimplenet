@@ -117,7 +117,10 @@ def suggest_parameters(trial: optuna.Trial, group: GroupConfig) -> TrialParamete
 def create_study(config: AppConfig, group: GroupConfig, storage: Path) -> optuna.Study:
     settings = group.optuna_settings
     storage.parent.mkdir(parents=True, exist_ok=True)
-    sampler = optuna.samplers.TPESampler(seed=settings.sampler.seed)
+    sampler = optuna.samplers.TPESampler(
+        seed=settings.sampler.seed,
+        n_startup_trials=settings.sampler.startup_trials,
+    )
     pruner = optuna.pruners.MedianPruner(
         n_startup_trials=settings.pruner.startup_trials,
         n_warmup_steps=settings.pruner.warmup_epochs,

@@ -49,6 +49,38 @@ def test_group_req_021_s01(tmp_path: Path) -> None:
     assert config.part.groups[0].range_ids == [0, 1]
 
 
+def test_req_031_s01_negative_sampler_startup_trials(tmp_path: Path) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    payload["group_detail"]["0"]["optuna_settings"]["sampler"]["startup_trials"] = -1
+    _save(path, payload)
+    with pytest.raises(ValidationError, match="startup_trials"):
+        load_model_config(path)
+    assert not (tmp_path / "optuna").exists()
+
+
+@pytest.mark.parametrize("invalid", [1.5, "5", True])
+def test_req_031_s02_noninteger_sampler_startup_trials(
+    tmp_path: Path, invalid: object
+) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    sampler = payload["group_detail"]["0"]["optuna_settings"]["sampler"]
+    sampler["startup_trials"] = invalid
+    _save(path, payload)
+    with pytest.raises(ValidationError, match="startup_trials"):
+        load_model_config(path)
+    assert not (tmp_path / "optuna").exists()
+    sampler["startup_trials"] = 2
+    _save(path, payload)
+    assert (
+        load_model_config(path)
+        .select_groups(0)[0]
+        .optuna_settings.sampler.startup_trials
+        == 2
+    )
+
+
 @pytest.mark.parametrize(
     "mutation, reason",
     [

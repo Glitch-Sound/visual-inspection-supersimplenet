@@ -291,6 +291,49 @@ checkpointには型番とグループID、スコア契約および暫定閾値�
 - **THEN** 探索成果物とcheckpointは `group_00`、`group_09`、`group_10`、`group_100` に対応する保存先を使用する
 - **AND** 学習結果のグループIDは整数のままである
 
+### Requirement: REQ-030 グループ別の初期ランダム探索試行数
+
+システムは、運用者が対象グループの `group_detail["<id>"].optuna_settings.sampler.startup_trials` に 0 以上の整数を指定して学習を開始したとき、その値を TPESampler の初期ランダム探索試行数として使用しなければならない(MUST)。<br />
+この項目を省略した場合は 5 を使用しなければならない(MUST)。<br />
+`startup_trials` が `execution.trials` 以上なら、合計試行回数内で TPE による探索は行われない。
+
+#### Scenario: REQ-030-S01 指定した初期試行数を使用する
+
+- **GIVEN** 対象グループの `sampler.startup_trials` が 0 以上の整数で、学習に必要な準備結果がある
+- **WHEN** 運用者が対象グループの学習を実行する
+- **THEN** システムは指定値を初期ランダム探索試行数として学習条件を探索する
+- **AND** 合計試行回数と MedianPruner の warmup 条件は変更しない
+
+#### Scenario: REQ-030-S02 省略時の初期試行数を使用する
+
+- **GIVEN** 対象グループの `sampler.startup_trials` が省略され、学習に必要な準備結果がある
+- **WHEN** 運用者が対象グループの学習を実行する
+- **THEN** システムは 5 を初期ランダム探索試行数として学習条件を探索する
+
+#### Scenario: REQ-030-S03 合計試行回数以上を指定する
+
+- **GIVEN** 対象グループの `sampler.startup_trials` が `execution.trials` 以上の 0 以上の整数である
+- **WHEN** 運用者が対象グループの学習を実行する
+- **THEN** システムは設定された合計試行回数を実行し、その範囲内では TPE による探索を行わない
+
+### Requirement: REQ-031 初期試行数の入力不備の拒否
+
+システムは、対象グループの `sampler.startup_trials` が負数または整数でない場合、学習開始前に入力不備として拒否しなければならない(MUST)。
+
+#### Scenario: REQ-031-S01 負数を拒否する
+
+- **GIVEN** 対象グループの `sampler.startup_trials` が負数である
+- **WHEN** 運用者が型番設定を読み込んで学習を開始する
+- **THEN** システムは対象項目の入力不備を示して探索を開始しない
+- **AND** 運用者は値を修正して再実行できる
+
+#### Scenario: REQ-031-S02 整数でない値を拒否する
+
+- **GIVEN** 対象グループの `sampler.startup_trials` が小数、文字列または真偽値である
+- **WHEN** 運用者が型番設定を読み込んで学習を開始する
+- **THEN** システムは対象項目の入力不備を示して探索を開始しない
+- **AND** 運用者は値を修正して再実行できる
+
 ## 試験方針
 
 | 要件区分 | 試験層 | 試験パターン | 自動化方針 |

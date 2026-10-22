@@ -86,6 +86,7 @@ class SearchSpace(StrictModel):
 class SamplerSettings(StrictModel):
     name: Literal["TPESampler"] = "TPESampler"
     seed: int = 42
+    startup_trials: Annotated[StrictInt, Field(ge=0)] = 5
 
 
 class PrunerSettings(StrictModel):

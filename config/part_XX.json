@@ -87,7 +87,8 @@
                 },
                 "sampler": {
                     "name": "TPESampler",
-                    "seed": 42
+                    "seed": 42,
+                    "startup_trials": 5
                 },
                 "pruner": {
                     "name": "MedianPruner",
