@@ -24,6 +24,7 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | 基準画像 | 元画像の位置合わせ先となる画像 |
 | 元画像 | 学習または検査に入力する、分割前の画像 |
 | 分割画像 | 元画像を位置合わせし、設定範囲で切り出した画像 |
+| 輝度補正 / `brightness_normalization` | 学習・試験準備の分割画像の明るさを、同じ範囲の基準画像に近づける処理 |
 | 準備manifest | 元画像と分割画像の対応、準備条件の指紋を記録するJSON |
 | 再撮影要否 / `recapture_required` | 位置合わせ結果に記録する、再撮影が原則必要な状態。試験準備結果から検査結果にも引き継ぐ |
 | 準備指紋 | 分割画像を作る設定のハッシュ。学習・検査開始時に準備結果との一致を確認する |
@@ -70,6 +71,7 @@ npm ci
 | `range` | 一意な分割IDと縮小前の開始座標の配列 |
 | `blacklist` | 学習準備だけで除外する元画像名と分割ID |
 | `alignment` | 型番内で共通のORB位置合わせ条件 |
+| `brightness_normalization` | 型番共通の分割画像の輝度補正。省略時も有効で、既定値は `enabled=true`、`statistic=median`、`exclude_above=230`、`exclude_below=0`、`min_gain=0.5`、`max_gain=2.0` |
 | `groups` | 必須の非空配列。グループIDは型番内で一意な非負整数。対象分割と検査条件を置く |
 | `groups[].range_ids` | 非空・重複なしの既存分割ID。同じ分割IDを複数グループで参照できる |
 | `groups[].inspection_threshold` | `null`なら暫定閾値。0以上1以下の数値なら検査で使用 |
@@ -79,13 +81,20 @@ npm ci
 | `group_detail["<id>"].score` | `supersimplenet.pred_score`と無効化したPostProcessor |
 | `group_detail["<id>"].augmentation` | 学習入力だけに適用する拡張条件 |
 
-`blacklist`と`alignment`は型番共通である。<br />
+`blacklist`、`alignment`、`brightness_normalization`は型番共通である。<br />
+輝度補正は`train-pre`と`test-pre`の分割画像に適用する。<br />
+`statistic`は`median`または`mean`を指定し、`exclude_below`以上・`exclude_above`未満の輝度を集計する。<br />
+集計できる画素がない場合や分割画像の輝度が0以下の場合は、その分割の補正を省略する。<br />
+補正を無効にするには`enabled=false`を指定する。<br />
 例えば`id: 0`に対応するキーは`"0"`とし、`"00"`は使用しない。<br />
 `groups` に置けない詳細項目や、両領域で項目が重複する設定は入力不備として拒否される。<br />
 暫定閾値の`group_detail["<id>"].optuna_settings.threshold.value`は学習完了時に対象グループだけ更新される。<br />
 checkpointと最良試行にも同じ値を保存するため、暫定閾値だけを手動で変更しない。<br />
 切り出し位置、サイズ、縮小倍率、位置合わせなどを変更したら、該当する`train-pre`または`test-pre`を再実行する。<br />
 準備指紋が一致しない入力は学習・検査の前に拒否される。
+
+輝度補正条件を変更した場合は、旧成果物を引き継がず、`train-pre`、`train`、`test-pre`、`test`を順に再実行する。<br />
+分割位置も確認したい場合は先に`check`を実行する。
 
 ### 2. 確認・学習・検査
 
@@ -286,6 +295,11 @@ npx --no-install openspec update
 | restore-tv-backbone-and-improve-output | AC-001 | 未検証 | タスク5.1: Ubuntu 24.04 LTSとWindows 11で`tv_in1k`の実重みを取得して学習し、checkpointによる検査を確認する。 |
 | restore-tv-backbone-and-improve-output | AC-003 | 未検証 | タスク5.3: 両OSの実画像で正常分割と、異常分割の左原画像・右ヒートマップ付き画像を結果JSONと照合する。 |
 | restore-tv-backbone-and-improve-output | AC-004 | 未検証 | タスク5.4: 両OSの端末・非端末で試行条件表、終了状態、毎回の新規探索件数、標準出力JSONと終了コードを確認する。 |
+| add-brightness-normalization | AC-001 | 未検証 | タスク3.5: Ubuntu 24.04 LTS・Windows 11でmedian・mean・無効化の学習・試験分割画像を読み戻して確認する。 |
+| add-brightness-normalization | AC-002 | 未検証 | タスク3.5: 両OSで値なし・対象輝度0の分割が補正前画素で保存されることを確認する。 |
+| add-brightness-normalization | AC-003 | 未検証 | タスク3.5: 両OSのCLIで不正な補正設定の入力不備表示・終了コード2と既存成果物の保持を確認する。 |
+| add-brightness-normalization | AC-004 | 未検証 | タスク3.5: 両OSで有効時の全補正項目の変更が学習・試験指紋に反映され、旧成果物が拒否されることを確認する。 |
+| add-brightness-normalization | AC-005 | 未検証 | タスク3.5: 両OSのCPUと利用可能なGPUで準備・学習・検査を全件・単独グループでやり直し、成果物を読み戻す。 |
 
 `show-test-progress-and-update-backbone` のAC-003にある`racm_in1k`確認は当時の未検証事項であり、現在の運用には適用しない。<br />
 現在の学習は`wide_resnet50_2.tv_in1k`とグループ別の新形式設定から開始する。<br />

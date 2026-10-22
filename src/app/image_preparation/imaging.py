@@ -9,7 +9,11 @@ from typing import Any, cast
 import cv2
 import numpy as np
 
-from app.common.config import AlignmentSettings, CropRange
+from app.common.config import (
+    AlignmentSettings,
+    BrightnessNormalizationSettings,
+    CropRange,
+)
 from app.common.image_io import ImageArray
 
 
@@ -133,6 +137,37 @@ def scaled_crop_range(
 def crop_image(image: ImageArray, crop: CropRange, size: int) -> ImageArray:
     validate_crop(image, crop, size)
     return image[crop.y : crop.y + size, crop.x : crop.x + size].copy()
+
+
+def brightness_statistic(
+    image: ImageArray, settings: BrightnessNormalizationSettings
+) -> float | None:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    included = gray[(gray >= settings.exclude_below) & (gray < settings.exclude_above)]
+    if included.size == 0:
+        return None
+    if settings.statistic == "median":
+        return float(np.median(included))
+    return float(np.mean(included))
+
+
+def normalize_brightness(
+    image: ImageArray,
+    reference: ImageArray,
+    settings: BrightnessNormalizationSettings,
+) -> ImageArray:
+    """Match a split's brightness to its reference split without mutating inputs."""
+
+    if not settings.enabled:
+        return image.copy()
+    target = brightness_statistic(reference, settings)
+    source = brightness_statistic(image, settings)
+    if target is None or source is None or source <= 0:
+        return image.copy()
+    gain = min(max(target / source, settings.min_gain), settings.max_gain)
+    with np.errstate(over="ignore"):
+        scaled = np.clip(image.astype(np.float64) * gain, 0, 255)
+    return cast(ImageArray, np.floor(scaled + 0.5).astype(np.uint8))
 
 
 def draw_ranges(image: ImageArray, ranges: list[CropRange], size: int) -> ImageArray:

@@ -3,15 +3,25 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 import typer
 from conftest import build_project, write_test_image
 
-from app.common.config import load_config, preparation_fingerprint
+from app.common.config import (
+    BrightnessNormalizationSettings,
+    load_config,
+    preparation_fingerprint,
+)
 from app.common.contracts import load_preparation_manifest
 from app.common.image_io import ImageReadError
-from app.image_preparation.imaging import AlignedImage, AlignmentError
+from app.image_preparation.imaging import (
+    AlignedImage,
+    AlignmentError,
+    brightness_statistic,
+    normalize_brightness,
+)
 from app.image_preparation.preparation import (
     PreparationError,
     create_check_image,
@@ -430,3 +440,133 @@ def test_req_017_s02(
     assert "b.png" in stderr
     assert "処理失敗" in stderr
     assert json.loads(captured.out)["exit_code"] == 3
+
+
+def _write_bgr(path: Path, image: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    assert cv2.imwrite(str(path), image)
+
+
+def _read_bgr(path: Path) -> np.ndarray:
+    image = cv2.imread(str(path))
+    assert image is not None
+    return image
+
+
+def _set_brightness(root: Path, values: dict[str, object]) -> None:
+    path = root / "config" / "part_XX.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["brightness_normalization"] = values
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+@pytest.mark.parametrize("scale", [1.0, 0.5])
+@pytest.mark.parametrize(("statistic", "expected"), [("median", 100), ("mean", 105)])
+def test_brightness_normalizes_train_and_test_splits(
+    tmp_path: Path, scale: float, statistic: str, expected: int
+) -> None:
+    _, paths = build_project(tmp_path, image_size=4, ranges=[{"id": 0, "x": 8, "y": 0}])
+    (tmp_path / "config" / "setting.ini").write_text(
+        f"[IMAGE]\nSIZE = 4\nRESIZE = {scale}\n"
+    )
+    _set_brightness(tmp_path, {"statistic": statistic, "max_gain": 3.0})
+    base = np.full((16, 16, 3), 20, dtype=np.uint8)
+    base[:, 8:] = 100
+    block = 1 if scale == 1.0 else 2
+    base[:block, 8 : 8 + block] = 180
+    source = np.full((16, 16, 3), 50, dtype=np.uint8)
+    _write_bgr(paths.original_train("XX") / "base.png", base)
+    _write_bgr(paths.original_train("XX") / "a.png", source)
+    _write_bgr(paths.original_test("XX") / "sample.png", source)
+    before = {
+        path: path.read_bytes()
+        for path in (
+            paths.original_train("XX") / "base.png",
+            paths.original_train("XX") / "a.png",
+            paths.original_test("XX") / "sample.png",
+        )
+    }
+    config = load_config(tmp_path, "XX")
+    prepare_training(config, paths, aligner=aligned)
+    prepare_testing(config, paths, aligner=aligned)
+    for path in (
+        paths.prepared_train("XX", 0) / "a_00.png",
+        paths.prepared_test("XX") / "sample_00.png",
+    ):
+        assert np.all(cv2.imread(str(path)) == expected)
+    assert all(path.read_bytes() == content for path, content in before.items())
+    pixels = np.array([[[0, 0, 255], [255, 0, 0], [0, 255, 0]]], dtype=np.uint8)
+    settings = BrightnessNormalizationSettings(
+        statistic="mean", exclude_below=30, exclude_above=150
+    )
+    assert brightness_statistic(pixels, settings) == 76
+
+
+def test_brightness_gain_and_rounding_boundaries() -> None:
+    source = np.array([[[1, 3, 255]]], dtype=np.uint8)
+    reference = np.full_like(source, 100)
+    half = BrightnessNormalizationSettings(min_gain=0.5, max_gain=0.5)
+    actual = normalize_brightness(source, reference, half)
+    assert actual.tolist() == [[[1, 2, 128]]]
+    assert source.tolist() == [[[1, 3, 255]]]
+
+    high = BrightnessNormalizationSettings(min_gain=2.0, max_gain=2.0)
+    assert normalize_brightness(source, reference, high).tolist() == [[[2, 6, 255]]]
+    source_bright = np.full((1, 1, 3), 100, dtype=np.uint8)
+    reference_dark = np.full((1, 1, 3), 10, dtype=np.uint8)
+    low = BrightnessNormalizationSettings(min_gain=0.5, max_gain=2.0)
+    assert np.all(normalize_brightness(source_bright, reference_dark, low) == 50)
+    source_dark = np.full((1, 1, 3), 10, dtype=np.uint8)
+    reference_bright = np.full((1, 1, 3), 100, dtype=np.uint8)
+    assert np.all(normalize_brightness(source_dark, reference_bright, low) == 20)
+
+
+@pytest.mark.parametrize("unavailable", ["reference", "source", "zero"])
+def test_brightness_skips_unavailable_statistics(
+    tmp_path: Path, unavailable: str
+) -> None:
+    _, paths = build_project(
+        tmp_path,
+        image_size=4,
+        ranges=[{"id": 0, "x": 0, "y": 0}, {"id": 1, "x": 8, "y": 0}],
+    )
+    base = np.full((16, 16, 3), 100, dtype=np.uint8)
+    source = np.full((16, 16, 3), 50, dtype=np.uint8)
+    if unavailable == "reference":
+        base[:4, :4] = 255
+    elif unavailable == "source":
+        source[:4, :4] = 255
+    else:
+        source[:4, :4] = 0
+    _write_bgr(paths.original_train("XX") / "base.png", base)
+    _write_bgr(paths.original_train("XX") / "a.png", source)
+    _write_bgr(paths.original_test("XX") / "sample.png", source)
+    config = load_config(tmp_path, "XX")
+    prepare_training(config, paths, aligner=aligned)
+    prepare_testing(config, paths, aligner=aligned)
+    for directory, stem in (
+        (paths.prepared_train("XX", 0), "a"),
+        (paths.prepared_test("XX"), "sample"),
+    ):
+        assert np.array_equal(_read_bgr(directory / f"{stem}_00.png"), source[:4, :4])
+        assert np.all(cv2.imread(str(directory / f"{stem}_01.png")) == 100)
+
+
+def test_brightness_disabled_preserves_splits(tmp_path: Path) -> None:
+    _, paths = build_project(tmp_path, image_size=4)
+    _set_brightness(tmp_path, {"enabled": False})
+    _write_bgr(
+        paths.original_train("XX") / "base.png",
+        np.full((8, 8, 3), 100, dtype=np.uint8),
+    )
+    source = np.full((8, 8, 3), 50, dtype=np.uint8)
+    _write_bgr(paths.original_train("XX") / "a.png", source)
+    _write_bgr(paths.original_test("XX") / "sample.png", source)
+    config = load_config(tmp_path, "XX")
+    prepare_training(config, paths, aligner=aligned)
+    prepare_testing(config, paths, aligner=aligned)
+    for path in (
+        paths.prepared_train("XX", 0) / "a_00.png",
+        paths.prepared_test("XX") / "sample_00.png",
+    ):
+        assert np.array_equal(_read_bgr(path), source[:4, :4])

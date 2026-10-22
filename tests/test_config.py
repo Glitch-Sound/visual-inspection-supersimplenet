@@ -4,15 +4,19 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import build_project
+import typer
+from conftest import build_project, write_test_image
 from pydantic import ValidationError
 
+from app.common import contracts
 from app.common.config import (
     load_config,
     load_model_config,
     preparation_fingerprint,
     write_threshold,
 )
+from app.image_preparation.imaging import AlignedImage
+from app.image_preparation.preparation import prepare_testing, prepare_training
 
 
 def _payload(root: Path) -> tuple[Path, dict]:
@@ -192,3 +196,178 @@ def test_group_artifact_paths_reject_symlink_alias(tmp_path: Path) -> None:
     study.symlink_to(real)
     with pytest.raises(ValueError, match="symlink"):
         paths.study_dir("XX", 0)
+
+
+def _aligned(image, _reference, _settings):
+    return AlignedImage(image, 20, 0.8)
+
+
+def _brightness_images(paths) -> None:
+    write_test_image(paths.original_train("XX") / "base.png", value=80)
+    write_test_image(paths.original_train("XX") / "a.png", value=40)
+    write_test_image(paths.original_test("XX") / "sample.png", value=40)
+
+
+def test_brightness_defaults(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    assert config.part.brightness_normalization.model_dump() == {
+        "enabled": True,
+        "statistic": "median",
+        "exclude_above": 230,
+        "exclude_below": 0,
+        "min_gain": 0.5,
+        "max_gain": 2.0,
+    }
+    _brightness_images(paths)
+    assert prepare_training(config, paths, aligner=_aligned)[0].sources
+    assert prepare_testing(config, paths, aligner=_aligned).sources
+    from app.common.image_io import read_image
+
+    assert read_image(paths.prepared_train("XX", 0) / "a_00.png")[0, 0, 0] == 80
+    assert read_image(paths.prepared_test("XX") / "sample_00.png")[0, 0, 0] == 80
+    path, payload = _payload(tmp_path)
+    payload["brightness_normalization"] = {"statistic": "mean"}
+    _save(path, payload)
+    assert load_config(tmp_path, "XX").part.brightness_normalization.model_dump() == {
+        **config.part.brightness_normalization.model_dump(),
+        "statistic": "mean",
+    }
+    updated = load_config(tmp_path, "XX")
+    assert prepare_training(updated, paths, aligner=_aligned)[0].sources
+    assert prepare_testing(updated, paths, aligner=_aligned).sources
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("enabled", 1, "enabled"),
+        ("statistic", "mode", "statistic"),
+        ("exclude_above", 0, "exclude_above"),
+        ("exclude_above", 256, "exclude_above"),
+        ("exclude_below", -1, "exclude_below"),
+        ("exclude_below", 255, "exclude_below"),
+        ("exclude_below", True, "exclude_below"),
+        ("min_gain", 0, "min_gain"),
+        ("max_gain", -1, "max_gain"),
+        ("min_gain", "0.5", "min_gain"),
+        ("max_gain", float("inf"), "max_gain"),
+        ("max_gain", 10**400, "max_gain"),
+        ("exclude_below", 230, "exclude_below"),
+        ("min_gain", 3, "min_gain"),
+    ],
+)
+def test_brightness_rejects_invalid_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    field: str,
+    value: object,
+    reason: str,
+) -> None:
+    _, paths = build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    payload["brightness_normalization"] = {field: value}
+    _save(path, payload)
+    target = paths.prepared_test("XX")
+    target.mkdir(parents=True)
+    marker = target / "old.txt"
+    marker.write_text("preserved")
+    with pytest.raises(ValidationError, match=reason):
+        load_config(tmp_path, "XX")
+    assert marker.read_text() == "preserved"
+    if field == "min_gain" and value == 3:
+        from app.image_preparation.cli import _test_pre_command
+
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(typer.Exit) as error:
+            _test_pre_command(model="XX")
+        assert getattr(error.value, "exit_code", None) == 2
+        output = capsys.readouterr()
+        assert reason in output.err
+        assert marker.read_text() == "preserved"
+
+
+def test_brightness_training_fingerprint(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    _brightness_images(paths)
+    group = config.part.groups[0]
+    manifest = prepare_training(config, paths, group=0, aligner=_aligned)[0]
+    assert manifest.preparation_fingerprint == preparation_fingerprint(
+        config, group=group
+    )
+    assert (
+        contracts.load_preparation_manifest(
+            paths.prepared_train("XX", 0),
+            model="XX",
+            group=0,
+            allowed_split_ids={0},
+            fingerprint=preparation_fingerprint(config, group=group),
+        )
+        == manifest
+    )
+
+
+def test_brightness_testing_fingerprint(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    _brightness_images(paths)
+    manifest = prepare_testing(config, paths, aligner=_aligned)
+    assert manifest.preparation_fingerprint == preparation_fingerprint(config)
+    path, payload = _payload(tmp_path)
+    payload["blacklist"] = [{"image": "a.png", "id": [0]}]
+    payload["group_detail"]["0"]["augmentation"]["seed"] = 99
+    _save(path, payload)
+    assert preparation_fingerprint(load_config(tmp_path, "XX")) == (
+        manifest.preparation_fingerprint
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("enabled", False),
+        ("statistic", "mean"),
+        ("exclude_above", 231),
+        ("exclude_below", 1),
+        ("min_gain", 0.6),
+        ("max_gain", 1.9),
+    ],
+)
+def test_brightness_changes_invalidate_preparation(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    config, paths = build_project(tmp_path)
+    _brightness_images(paths)
+    train_manifest = prepare_training(config, paths, group=0, aligner=_aligned)[0]
+    test_manifest = prepare_testing(config, paths, aligner=_aligned)
+    path, payload = _payload(tmp_path)
+    payload["brightness_normalization"] = {field: value}
+    _save(path, payload)
+    changed = load_config(tmp_path, "XX")
+    for old, new, directory, group in (
+        (
+            train_manifest.preparation_fingerprint,
+            preparation_fingerprint(changed, group=changed.part.groups[0]),
+            paths.prepared_train("XX", 0),
+            0,
+        ),
+        (
+            test_manifest.preparation_fingerprint,
+            preparation_fingerprint(changed),
+            paths.prepared_test("XX"),
+            None,
+        ),
+    ):
+        assert new != old
+        with pytest.raises(ValueError, match="fingerprint mismatch"):
+            contracts.load_preparation_manifest(
+                directory,
+                model="XX",
+                group=group,
+                allowed_split_ids={0},
+                fingerprint=new,
+            )
+    if field == "enabled":
+        baseline = preparation_fingerprint(changed)
+        payload["brightness_normalization"]["min_gain"] = 0.7
+        _save(path, payload)
+        assert preparation_fingerprint(load_config(tmp_path, "XX")) == baseline

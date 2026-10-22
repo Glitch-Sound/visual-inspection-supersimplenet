@@ -15,6 +15,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     field_validator,
     model_validator,
@@ -244,6 +245,38 @@ class AlignmentSettings(StrictModel):
     minimum_inlier_ratio: Probability = 0.2
 
 
+class BrightnessNormalizationSettings(StrictModel):
+    enabled: StrictBool = True
+    statistic: Literal["median", "mean"] = "median"
+    exclude_above: Annotated[StrictInt, Field(ge=1, le=255)] = 230
+    exclude_below: Annotated[StrictInt, Field(ge=0, le=254)] = 0
+    min_gain: PositiveFloat = 0.5
+    max_gain: PositiveFloat = 2.0
+
+    @field_validator("min_gain", "max_gain", mode="before")
+    @classmethod
+    def validate_finite_gain(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("brightness_normalization gain must be a finite number")
+        try:
+            finite = math.isfinite(value)
+        except OverflowError:
+            finite = False
+        if not finite:
+            raise ValueError("brightness_normalization gain must be a finite number")
+        return value
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> BrightnessNormalizationSettings:
+        if self.exclude_below >= self.exclude_above:
+            raise ValueError(
+                "brightness_normalization.exclude_below must be less than exclude_above"
+            )
+        if self.min_gain > self.max_gain:
+            raise ValueError("brightness_normalization.min_gain must be <= max_gain")
+        return self
+
+
 class GroupConfig(StrictModel):
     id: Annotated[StrictInt, Field(ge=0)]
     range_ids: list[Annotated[StrictInt, Field(ge=0, le=99)]] = Field(min_length=1)
@@ -282,6 +315,9 @@ class ModelConfig(StrictModel):
     ranges: list[CropRange] = Field(alias="range")
     blacklist: list[BlacklistEntry]
     alignment: AlignmentSettings
+    brightness_normalization: BrightnessNormalizationSettings = Field(
+        default_factory=BrightnessNormalizationSettings
+    )
     groups: list[GroupConfig] = Field(min_length=1)
 
     @model_validator(mode="before")
@@ -492,6 +528,10 @@ def preparation_fingerprint(
         "image_size": config.image_size,
         "image_resize": config.image_resize,
     }
+    brightness = part.brightness_normalization
+    payload["brightness_normalization"] = (
+        brightness.model_dump() if brightness.enabled else {"enabled": False}
+    )
     if group is not None:
         payload["blacklist"] = [item.model_dump() for item in part.blacklist]
         payload["group"] = group.id

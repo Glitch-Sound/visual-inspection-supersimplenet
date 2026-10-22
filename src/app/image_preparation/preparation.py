@@ -29,6 +29,7 @@ from app.image_preparation.imaging import (
     align_orb,
     crop_image,
     draw_ranges,
+    normalize_brightness,
     resize_image,
     scaled_crop_range,
 )
@@ -54,6 +55,25 @@ def _prepared_crop(
         return crop_image(image, scaled_crop_range(image, crop, size, scale), size)
     except ValueError as error:
         raise PreparationError(f"{source_image}: {error}") from error
+
+
+def _normalized_split(
+    split: ImageArray,
+    reference: ImageArray,
+    crop: CropRange,
+    config: AppConfig,
+) -> ImageArray:
+    settings = config.part.brightness_normalization
+    if not settings.enabled:
+        return split
+    reference_split = _prepared_crop(
+        reference,
+        crop,
+        config.image_size,
+        config.image_resize,
+        source_image=config.part.base,
+    )
+    return normalize_brightness(split, reference_split, settings)
 
 
 def alignment_warning(source_image: str, reason: str, *, testing: bool) -> str:
@@ -238,6 +258,7 @@ def prepare_training(
                         config.image_resize,
                         source_image=source_path.name,
                     )
+                    split = _normalized_split(split, reference, crop, config)
                     filename = f"{source_path.stem}_{crop.id:02d}{source_path.suffix}"
                     write_image(targets[item.id] / filename, split)
                     splits.append(
@@ -328,6 +349,7 @@ def prepare_testing(
                     config.image_resize,
                     source_image=source_path.name,
                 )
+                split = _normalized_split(split, reference, crop, config)
                 filename = f"{source_path.stem}_{crop.id:02d}{source_path.suffix}"
                 write_image(stage / filename, split)
                 splits.append(
