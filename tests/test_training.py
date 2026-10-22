@@ -33,8 +33,25 @@ from app.model_training.search import (
     create_study,
     run_search,
     split_by_source,
+    suggest_parameters,
 )
 from app.model_training.trainer import AnomalibTrialRunner
+
+
+def test_synthetic_anomaly_is_not_search_parameter(tmp_path: Path) -> None:
+    config, _ = build_project(tmp_path)
+    group = config.part.groups[0]
+    study = optuna.create_study()
+    trial = study.ask()
+    suggest_parameters(trial, group)
+    assert set(trial.params) == {
+        "learning_rate_multiplier",
+        "batch_size",
+        "epochs",
+        "feature_layers",
+        "image_size",
+    }
+    assert group.synthetic_anomaly.noise_std.min == 0.010
 
 
 def _aligned(

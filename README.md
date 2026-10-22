@@ -21,6 +21,7 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | 分割 / `range` | 基準画像上の左上座標と分割IDで定義する切り出し範囲 |
 | グループ / `group` | 共通の分割IDを参照し、学習・検査条件と学習済みモデルを独立して持つ単位 |
 | グループ詳細 / `group_detail` | グループIDをキーに、探索条件・スコア契約・データ拡張をまとめた型番設定の領域 |
+| 擬似異常 / `synthetic_anomaly` | SuperSimpleNetが学習中に作る異常。ノイズの強さ、範囲、かたまりの細かさをグループごとに指定する |
 | 初期ランダム探索試行数 / `sampler.startup_trials` | グループの TPESampler が TPE による探索へ移る前の試行数。MedianPruner の同名項目とは別 |
 | 基準画像 | 元画像の位置合わせ先となる画像 |
 | 元画像 | 学習または検査に入力する、分割前の画像 |
@@ -82,6 +83,7 @@ npm ci
 | `group_detail["<id>"].optuna_settings.sampler.startup_trials` | TPESampler の初期ランダム探索試行数。0以上の整数で、省略時は5 |
 | `group_detail["<id>"].score` | `supersimplenet.pred_score`と無効化したPostProcessor |
 | `group_detail["<id>"].augmentation` | 学習入力だけに適用する拡張条件 |
+| `group_detail["<id>"].synthetic_anomaly` | 学習中の擬似異常生成範囲。`noise_std` は `0.010`〜`0.020`、`perlin_threshold` は `0.2`〜`0.4`、`perlin_scale_exponent` は整数 `0`〜`5` が省略時の推奨値。各項目は `min` と `max` で指定する |
 
 `blacklist`、`alignment`、`brightness_normalization`は型番共通である。<br />
 輝度補正は`train-pre`と`test-pre`の分割画像に適用する。<br />
@@ -100,6 +102,11 @@ checkpointと最良試行にも同じ値を保存するため、暫定閾値だ�
 
 輝度補正条件を変更した場合は、旧成果物を引き継がず、`train-pre`、`train`、`test-pre`、`test`を順に再実行する。<br />
 分割位置も確認したい場合は先に`check`を実行する。
+
+擬似異常生成範囲を変更した場合は、旧成果物を引き継がず、`check`、`train-pre`、`train`、`test-pre`、`test`を順に再実行する。<br />
+`noise_std` は `0 < min <= max`、`perlin_threshold` は `0 <= min <= max < 1`、`perlin_scale_exponent` は整数で `0 <= min <= max <= 5` とする。<br />
+`min = max` なら固定値を使う。<br />
+擬似異常の範囲は学習時だけに適用し、Optuna の探索対象にはしない。
 
 ### 2. 確認・学習・検査
 
@@ -261,6 +268,11 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| configure-synthetic-anomaly-generation | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11の実画像でグループ別の3範囲、省略値、maskごとの選択を確認する。 |
+| configure-synthetic-anomaly-generation | AC-002 | 未検証 | タスク4.2: 両OSの学習CLIで不正な範囲・型の拒否、旧成果物の保持、設定修正後の再実行を確認する。 |
+| configure-synthetic-anomaly-generation | AC-003 | 未検証 | タスク4.2: 両OSのCPUと利用可能なGPUで、擬似異常の50%判定、生成手順、学習seedによる再現を確認する。 |
+| configure-synthetic-anomaly-generation | AC-004 | 未検証 | タスク4.2: 両OSで探索条件に擬似異常を含めず、5 CLIを再実行してcheckpointから既存形式の検査結果を読み戻す。 |
+| configure-synthetic-anomaly-generation | AC-005 | 未検証 | タスク4.2: 両OSの実画像で異なるグループ設定の学習・検査と成果物読戻しを確認し、検出性能は別途評価する。 |
 | configure-tpe-startup-trials | AC-001 | 未検証 | タスク3.2: Ubuntu 24.04 LTS・Windows 11の実画像で指定値・省略時・合計試行回数以上の探索を確認する。 |
 | configure-tpe-startup-trials | AC-002 | 未検証 | タスク3.2: 両OSの学習CLIで負数・非整数の入力不備と修正後の再実行を確認する。 |
 | configure-tpe-startup-trials | AC-004 | 未検証 | タスク3.2: 両OSの実画像でMedianPrunerの条件と、準備・学習・検査の全工程を確認する。 |

@@ -139,6 +139,61 @@ class ScoreSettings(StrictModel):
     anomalib_visualizer: Literal[False] = False
 
 
+class SyntheticFloatRange(StrictModel):
+    min: float
+    max: float
+
+    @field_validator("min", "max", mode="before")
+    @classmethod
+    def validate_number(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("synthetic_anomaly bounds must be finite numbers")
+        if not math.isfinite(value):
+            raise ValueError("synthetic_anomaly bounds must be finite numbers")
+        return value
+
+
+class NoiseStdRange(SyntheticFloatRange):
+    min: float = 0.010
+    max: float = 0.020
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> NoiseStdRange:
+        if not 0 < self.min <= self.max:
+            raise ValueError("noise_std requires 0 < min <= max")
+        return self
+
+
+class PerlinThresholdRange(SyntheticFloatRange):
+    min: float = 0.2
+    max: float = 0.4
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> PerlinThresholdRange:
+        if not 0 <= self.min <= self.max < 1:
+            raise ValueError("perlin_threshold requires 0 <= min <= max < 1")
+        return self
+
+
+class PerlinScaleExponentRange(StrictModel):
+    min: StrictInt = 0
+    max: StrictInt = 5
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> PerlinScaleExponentRange:
+        if not 0 <= self.min <= self.max <= 5:
+            raise ValueError("perlin_scale_exponent requires 0 <= min <= max <= 5")
+        return self
+
+
+class SyntheticAnomalySettings(StrictModel):
+    noise_std: NoiseStdRange = Field(default_factory=NoiseStdRange)
+    perlin_threshold: PerlinThresholdRange = Field(default_factory=PerlinThresholdRange)
+    perlin_scale_exponent: PerlinScaleExponentRange = Field(
+        default_factory=PerlinScaleExponentRange
+    )
+
+
 class EnabledProbability(StrictModel):
     enabled: bool = True
     probability: Probability
@@ -286,6 +341,9 @@ class GroupConfig(StrictModel):
     optuna_settings: OptunaSettings
     score: ScoreSettings
     augmentation: AugmentationSettings
+    synthetic_anomaly: SyntheticAnomalySettings = Field(
+        default_factory=SyntheticAnomalySettings
+    )
 
     @field_validator("inspection_threshold", mode="before")
     @classmethod
@@ -339,7 +397,12 @@ class ModelConfig(StrictModel):
             "inspection_threshold",
             "heatmap_range",
         }
-        detail_fields = {"optuna_settings", "score", "augmentation"}
+        detail_fields = {
+            "optuna_settings",
+            "score",
+            "augmentation",
+            "synthetic_anomaly",
+        }
         group_ids: list[int] = []
         for group in groups:
             if not isinstance(group, dict):

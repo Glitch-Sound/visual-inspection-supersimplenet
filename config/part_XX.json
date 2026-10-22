@@ -119,6 +119,20 @@
                 "anomalib_evaluator": false,
                 "anomalib_visualizer": false
             },
+            "synthetic_anomaly": {
+                "noise_std": {
+                    "min": 0.010,
+                    "max": 0.020
+                },
+                "perlin_threshold": {
+                    "min": 0.2,
+                    "max": 0.4
+                },
+                "perlin_scale_exponent": {
+                    "min": 0,
+                    "max": 5
+                }
+            },
             "augmentation": {
                 "enabled": true,
                 "seed": 42,

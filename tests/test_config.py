@@ -8,6 +8,7 @@ import typer
 from conftest import build_project, write_test_image
 from pydantic import ValidationError
 
+from app.common import cli as common_cli
 from app.common import contracts
 from app.common.config import (
     load_config,
@@ -15,8 +16,10 @@ from app.common.config import (
     preparation_fingerprint,
     write_threshold,
 )
+from app.common.runtime import DeviceSelection
 from app.image_preparation.imaging import AlignedImage
 from app.image_preparation.preparation import prepare_testing, prepare_training
+from app.model_training.cli import _train_command
 
 
 def _payload(root: Path) -> tuple[Path, dict]:
@@ -26,6 +29,126 @@ def _payload(root: Path) -> tuple[Path, dict]:
 
 def _save(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _assert_invalid_training_preserves_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.common.paths import ProjectPaths
+
+    paths = ProjectPaths(tmp_path)
+    checkpoint = paths.checkpoint("XX", 0)
+    study = paths.study_dir("XX", 0) / "study.db"
+    for artifact in (checkpoint, study):
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"previous artifact")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        common_cli,
+        "select_device",
+        lambda: DeviceSelection("cpu", "test", "test"),
+    )
+    with pytest.raises(typer.Exit) as error:
+        _train_command(model="XX", group=0)
+    assert error.value.exit_code == 2
+    output = capsys.readouterr()
+    assert "入力不備" in output.err
+    assert json.loads(output.out)["exit_code"] == 2
+    assert checkpoint.read_bytes() == study.read_bytes() == b"previous artifact"
+
+
+def test_synthetic_anomaly_defaults(tmp_path: Path) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    first = load_model_config(path).groups[0].synthetic_anomaly
+    assert first.noise_std.model_dump() == {"min": 0.010, "max": 0.020}
+    assert first.perlin_threshold.model_dump() == {"min": 0.2, "max": 0.4}
+    assert first.perlin_scale_exponent.model_dump() == {"min": 0, "max": 5}
+
+    payload["group_detail"]["0"]["synthetic_anomaly"] = {
+        "noise_std": {"min": 0.03, "max": 0.03}
+    }
+    _save(path, payload)
+    partial = load_model_config(path).groups[0].synthetic_anomaly
+    assert partial.noise_std.min == partial.noise_std.max == 0.03
+    assert partial.perlin_threshold.model_dump() == first.perlin_threshold.model_dump()
+    assert (
+        partial.perlin_scale_exponent.model_dump()
+        == first.perlin_scale_exponent.model_dump()
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "bounds"),
+    [
+        ("noise_std", {"min": 0, "max": 0.02}),
+        ("noise_std", {"min": 0.03, "max": 0.02}),
+        ("noise_std", {"min": float("inf"), "max": 0.02}),
+        ("perlin_threshold", {"min": -0.1, "max": 0.4}),
+        ("perlin_threshold", {"min": 0.2, "max": 1}),
+        ("perlin_threshold", {"min": 0.5, "max": 0.4}),
+        ("perlin_scale_exponent", {"min": -1, "max": 5}),
+        ("perlin_scale_exponent", {"min": 0, "max": 6}),
+        ("perlin_scale_exponent", {"min": 4, "max": 3}),
+    ],
+)
+def test_synthetic_anomaly_rejects_invalid_bounds(
+    tmp_path: Path,
+    name: str,
+    bounds: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    payload["group_detail"]["0"]["synthetic_anomaly"] = {name: bounds}
+    _save(path, payload)
+    before = path.read_bytes()
+    with pytest.raises(ValidationError, match=name):
+        load_model_config(path)
+    _assert_invalid_training_preserves_artifacts(tmp_path, monkeypatch, capsys)
+    assert path.read_bytes() == before
+    payload["group_detail"]["0"]["synthetic_anomaly"][name] = (
+        {
+            "min": 0.2,
+            "max": 0.2,
+        }
+        if name == "perlin_threshold"
+        else (
+            {"min": 1, "max": 1}
+            if name == "perlin_scale_exponent"
+            else {"min": 0.02, "max": 0.02}
+        )
+    )
+    _save(path, payload)
+    assert load_model_config(path).groups[0].synthetic_anomaly is not None
+
+
+@pytest.mark.parametrize(
+    ("name", "bounds"),
+    [
+        ("noise_std", {"min": True, "max": 0.02}),
+        ("perlin_threshold", {"min": "0.2", "max": 0.4}),
+        ("perlin_scale_exponent", {"min": 0.2, "max": 5}),
+        ("perlin_scale_exponent", {"min": False, "max": 5}),
+    ],
+)
+def test_synthetic_anomaly_rejects_invalid_types(
+    tmp_path: Path,
+    name: str,
+    bounds: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    payload["group_detail"]["0"]["synthetic_anomaly"] = {name: bounds}
+    _save(path, payload)
+    with pytest.raises(ValidationError, match=name):
+        load_model_config(path)
+    _assert_invalid_training_preserves_artifacts(tmp_path, monkeypatch, capsys)
 
 
 def test_group_req_021_s01(tmp_path: Path) -> None:

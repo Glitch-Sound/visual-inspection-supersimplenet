@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 import optuna
+import torch
 
 from app.common.config import GroupConfig
 from app.common.model_adapter import create_supersimplenet
@@ -93,6 +94,8 @@ class AnomalibTrialRunner:
         from anomalib.data import Folder
         from anomalib.engine import Engine
 
+        if self.group is not None:
+            torch.manual_seed(self.group.optuna_settings.execution.seed)
         trial_dir = self.work_dir / f"trial-{trial.number:04d}"
         if trial_dir.exists():
             shutil.rmtree(trial_dir)
@@ -121,6 +124,9 @@ class AnomalibTrialRunner:
             layers=parameters.feature_layers,
             image_size=parameters.image_size,
             learning_rate_multiplier=parameters.learning_rate_multiplier,
+            synthetic_anomaly=(
+                self.group.synthetic_anomaly if self.group is not None else None
+            ),
         )
         pruning = self.group.optuna_settings if self.group is not None else None
         engine = Engine(
