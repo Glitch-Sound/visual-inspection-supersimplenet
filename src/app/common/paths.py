@@ -100,6 +100,12 @@ class ProjectPaths:
         ensure_no_symlink_components(self.root, candidate)
         return ensure_within(self.root, candidate)
 
+    def result_group(self, model: str, group: int) -> Path:
+        root = self.results(model)
+        candidate = root / self.group_name(group)
+        ensure_no_symlink_components(self.root, candidate)
+        return ensure_within(root, candidate)
+
     def study_dir(self, model: str, group: int | None = None) -> Path:
         model_dir = self._model_dir("optuna", model)
         if group is None:
@@ -113,12 +119,6 @@ class ProjectPaths:
         target = self.root / "weights" / model / f"{self.group_name(group)}.ckpt"
         ensure_no_symlink_components(self.root, target)
         return ensure_within(self.root, target)
-
-    def result_generations(self, model: str) -> Path:
-        return self.results(model) / "generations"
-
-    def result_current(self, model: str) -> Path:
-        return self.results(model) / "current.json"
 
     def model_lock(self, model: str) -> Path:
         validate_model_name(model)

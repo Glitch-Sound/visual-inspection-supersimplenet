@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import shutil
 import sys
 from typing import Any
-from uuid import uuid4
 
 import typer
 from rich.console import Console
@@ -16,10 +14,11 @@ from app.common.config import load_config, preparation_fingerprint
 from app.common.contracts import BestTrialResult, load_preparation_manifest
 from app.common.paths import ProjectPaths
 from app.common.result_index import (
-    cleanup_generations,
     create_result_stage,
-    publish_current,
-    read_current,
+    publish_group,
+    remove_result_stage,
+    remove_unconfigured_groups,
+    validate_publish_targets,
 )
 from app.common.runtime import RunRecorder
 from app.model_evaluation.evaluation import (
@@ -79,22 +78,17 @@ def _test_command(
             allowed_split_ids={item.id for item in config.part.ranges},
             fingerprint=preparation_fingerprint(config),
         )
-        if group is not None:
-            current = read_current(
-                paths, model, allowed_group_ids={item.id for item in config.part.groups}
-            )
-        else:
-            try:
-                current = read_current(
-                    paths,
-                    model,
-                    allowed_group_ids={item.id for item in config.part.groups},
-                )
-            except ValueError:
-                current = {}
         stage = create_result_stage(paths, model)
         all_results = []
         try:
+            configured_ids = {item.id for item in config.part.groups}
+            selected_ids = {item.id for item in groups}
+            validate_publish_targets(
+                paths,
+                model,
+                selected_ids=selected_ids,
+                configured_ids=configured_ids if group is None else None,
+            )
             with EvaluationProgress() as progress:
                 progress.update(0, len(manifest.sources))
                 for selected in groups:
@@ -159,21 +153,6 @@ def _test_command(
                                 / paths.group_name(selected.id)
                                 / f"{result.source_image}.json"
                             )
-                        paths.result_generations(model).mkdir(
-                            parents=True, exist_ok=True
-                        )
-                        generation = paths.result_generations(model) / uuid4().hex
-                        generation.mkdir(parents=True, exist_ok=False)
-                        old = current.get(selected.id)
-                        if old is not None:
-                            shutil.rmtree(paths.results(model) / old)
-                        (stage / paths.group_name(selected.id)).replace(
-                            generation / paths.group_name(selected.id)
-                        )
-                        current[selected.id] = (
-                            f"generations/{generation.name}/{paths.group_name(selected.id)}"
-                        )
-                        publish_current(paths, model, current)
                     except (ValueError, FileNotFoundError) as error:
                         raise ValueError(
                             f"group {selected.id} failed: {error}; "
@@ -183,22 +162,34 @@ def _test_command(
                         raise RuntimeError(
                             f"group {selected.id} failed: {error}"
                         ) from error
+                validate_publish_targets(
+                    paths,
+                    model,
+                    selected_ids=selected_ids,
+                    configured_ids=configured_ids if group is None else None,
+                )
+                for selected in groups:
+                    try:
+                        publish_group(paths, model, selected.id, stage)
+                    except Exception as error:
+                        raise RuntimeError(
+                            f"group {selected.id} failed during result publication: {error}"
+                        ) from error
+                if group is None:
+                    remove_unconfigured_groups(
+                        paths, model, configured_ids=configured_ids
+                    )
                 if manifest.sources:
                     progress.update(len(manifest.sources), len(manifest.sources))
         finally:
-            if stage.exists():
-                shutil.rmtree(stage)
-        try:
-            cleanup_generations(paths, model, current)
-        except (OSError, ValueError) as error:
-            recorder.warnings.append(f"result cleanup deferred: {error}")
+            remove_result_stage(stage)
         counts = {
             status: sum(result.overall_status == status for result in all_results)
             for status in ("normal", "anomaly", "undetermined")
         }
         show_stage(
             f"検査完了: 正常={counts['normal']} 異常={counts['anomaly']} "
-            f"未判定={counts['undetermined']} 現行参照={paths.result_current(model)}"
+            f"未判定={counts['undetermined']} 結果={paths.results(model)}"
         )
         return f"{len(all_results)} group-source results"
 

@@ -83,23 +83,6 @@ def _run(
         lock_path = paths.model_lock(model)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(lock_path, timeout=0):
-            from app.common.config import load_config
-            from app.common.result_index import cleanup_generations, read_current
-
-            config = load_config(paths.root, model)
-            try:
-                current = read_current(
-                    paths,
-                    model,
-                    allowed_group_ids={item.id for item in config.part.groups},
-                )
-            except ValueError:
-                pass
-            else:
-                try:
-                    cleanup_generations(paths, model, current)
-                except (OSError, ValueError) as error:
-                    recorder.warnings.append(f"result cleanup deferred: {error}")
             result = action(paths, recorder)
     except Timeout as error:
         recorder.errors.append(f"model {model} is already running")

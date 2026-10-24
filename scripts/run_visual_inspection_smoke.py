@@ -23,7 +23,6 @@ from app.common.contracts import (
     RunMetadata,
 )
 from app.common.paths import ProjectPaths
-from app.common.result_index import read_current
 
 COMMANDS = ["check", "train-pre", "train", "test-pre", "test"]
 
@@ -137,17 +136,11 @@ def inspect_artifacts(
                 ),
             ]
         )
-    current = read_current(
-        paths, model, allowed_group_ids={item.id for item in config.part.groups}
-    )
     for selected in groups:
-        relative = current.get(selected.id)
         checks.append(
             (
                 f"results_{selected.id}",
-                paths.results(model) / relative
-                if relative
-                else paths.results(model) / "missing",
+                paths.result_group(model, selected.id),
                 _read_results,
             )
         )

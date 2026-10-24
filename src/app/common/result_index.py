@@ -1,139 +1,139 @@
-"""Atomic publication and safe lookup of group inspection results."""
+"""Safe staging and publication of group inspection results."""
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 from pathlib import Path
 from uuid import uuid4
 
+from app.common.atomic import publish_staged_directory
 from app.common.paths import ProjectPaths, ensure_no_symlink_components
 
-_RUN_ID = re.compile(r"^[0-9a-f]{32}$")
+_RUN_ID = r"[0-9a-f]{32}"
+_GROUP = r"group_(?:0[0-9]|[1-9][0-9]+)"
+_STAGE = re.compile(rf"\.stage-{_RUN_ID}")
+_BACKUP = re.compile(rf"\.backup-({_GROUP})-{_RUN_ID}")
+_GROUP_NAME = re.compile(_GROUP)
+_SOURCE_JSON = re.compile(r".+\.(?:png|jpg|jpeg|bmp|tif|tiff)\.json", re.I)
+_RESULT_IMAGE = re.compile(r".+_result\.png", re.I)
 
 
-def _result_root(paths: ProjectPaths, model: str) -> Path:
+def _root(paths: ProjectPaths, model: str) -> Path:
     root = paths.results(model)
     ensure_no_symlink_components(paths.root, root)
     return root
 
 
-def read_current(
-    paths: ProjectPaths, model: str, *, allowed_group_ids: set[int] | None = None
-) -> dict[int, str]:
-    root = _result_root(paths, model)
-    current = root / "current.json"
-    if current.is_symlink():
-        raise ValueError("current.json must not be a symlink")
-    if not current.exists():
-        return {}
-    try:
-        payload = json.loads(current.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"invalid current.json: {error}") from error
-    if (
-        not isinstance(payload, dict)
-        or payload.get("version") != 1
-        or not isinstance(payload.get("groups"), dict)
-    ):
-        raise ValueError("invalid current.json version or groups")
-    result: dict[int, str] = {}
-    for key, value in payload["groups"].items():
-        if not isinstance(key, str) or not key.isdecimal() or str(int(key)) != key:
-            raise ValueError(f"invalid current.json group id: {key!r}")
-        group = int(key)
-        if allowed_group_ids is not None and group not in allowed_group_ids:
-            raise ValueError(f"current.json references unknown group {group}")
-        if not isinstance(value, str):
-            raise ValueError(f"invalid current.json path for group {group}")
-        relative = Path(value)
-        parts = relative.parts
-        if (
-            len(parts) != 3
-            or parts[0] != "generations"
-            or not _RUN_ID.fullmatch(parts[1])
-            or parts[2] != paths.group_name(group)
-        ):
-            raise ValueError(f"invalid current.json path for group {group}: {value!r}")
-        target = root / relative
-        ensure_no_symlink_components(root, target)
-        if not target.is_dir():
-            raise ValueError(f"current.json target missing for group {group}: {value}")
-        result[group] = value
-    return result
+def _validate_group(directory: Path, *, allow_temporary: bool = False) -> None:
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError(f"invalid result group directory: {directory}")
+    for entry in directory.iterdir():
+        valid_file = bool(
+            _SOURCE_JSON.fullmatch(entry.name)
+            or _RESULT_IMAGE.fullmatch(entry.name)
+            or (allow_temporary and entry.name.endswith(".json.tmp"))
+        )
+        if entry.is_symlink() or not entry.is_file() or not valid_file:
+            raise ValueError(f"unmanaged result group entry: {entry}")
 
 
-def create_generation(paths: ProjectPaths, model: str) -> Path:
-    root = _result_root(paths, model)
-    generations = root / "generations"
-    ensure_no_symlink_components(root, generations)
-    generations.mkdir(parents=True, exist_ok=True)
-    generation = generations / uuid4().hex
-    generation.mkdir()
-    return generation
+def _validate_stage(stage: Path) -> None:
+    if stage.is_symlink() or not stage.is_dir():
+        raise ValueError(f"invalid result temporary area: {stage}")
+    for group in stage.iterdir():
+        if not _GROUP_NAME.fullmatch(group.name):
+            raise ValueError(f"unmanaged result temporary entry: {group}")
+        _validate_group(group, allow_temporary=True)
+
+
+def recover_results(paths: ProjectPaths, model: str) -> None:
+    """Restore an old group when publication stopped between two renames."""
+
+    root = _root(paths, model)
+    if not root.exists():
+        return
+    backups: dict[str, Path] = {}
+    for entry in root.iterdir():
+        match = _BACKUP.fullmatch(entry.name)
+        if match is None:
+            continue
+        group_name = match.group(1)
+        if group_name in backups:
+            raise ValueError(f"multiple backups for result group {group_name}")
+        _validate_group(entry)
+        backups[group_name] = entry
+    for group_name, backup in sorted(backups.items()):
+        target = root / group_name
+        ensure_no_symlink_components(paths.root, target)
+        if target.exists():
+            _validate_group(target)
+            shutil.rmtree(backup)
+        else:
+            backup.replace(target)
 
 
 def create_result_stage(paths: ProjectPaths, model: str) -> Path:
-    root = _result_root(paths, model)
+    """Recover publication and clear app-owned incomplete stages before a run."""
+
+    root = _root(paths, model)
     root.mkdir(parents=True, exist_ok=True)
+    recover_results(paths, model)
     for stale in root.iterdir():
-        if stale.name.startswith(".stage-") and _RUN_ID.fullmatch(stale.name[7:]):
-            if stale.is_symlink() or not stale.is_dir():
-                raise ValueError(f"invalid result temporary area: {stale}")
+        if _STAGE.fullmatch(stale.name):
+            _validate_stage(stale)
             shutil.rmtree(stale)
     stage = root / f".stage-{uuid4().hex}"
     stage.mkdir()
     return stage
 
 
-def publish_current(paths: ProjectPaths, model: str, groups: dict[int, str]) -> None:
-    root = _result_root(paths, model)
-    root.mkdir(parents=True, exist_ok=True)
-    temporary = root / f".current-{uuid4().hex}.json"
-    try:
-        temporary.write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "groups": {
-                        str(key): value for key, value in sorted(groups.items())
-                    },
-                },
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(root / "current.json")
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def cleanup_generations(
-    paths: ProjectPaths, model: str, current: dict[int, str]
+def validate_publish_targets(
+    paths: ProjectPaths,
+    model: str,
+    *,
+    selected_ids: set[int],
+    configured_ids: set[int] | None = None,
 ) -> None:
-    root = _result_root(paths, model)
-    generations = root / "generations"
-    if not generations.exists():
-        return
-    ensure_no_symlink_components(root, generations)
-    keep = {root / value for value in current.values()}
-    for generation in generations.iterdir():
-        if (
-            generation.is_symlink()
-            or not generation.is_dir()
-            or not _RUN_ID.fullmatch(generation.name)
-        ):
-            raise ValueError(f"invalid result generation entry: {generation}")
-        for group in generation.iterdir():
-            if (
-                group.is_symlink()
-                or not group.is_dir()
-                or not re.fullmatch(r"group_\d+", group.name)
-            ):
-                raise ValueError(f"invalid result group entry: {group}")
-            if group not in keep:
-                shutil.rmtree(group)
-        if not any(generation.iterdir()):
-            generation.rmdir()
+    """Reject unsafe managed targets before any group publication starts."""
+
+    root = _root(paths, model)
+    for group in selected_ids:
+        target = paths.result_group(model, group)
+        if target.exists() or target.is_symlink():
+            _validate_group(target)
+    if configured_ids is not None and root.exists():
+        keep = {paths.group_name(group) for group in configured_ids}
+        for entry in root.iterdir():
+            if _GROUP_NAME.fullmatch(entry.name) and entry.name not in keep:
+                _validate_group(entry)
+
+
+def publish_group(paths: ProjectPaths, model: str, group: int, stage: Path) -> None:
+    root = _root(paths, model)
+    target = paths.result_group(model, group)
+    staged_group = stage / paths.group_name(group)
+    _validate_group(staged_group)
+    if target.exists() or target.is_symlink():
+        _validate_group(target)
+    backup = root / f".backup-{paths.group_name(group)}-{uuid4().hex}"
+    publish_staged_directory(staged_group, target, backup=backup)
+
+
+def remove_result_stage(stage: Path) -> None:
+    if stage.exists() or stage.is_symlink():
+        _validate_stage(stage)
+        shutil.rmtree(stage)
+
+
+def remove_unconfigured_groups(
+    paths: ProjectPaths, model: str, *, configured_ids: set[int]
+) -> None:
+    """Remove only canonical group directories omitted from a full run."""
+
+    root = _root(paths, model)
+    keep = {paths.group_name(group) for group in configured_ids}
+    for entry in root.iterdir():
+        if _GROUP_NAME.fullmatch(entry.name) and entry.name not in keep:
+            _validate_group(entry)
+            shutil.rmtree(entry)

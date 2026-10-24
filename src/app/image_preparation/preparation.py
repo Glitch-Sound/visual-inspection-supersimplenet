@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import re
-import shutil
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
 
+from app.common.atomic import replace_directory
 from app.common.config import (
     AppConfig,
     CropRange,
@@ -100,31 +98,6 @@ def list_images(directory: Path) -> list[Path]:
     )
 
 
-def _atomic_replace_directory(target: Path, populate: Callable[[Path], None]) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    prefix = f".{target.name}-stage-"
-    for stale in target.parent.iterdir():
-        if not stale.name.startswith(prefix):
-            continue
-        if not re.fullmatch(r"[0-9a-f]{32}", stale.name[len(prefix) :]):
-            continue
-        if stale.is_symlink() or not stale.is_dir():
-            raise ValueError(f"invalid preparation temporary area: {stale}")
-        shutil.rmtree(stale)
-    stage = target.with_name(f"{prefix}{uuid4().hex}")
-    stage.mkdir()
-    try:
-        populate(stage)
-        if target.exists():
-            if target.is_symlink() or not target.is_dir():
-                raise ValueError(f"invalid preparation target: {target}")
-            shutil.rmtree(target)
-        stage.replace(target)
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
-
-
 def create_check_image(config: AppConfig, paths: ProjectPaths) -> Path:
     base_path = paths.original_train(config.model) / config.part.base
     reference = resize_image(read_image(base_path), config.image_resize)
@@ -147,7 +120,7 @@ def create_check_image(config: AppConfig, paths: ProjectPaths) -> Path:
                 stage / name, draw_ranges(reference, selected_ranges, config.image_size)
             )
 
-    _atomic_replace_directory(target_dir, populate)
+    replace_directory(target_dir, populate)
     return paths.check_image(config.model)
 
 
@@ -294,7 +267,7 @@ def prepare_training(
             manifest.write_json(targets[item.id] / "manifest.json")
             manifests[item.id] = manifest
 
-    _atomic_replace_directory(paths.prepared_train(config.model, group), populate)
+    replace_directory(paths.prepared_train(config.model, group), populate)
     if not manifests:
         raise RuntimeError("training manifest was not created")
     return manifests
@@ -380,7 +353,7 @@ def prepare_testing(
         )
         manifest.write_json(stage / "manifest.json")
 
-    _atomic_replace_directory(paths.prepared_test(config.model), populate)
+    replace_directory(paths.prepared_test(config.model), populate)
     if manifest is None:  # pragma: no cover
         raise RuntimeError("testing manifest was not created")
     return manifest

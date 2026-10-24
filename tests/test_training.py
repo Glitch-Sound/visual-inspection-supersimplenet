@@ -818,7 +818,6 @@ def test_req_020_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from group_evaluation_helpers import FakePredictor
     from group_evaluation_helpers import project as evaluation_project
 
-    from app.common.result_index import read_current
     from app.model_evaluation import cli as evaluation_cli
     from app.model_evaluation.predictor import load_checkpoint_metadata
 
@@ -841,11 +840,10 @@ def test_req_020_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *_args, **_kwargs: FakePredictor(score=0.3),
     )
     evaluation_cli._test_command(model="XX", group=None)
-    before_results = read_current(paths, "XX", allowed_group_ids={0, 1})
-    group_zero_result = paths.results("XX") / before_results[0] / "sample.png.json"
+    group_zero_result = paths.result_group("XX", 0) / "sample.png.json"
     previous_group_zero_result = group_zero_result.read_bytes()
     old_group_one_result = json.loads(
-        (paths.results("XX") / before_results[1] / "sample.png.json").read_text()
+        (paths.result_group("XX", 1) / "sample.png.json").read_text()
     )
     assert old_group_one_result["threshold"] == pytest.approx(0.4)
     assert old_group_one_result["overall_status"] == "normal"
@@ -884,12 +882,9 @@ def test_req_020_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert reloaded.part.select_groups(0)[0].optuna_settings.threshold.value == 0.4
 
     evaluation_cli._test_command(model="XX", group=1)
-    after_results = read_current(paths, "XX", allowed_group_ids={0, 1})
-    assert after_results[0] == before_results[0]
-    assert after_results[1] != before_results[1]
     assert group_zero_result.read_bytes() == previous_group_zero_result
     new_group_one_result = json.loads(
-        (paths.results("XX") / after_results[1] / "sample.png.json").read_text()
+        (paths.result_group("XX", 1) / "sample.png.json").read_text()
     )
     assert new_group_one_result["threshold"] == pytest.approx(0.199)
     assert new_group_one_result["heatmap_range"] == {"min": 0.1, "max": 0.9}

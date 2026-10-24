@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import cv2
@@ -13,10 +12,7 @@ from conftest import write_test_image
 from group_evaluation_helpers import FakePredictor, aligned, project, recorder
 
 from app.common.config import load_config
-from app.common.result_index import (
-    create_generation,
-    read_current,
-)
+from app.common.result_index import create_result_stage, recover_results
 from app.image_preparation.imaging import AlignmentError
 from app.image_preparation.preparation import prepare_testing
 from app.model_evaluation import cli as evaluation_cli
@@ -53,7 +49,11 @@ def _run(
 
 
 def _current(paths) -> dict[int, str]:
-    return read_current(paths, "XX", allowed_group_ids={0, 1})
+    return {
+        group: paths.group_name(group)
+        for group in (0, 1)
+        if paths.result_group("XX", group).is_dir()
+    }
 
 
 def _two_sources(root: Path):
@@ -63,36 +63,43 @@ def _two_sources(root: Path):
     return paths
 
 
-def test_group_req_023_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_result_all_groups(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _, paths = project(tmp_path, two=True)
     _run(monkeypatch, paths)
     assert set(_current(paths)) == {0, 1}
-    assert _current(paths)[0].endswith("/group_00")
-    assert _current(paths)[1].endswith("/group_01")
+    for group in (0, 1):
+        assert (paths.result_group("XX", group) / "sample.png.json").is_file()
 
 
-def test_group_req_023_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_result_selected_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _, paths = project(tmp_path, two=True)
     _run(monkeypatch, paths, group=1)
     assert set(_current(paths)) == {1}
 
 
-def test_group_req_023_s04(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_result_unknown_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _, paths = project(tmp_path)
     with pytest.raises(ValueError, match="available groups"):
         _run(monkeypatch, paths, group=9)
+    assert _current(paths) == {}
 
 
-def test_group_req_023_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_result_missing_model_preserves_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _, paths = project(tmp_path, two=True)
     _run(monkeypatch, paths)
-    before = _current(paths)
+    before = {
+        group: (paths.result_group("XX", group) / "sample.png.json").read_bytes()
+        for group in (0, 1)
+    }
     paths.checkpoint("XX", 1).unlink()
     with pytest.raises(ValueError, match="group 1 failed.*group_01.ckpt"):
         _run(monkeypatch, paths)
-    after = _current(paths)
-    assert after[0] != before[0]
-    assert after[1] == before[1]
+    assert {
+        group: (paths.result_group("XX", group) / "sample.png.json").read_bytes()
+        for group in (0, 1)
+    } == before
 
 
 @pytest.mark.parametrize("missing", ["checkpoint", "best_trial"])
@@ -123,14 +130,15 @@ def test_req_023_s03_cli_input_error(
 
 
 @pytest.mark.parametrize("failure", ["evaluation", "result_image_write"])
-def test_group_req_023_s05(
+def test_result_later_group_failure_keeps_all_old(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     _, paths = project(tmp_path, two=True)
     _run(monkeypatch, paths)
-    before = _current(paths)
-    old_result = paths.results("XX") / before[1] / "sample.png.json"
-    old_contents = old_result.read_bytes()
+    before = {
+        group: (paths.result_group("XX", group) / "sample.png.json").read_bytes()
+        for group in (0, 1)
+    }
     if failure == "evaluation":
         original = evaluation_cli.evaluate_model
 
@@ -151,10 +159,10 @@ def test_group_req_023_s05(
         monkeypatch.setattr(evaluation, "write_image", fail_image_write)
     with pytest.raises(RuntimeError, match="group 1 failed"):
         _run(monkeypatch, paths)
-    after = _current(paths)
-    assert after[0] != before[0]
-    assert after[1] == before[1]
-    assert old_result.read_bytes() == old_contents
+    assert {
+        group: (paths.result_group("XX", group) / "sample.png.json").read_bytes()
+        for group in (0, 1)
+    } == before
 
 
 def test_group_req_010_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -260,164 +268,235 @@ def test_group_req_010_s04(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert not np.array_equal(first[0, 0], first[1, 0])
 
 
-def test_group_req_013_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_result_replace_after_all_groups_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _, paths = project(tmp_path, two=True)
-    _run(monkeypatch, paths)
-    before = _current(paths)
-    _run(monkeypatch, paths)
-    after = _current(paths)
-    assert all(before[key] != after[key] for key in before)
-    assert all((paths.results("XX") / value).is_dir() for value in after.values())
+    _run(monkeypatch, paths, score=0.2)
+    old = (paths.result_group("XX", 0) / "sample.png.json").read_bytes()
+    _run(monkeypatch, paths, score=0.8)
+    assert (paths.result_group("XX", 0) / "sample.png.json").read_bytes() != old
+    assert set(_current(paths)) == {0, 1}
+    assert not list(paths.results("XX").glob(".backup-*"))
 
 
-def test_group_req_013_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_result_single_group_preserves_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _, paths = project(tmp_path, two=True)
-    _run(monkeypatch, paths)
-    before = _current(paths)
-    _run(monkeypatch, paths, group=0)
-    after = _current(paths)
-    assert before[1] == after[1]
-    assert before[0] != after[0]
-
-
-def test_group_req_013_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, paths = project(tmp_path)
-    _run(monkeypatch, paths)
-    before = _current(paths)
-    monkeypatch.setattr(
-        evaluation_cli,
-        "evaluate_model",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("interrupted")),
+    _run(monkeypatch, paths, score=0.2)
+    other = paths.result_group("XX", 1) / "sample.png.json"
+    before = (other.read_bytes(), other.stat().st_mtime_ns)
+    _run(monkeypatch, paths, group=0, score=0.8)
+    assert (other.read_bytes(), other.stat().st_mtime_ns) == before
+    assert (
+        json.loads((paths.result_group("XX", 0) / "sample.png.json").read_text())[
+            "overall_status"
+        ]
+        == "anomaly"
     )
-    with pytest.raises(RuntimeError, match="interrupted"):
-        _run(monkeypatch, paths)
-    assert _current(paths) == before
 
 
-def test_group_req_013_s04(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, paths = project(tmp_path)
-    _run(monkeypatch, paths)
-    before = _current(paths)
-    shutil.rmtree(paths.results("XX") / before[0])
-    with pytest.raises(ValueError, match="target missing"):
-        _current(paths)
-    with pytest.raises(ValueError, match="target missing"):
-        _run(monkeypatch, paths, group=0)
-    _run(monkeypatch, paths)
-    assert _current(paths)[0] != before[0]
-
-
-@pytest.mark.parametrize("bad", ["version", "path", "missing", "symlink", "group"])
-def test_group_req_013_s05(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad: str
+def test_result_stage_failure_preserves_all_groups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, paths = project(tmp_path, two=True)
     _run(monkeypatch, paths)
-    current = paths.result_current("XX")
-    payload = json.loads(current.read_text())
-    if bad == "version":
-        payload["version"] = 2
-    elif bad == "path":
-        payload["groups"]["0"] = "../outside"
-    elif bad == "missing":
-        payload["groups"]["0"] = "generations/" + "0" * 32 + "/group_00"
-    elif bad == "group":
-        payload["groups"]["9"] = payload["groups"].pop("0")
-    else:
-        current.unlink()
-        outside = tmp_path / "outside.json"
-        outside.write_text("outside")
-        current.symlink_to(outside)
-    if bad != "symlink":
-        current.write_text(json.dumps(payload))
-    with pytest.raises(ValueError):
-        read_current(paths, "XX", allowed_group_ids={0, 1})
-    with pytest.raises(ValueError):
-        _run(monkeypatch, paths, group=0)
-
-
-def test_group_req_013_s07(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, paths = project(tmp_path, two=True)
-    current = paths.result_current("XX")
-    current.parent.mkdir(parents=True)
-    outside = tmp_path / "outside.json"
-    outside.write_text("safe")
-    current.symlink_to(outside)
-    _run(monkeypatch, paths)
-    assert not current.is_symlink()
-    assert outside.read_text() == "safe"
-    assert set(_current(paths)) == {0, 1}
-
-
-def test_group_req_013_s08(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, paths = project(tmp_path)
-    current = paths.result_current("XX")
-    current.parent.mkdir(parents=True)
-    current.write_text("invalid")
-    monkeypatch.chdir(tmp_path)
-    from app.common.cli import _run as execute
-
-    execute("check", "XX", lambda _paths, _recorder: "ok")
-    assert current.read_text() == "invalid"
-
-
-def test_group_req_013_s09(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, paths = project(tmp_path, two=True)
-    _run(monkeypatch, paths)
-    before = _current(paths)
-    _run(monkeypatch, paths, group=0)
-    after = _current(paths)
-    assert not (paths.results("XX") / before[0]).exists()
-    assert (paths.results("XX") / before[1]).exists()
-    assert sorted(
-        path.name for path in paths.result_generations("XX").iterdir()
-    ) == sorted({Path(value).parts[1] for value in after.values()})
-
-
-def test_group_req_013_s10(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, paths = project(tmp_path)
-    _run(monkeypatch, paths)
-    orphan = create_generation(paths, "XX") / "group_0"
-    orphan.mkdir()
-    monkeypatch.chdir(tmp_path)
-    from app.common.cli import _run as execute
-
-    execute("check", "XX", lambda _paths, _recorder: "ok")
-    assert not orphan.exists()
-
-
-def test_req_013_s11(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, paths = project(tmp_path, two=True)
-    _run(monkeypatch, paths)
-    before = _current(paths)
+    before = {
+        group: (paths.result_group("XX", group) / "sample.png.json").read_bytes()
+        for group in (0, 1)
+    }
     original = evaluation_cli.evaluate_model
 
-    def fail_later(config, group, *args, **kwargs):
-        if group.id == 1:
-            raise RuntimeError("later group failed")
-        return original(config, group, *args, **kwargs)
+    def fail_later(config, selected, *args, **kwargs):
+        if selected.id == 1:
+            raise OSError("interrupted")
+        return original(config, selected, *args, **kwargs)
 
     monkeypatch.setattr(evaluation_cli, "evaluate_model", fail_later)
-    with pytest.raises(RuntimeError, match="group 1 failed: later group failed"):
+    with pytest.raises(RuntimeError, match="group 1 failed: interrupted"):
         _run(monkeypatch, paths)
-    after = _current(paths)
-    assert after[0] != before[0]
-    assert after[1] == before[1]
+    assert {
+        group: (paths.result_group("XX", group) / "sample.png.json").read_bytes()
+        for group in (0, 1)
+    } == before
+    assert not list(paths.results("XX").glob(".stage-*"))
 
 
-def test_req_013_s12(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_result_recovery_after_publish_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _, paths = project(tmp_path)
     _run(monkeypatch, paths)
-    before = _current(paths)
     root = paths.results("XX")
+    target = paths.result_group("XX", 0)
+    old = (target / "sample.png.json").read_bytes()
+    backup = root / f".backup-group_00-{'a' * 32}"
+    target.replace(backup)
+    original = evaluation_cli.evaluate_model
+
+    def assert_restored(*args, **kwargs):
+        assert (target / "sample.png.json").read_bytes() == old
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(evaluation_cli, "evaluate_model", assert_restored)
+    _run(monkeypatch, paths)
+    assert not backup.exists()
+    target.replace(backup)
+    target.mkdir()
+    (target / "sample.png.json").write_text("new")
+    recover_results(paths, "XX")
+    assert (target / "sample.png.json").read_text() == "new"
+    assert not backup.exists()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "marker.txt").write_text("safe")
+    bad_backup = root / f".backup-group_00-{'b' * 32}"
+    bad_backup.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="invalid result group directory"):
+        _run(monkeypatch, paths)
+    assert (outside / "marker.txt").read_text() == "safe"
+
+
+@pytest.mark.parametrize("component", ["parent", "group"])
+def test_result_rejects_symlink_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, component: str
+) -> None:
+    _, paths = project(tmp_path)
+    root = paths.results("XX")
+    root.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "marker.txt"
+    marker.write_text("safe")
+    if component == "parent":
+        root.rmdir()
+        root.symlink_to(outside, target_is_directory=True)
+    else:
+        paths.result_group("XX", 0).symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        _run(monkeypatch, paths)
+    assert marker.read_text() == "safe"
+
+
+def test_result_full_rerun_replaces_mixed_groups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = project(tmp_path, two=True)
+    _run(monkeypatch, paths, score=0.2)
+    _run(monkeypatch, paths, group=0, score=0.8)
+    _run(monkeypatch, paths, score=0.8)
+    for group in (0, 1):
+        result = json.loads(
+            (paths.result_group("XX", group) / "sample.png.json").read_text()
+        )
+        assert result["overall_status"] == "anomaly"
+
+
+def test_result_residue_does_not_block_preparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = project(tmp_path)
+    stale = paths.results("XX") / f".stage-{'a' * 32}"
+    stale.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    from app.common.cli import _run as execute
+
+    execute("check", "XX", lambda _paths, _recorder: "ok")
+    assert stale.exists()
+
+
+def test_result_full_run_removes_unconfigured_groups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = project(tmp_path)
+    root = paths.results("XX")
+    stale = root / "group_09"
+    stale.mkdir(parents=True)
+    (stale / "old.png.json").write_text("old")
+    current = root / "current.json"
+    current.write_text("legacy")
+    generations = root / "generations"
+    generations.mkdir()
+    (generations / "marker").write_text("legacy")
+    _run(monkeypatch, paths)
+    assert not stale.exists()
+    assert current.read_text() == "legacy"
+    assert (generations / "marker").read_text() == "legacy"
+
+
+def test_result_cleanup_managed_entries_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = project(tmp_path)
+    _run(monkeypatch, paths)
+    root = paths.results("XX")
+    old = paths.result_group("XX", 0)
+    backup = root / f".backup-group_00-{'b' * 32}"
+    old.replace(backup)
     stale = root / f".stage-{'a' * 32}"
     stale.mkdir()
-    (stale / "partial.txt").write_text("partial")
-
+    unmanaged = root / "notes.txt"
+    unmanaged.write_text("safe")
     _run(monkeypatch, paths)
-
     assert not stale.exists()
-    assert _current(paths)[0] != before[0]
+    assert not backup.exists()
+    assert (old / "sample.png.json").is_file()
+    assert unmanaged.read_text() == "safe"
+
+
+def test_result_stale_stage_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = project(tmp_path)
+    _run(monkeypatch, paths)
+    stale = create_result_stage(paths, "XX")
+    (stale / "group_00").mkdir()
+    (stale / "group_00" / "sample.png.json.tmp").write_text("partial")
+    _run(monkeypatch, paths)
+    assert not stale.exists()
+    assert (paths.result_group("XX", 0) / "sample.png.json").is_file()
+
+
+def test_result_full_run_failure_preserves_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _two_sources(tmp_path)
+    _run(monkeypatch, paths)
+    old = {
+        group: (paths.result_group("XX", group) / "sample.png.json").read_bytes()
+        for group in (0, 1)
+    }
+    original_write = evaluation.write_inspection_result
+
+    def fail_late(result, output):
+        if result.group == 1 and result.source_image == "second.png":
+            raise OSError("late result write failed")
+        original_write(result, output)
+
+    monkeypatch.setattr(evaluation, "write_inspection_result", fail_late)
+    with pytest.raises(RuntimeError, match="group 1 failed: late result write failed"):
+        _run(monkeypatch, paths)
+    assert {
+        group: (paths.result_group("XX", group) / "sample.png.json").read_bytes()
+        for group in (0, 1)
+    } == old
+
+
+def test_result_rerun_drops_old_source_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = project(tmp_path)
+    _run(monkeypatch, paths)
+    group = paths.result_group("XX", 0)
+    (group / "removed.png.json").write_text("old")
+    (group / "removed_00.png_result.png").write_bytes(b"old")
+    _run(monkeypatch, paths)
+    assert sorted(path.name for path in group.iterdir()) == [
+        "sample.png.json",
+        "sample_00.png_result.png",
+        "sample_01.png_result.png",
+    ]
 
 
 def test_group_req_016_s01(tmp_path: Path) -> None:
@@ -543,7 +622,7 @@ def test_group_req_019_s01(tmp_path: Path) -> None:
     )
 
 
-def test_command_progress_non_tty_once_per_source(
+def test_result_non_tty_progress(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _two_sources(tmp_path)
@@ -565,7 +644,7 @@ def test_command_progress_non_tty_once_per_source(
     assert json.loads(captured.out)["exit_code"] == 0
 
 
-def test_command_progress_tty_once_per_source(
+def test_result_tty_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -644,7 +723,7 @@ def test_command_progress_during_inference(
     assert "検査進捗 1/2" in calls[1]
 
 
-def test_command_progress_counts_undetermined(
+def test_result_progress_counts_undetermined(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     paths = _two_sources(tmp_path)
@@ -739,9 +818,10 @@ def test_command_progress_cli_failure_exit_record(
         lambda *_args, **_kwargs: FakePredictor(score=0.5),
     )
     _test_command(model="XX", group=None)
-    before = _current(paths)
-    old_result = paths.results("XX") / before[1] / "sample.png.json"
-    old_bytes = old_result.read_bytes()
+    before = {
+        group: (paths.result_group("XX", group) / "sample.png.json").read_bytes()
+        for group in (0, 1)
+    }
 
     reason = ""
     if failure == "later_group":
@@ -786,10 +866,10 @@ def test_command_progress_cli_failure_exit_record(
     record = json.loads(captured.out)
     assert record["exit_code"] == 3
     assert reason in record["errors"]
-    after = _current(paths)
-    assert after[0] != before[0]
-    assert after[1] == before[1]
-    assert old_result.read_bytes() == old_bytes
+    assert {
+        group: (paths.result_group("XX", group) / "sample.png.json").read_bytes()
+        for group in (0, 1)
+    } == before
 
 
 def test_command_progress_stops_on_failure(
@@ -797,7 +877,7 @@ def test_command_progress_stops_on_failure(
 ) -> None:
     paths = _two_sources(tmp_path)
     _run(monkeypatch, paths)
-    before = _current(paths)
+    before = (paths.result_group("XX", 0) / "sample.png.json").read_bytes()
     original = evaluation_cli.evaluate_model
 
     def fail_second(config, group, *args, **kwargs):
@@ -812,9 +892,7 @@ def test_command_progress_stops_on_failure(
     stderr = capsys.readouterr().err
     assert stderr.count("検査進捗 0/2") == 1
     assert "検査進捗 1/2" not in stderr
-    after = _current(paths)
-    assert after[0] != before[0]
-    assert after[1] == before[1]
+    assert (paths.result_group("XX", 0) / "sample.png.json").read_bytes() == before
 
 
 def test_command_progress_stops_before_failed_result_write(
@@ -824,7 +902,7 @@ def test_command_progress_stops_before_failed_result_write(
 ) -> None:
     paths = _two_sources(tmp_path)
     _run(monkeypatch, paths)
-    before = _current(paths)
+    before = (paths.result_group("XX", 0) / "sample.png.json").read_bytes()
     write_result = evaluation.write_inspection_result
 
     def fail_second_result(result, output):
@@ -839,13 +917,11 @@ def test_command_progress_stops_before_failed_result_write(
     stderr = capsys.readouterr().err
     assert stderr.count("検査進捗 1/2") == 1
     assert "検査進捗 2/2" not in stderr
-    after = _current(paths)
-    assert after[0] != before[0]
-    assert after[1] == before[1]
+    assert (paths.result_group("XX", 0) / "sample.png.json").read_bytes() == before
 
 
 @pytest.mark.parametrize("failure", ["final_write", "publish"])
-def test_command_progress_stops_before_failed_publication(
+def test_result_publish_failure_does_not_finish_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -853,7 +929,10 @@ def test_command_progress_stops_before_failed_publication(
 ) -> None:
     paths = _two_sources(tmp_path)
     _run(monkeypatch, paths)
-    before = _current(paths)
+    before = {
+        group: (paths.result_group("XX", group) / "sample.png.json").read_bytes()
+        for group in (0, 1)
+    }
     if failure == "final_write":
         original = evaluation.InspectionResult.write_json
         writes = 0
@@ -870,7 +949,7 @@ def test_command_progress_stops_before_failed_publication(
     else:
         monkeypatch.setattr(
             evaluation_cli,
-            "publish_current",
+            "publish_group",
             lambda *_args: (_ for _ in ()).throw(OSError("injected publish failure")),
         )
     capsys.readouterr()
@@ -878,14 +957,12 @@ def test_command_progress_stops_before_failed_publication(
         _run(monkeypatch, paths)
     stderr = capsys.readouterr().err
     assert "検査進捗 2/2" not in stderr
-    if failure == "publish":
-        with pytest.raises(ValueError, match="missing"):
-            _current(paths)
-    else:
+    if failure == "final_write":
         assert "検査進捗 1/2" in stderr
-        after = _current(paths)
-        assert after[0] != before[0]
-        assert after[1] == before[1]
+    assert {
+        group: (paths.result_group("XX", group) / "sample.png.json").read_bytes()
+        for group in (0, 1)
+    } == before
 
 
 def test_command_progress_preserves_single_stdout_record(
