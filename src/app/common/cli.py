@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import sys
 from collections.abc import Callable
 from enum import IntEnum
@@ -14,7 +16,11 @@ from filelock import FileLock, Timeout
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn
 
-from app.common.paths import ProjectPaths, validate_model_name
+from app.common.paths import (
+    ProjectPaths,
+    ensure_no_symlink_components,
+    validate_model_name,
+)
 from app.common.runtime import DeviceSelection, RunRecorder, select_device
 
 
@@ -24,6 +30,47 @@ class ExitCode(IntEnum):
     SUCCESS = 0
     INPUT_ERROR = 2
     PROCESSING_ERROR = 3
+
+
+_RUN_ID = r"[0-9a-f]{32}"
+_GROUP = r"group_(?:0[0-9]|[1-9][0-9]+)"
+
+
+def _clear_model_stages(paths: ProjectPaths, model: str) -> None:
+    """Remove only known temporary artifacts for one locked model."""
+
+    candidates = (
+        (paths.root / "data/03_check", rf"\.{re.escape(model)}-stage-{_RUN_ID}", True),
+        (paths.root / "data/04_train", rf"\.{re.escape(model)}-stage-{_RUN_ID}", True),
+        (paths.root / "data/05_test", rf"\.{re.escape(model)}-stage-{_RUN_ID}", True),
+        (paths.root / "data/04_train" / model, rf"\.{_GROUP}-stage-{_RUN_ID}", True),
+        (paths.root / "optuna" / model, rf"\.{_GROUP}-stage-{_RUN_ID}", True),
+        (paths.root / "weights" / model, rf"\.{_GROUP}\.ckpt-stage-{_RUN_ID}", False),
+        (paths.root / "data/06_result" / model, rf"\.stage-{_RUN_ID}", True),
+    )
+    for parent, pattern, directory in candidates:
+        ensure_no_symlink_components(paths.root, parent)
+        if not parent.exists():
+            continue
+        if not parent.is_dir():
+            raise ValueError(f"invalid temporary parent: {parent}")
+        for entry in parent.iterdir():
+            if re.fullmatch(pattern, entry.name) is None:
+                continue
+            if entry.is_symlink() or (
+                not entry.is_dir() if directory else not entry.is_file()
+            ):
+                raise ValueError(f"invalid temporary area: {entry}")
+            if directory:
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+    config_temp = paths.root / "config" / f"part_{model}.json.tmp"
+    ensure_no_symlink_components(paths.root, config_temp.parent)
+    if config_temp.exists() or config_temp.is_symlink():
+        if config_temp.is_symlink() or not config_temp.is_file():
+            raise ValueError(f"invalid temporary area: {config_temp}")
+        config_temp.unlink()
 
 
 def show_stage(message: str) -> None:
@@ -83,6 +130,7 @@ def _run(
         lock_path = paths.model_lock(model)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(lock_path, timeout=0):
+            _clear_model_stages(paths, model)
             result = action(paths, recorder)
     except Timeout as error:
         recorder.errors.append(f"model {model} is already running")

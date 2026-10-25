@@ -15,6 +15,7 @@ from conftest import build_project, write_test_image
 
 from app.common.config import load_config, preparation_fingerprint
 from app.common.contracts import (
+    BestTrialResult,
     load_preparation_manifest,
 )
 from app.common.runtime import DeviceSelection, RunRecorder
@@ -96,6 +97,7 @@ def _stub_search(
 
     class Study:
         trials = []
+        best_trial = SimpleNamespace(number=0)
 
     monkeypatch.setattr("app.model_training.cli.create_study", lambda *_args: Study())
     monkeypatch.setattr(
@@ -106,7 +108,7 @@ def _stub_search(
         "app.model_training.cli.show_trial_conditions", lambda *_args: None
     )
 
-    def persist(*, config, group, paths, split, study, outcomes, study_dir):
+    def persist(*, config, group, paths, split, study, outcomes, study_dir, best_trial):
         if group.id == fail_group:
             raise RuntimeError("injected failure")
         done.append(group.id)
@@ -496,6 +498,21 @@ def test_group_req_007_s01(tmp_path: Path) -> None:
     assert best.group == 0 and best.range_ids == [0]
     assert paths.checkpoint("XX", 0).exists()
     assert (
+        best.synthetic_anomaly.model_dump() == selected.synthetic_anomaly.model_dump()
+    )
+    saved_checkpoint = torch.load(
+        paths.checkpoint("XX", 0), map_location="cpu", weights_only=False
+    )
+    assert saved_checkpoint["visual_inspection"]["synthetic_anomaly"] == (
+        best.synthetic_anomaly.model_dump()
+    )
+    assert (
+        BestTrialResult.read_json(
+            paths.study_dir("XX", 0) / "best_trial.json"
+        ).synthetic_anomaly
+        == best.synthetic_anomaly
+    )
+    assert (
         load_config(tmp_path, "XX").part.groups[0].optuna_settings.threshold.value
         == best.threshold
     )
@@ -685,6 +702,48 @@ def test_req_008_s04(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert not stale.exists()
     assert old.read_text() == "group 0"
     assert (paths.study_dir("XX", 0) / "study.db").read_text() == "new"
+
+
+def test_storage_session_closes_before_study_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _project(tmp_path)
+    _stub_search(monkeypatch, paths)
+    events: list[str] = []
+    original_close = optuna.storages.RDBStorage.remove_session
+    persist = training_cli.persist_best_trial
+
+    def close(storage):
+        events.append("closed")
+        return original_close(storage)
+
+    def publish(**kwargs):
+        assert "closed" in events
+        events.append("published")
+        return persist(**kwargs)
+
+    monkeypatch.setattr(optuna.storages.RDBStorage, "remove_session", close)
+    monkeypatch.setattr(training_cli, "persist_best_trial", publish)
+    _run_cli(monkeypatch, paths, group=0)
+    assert events.index("closed") < events.index("published")
+
+
+def test_closed_storage_history_reads_from_published_path(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    stage = new_training_stage(paths, "XX", 0)
+    handle = optuna.storages.RDBStorage(f"sqlite:///{stage / 'study.db'}")
+    study = create_study(config, config.part.groups[0], stage / "study.db", handle)
+    study.optimize(lambda trial: trial.suggest_float("value", 0, 1), n_trials=1)
+    expected = study.best_trial.number
+    handle.remove_session()
+    handle.engine.dispose()
+    published = paths.study_dir("XX", 0)
+    stage.replace(published)
+    loaded = optuna.load_study(
+        study_name=study.study_name,
+        storage=f"sqlite:///{published / 'study.db'}",
+    )
+    assert loaded.best_trial.number == expected
 
 
 def test_req_029_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

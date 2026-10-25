@@ -82,6 +82,7 @@ def _train_command(
         summaries: list[str] = []
         for selected in groups:
             study_dir = None
+            storage_handle = None
             try:
                 study_dir = new_training_stage(paths, model, selected.id)
                 prepared = paths.prepared_train(model, selected.id)
@@ -97,7 +98,12 @@ def _train_command(
                     manifest, prepared, train_ratio=normal.train_ratio, seed=normal.seed
                 )
                 show_stage(f"グループ {selected.id}: Optuna 探索を実行")
-                study = create_study(config, selected, study_dir / "study.db")
+                storage_handle = optuna.storages.RDBStorage(
+                    f"sqlite:///{study_dir / 'study.db'}"
+                )
+                study = create_study(
+                    config, selected, study_dir / "study.db", storage_handle
+                )
                 total = selected.optuna_settings.execution.trials
                 show_stage(
                     f"探索条件: バックボーン={BACKBONE_NAME} "
@@ -119,6 +125,11 @@ def _train_command(
                     ),
                     on_trial_finish=show_trial_outcome,
                 )
+                best_trial = study.best_trial
+                trial_count = len(study.trials)
+                storage_handle.remove_session()
+                storage_handle.engine.dispose()
+                storage_handle = None
                 result = persist_best_trial(
                     config=config,
                     group=selected,
@@ -127,13 +138,14 @@ def _train_command(
                     study=study,
                     outcomes=outcomes,
                     study_dir=study_dir,
+                    best_trial=best_trial,
                 )
                 show_trial_conditions(
                     f"グループ {selected.id} 最良試行 {result.trial_number + 1} の条件",
                     result.parameters,
                 )
                 show_stage(
-                    f"グループ {selected.id} 学習完了: 試行数={len(study.trials)} "
+                    f"グループ {selected.id} 学習完了: 試行数={trial_count} "
                     f"暫定閾値={result.threshold} 保存先={paths.checkpoint(model, selected.id)}"
                 )
                 summaries.append(
@@ -148,6 +160,10 @@ def _train_command(
                 if study_dir is not None and study_dir.exists():
                     shutil.rmtree(study_dir)
                 raise RuntimeError(f"group {selected.id} failed: {error}") from error
+            finally:
+                if storage_handle is not None:
+                    storage_handle.remove_session()
+                    storage_handle.engine.dispose()
         return "; ".join(summaries)
 
     _run("train", model, action, needs_device=True)

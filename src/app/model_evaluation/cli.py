@@ -100,6 +100,12 @@ def _test_command(
                             paths.checkpoint(model, selected.id)
                         )
                         validate_score_contract(config, selected, metadata)
+                        if metadata.get("synthetic_anomaly") != (
+                            best.synthetic_anomaly.model_dump()
+                        ):
+                            raise ValueError(
+                                "best_trial and checkpoint synthetic_anomaly mismatch"
+                            )
                         params = best.parameters
                         predictor = CheckpointPredictor(
                             paths.checkpoint(model, selected.id),

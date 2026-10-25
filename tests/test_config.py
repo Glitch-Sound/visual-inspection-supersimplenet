@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -293,8 +294,116 @@ def test_per_range_rejects_group_legacy_fields(tmp_path: Path, field: str) -> No
     path, payload = _payload(tmp_path)
     payload["groups"][0][field] = [] if field == "range_ids" else None
     _save(path, payload)
-    with pytest.raises(ValidationError, match=f"group 0.*{field}"):
+    with pytest.raises(ValidationError, match=f"group 0.*廃止された項目.*{field}"):
         load_model_config(path)
+
+
+def test_deprecated_group_detail_field_names_reason(tmp_path: Path) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    payload["group_detail"]["0"]["range_ids"] = [0]
+    _save(path, payload)
+    with pytest.raises(ValidationError, match="廃止された項目.*range_ids"):
+        load_model_config(path)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        _check_command,
+        _train_pre_command,
+        _train_command,
+        _test_pre_command,
+        _test_command,
+    ],
+)
+@pytest.mark.parametrize("range_name", ["noise_std", "perlin_threshold"])
+def test_synthetic_anomaly_huge_integer_is_input_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command,
+    range_name: str,
+) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    payload["group_detail"]["0"]["synthetic_anomaly"] = {
+        range_name: {"min": 10**1000, "max": 10**1000}
+    }
+    _save(path, payload)
+    monkeypatch.chdir(tmp_path)
+    marker = tmp_path / "data" / "03_check" / "XX" / "all.png"
+    marker.parent.mkdir(parents=True)
+    marker.write_bytes(b"old")
+    with pytest.raises(typer.Exit) as error:
+        command(model="XX")
+    assert error.value.exit_code == 2
+    output = capsys.readouterr()
+    assert "synthetic_anomaly" in output.err
+    assert "入力不備" in output.err
+    assert marker.read_bytes() == b"old"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        _check_command,
+        _train_pre_command,
+        _train_command,
+        _test_pre_command,
+        _test_command,
+    ],
+)
+def test_all_commands_clear_model_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command
+) -> None:
+    build_project(tmp_path)
+    run_id = "a" * 32
+    directories = [
+        tmp_path / "data/03_check" / f".XX-stage-{run_id}",
+        tmp_path / "data/04_train" / f".XX-stage-{run_id}",
+        tmp_path / "data/04_train/XX" / f".group_09-stage-{run_id}",
+        tmp_path / "data/05_test" / f".XX-stage-{run_id}",
+        tmp_path / "data/06_result/XX" / f".stage-{run_id}",
+        tmp_path / "optuna/XX" / f".group_09-stage-{run_id}",
+    ]
+    for directory in directories:
+        directory.mkdir(parents=True, exist_ok=True)
+    checkpoint_stage = tmp_path / "weights/XX" / f".group_09.ckpt-stage-{run_id}"
+    checkpoint_stage.parent.mkdir(parents=True)
+    checkpoint_stage.write_bytes(b"stale")
+    config_temp = tmp_path / "config/part_XX.json.tmp"
+    config_temp.write_text("stale")
+    other_model = tmp_path / "data/03_check" / f".YY-stage-{run_id}"
+    other_model.mkdir()
+    unmanaged = tmp_path / "data/06_result/XX/notes.txt"
+    unmanaged.write_text("safe")
+    monkeypatch.chdir(tmp_path)
+    with suppress(typer.Exit, ValueError, FileNotFoundError):
+        command(model="XX")
+    assert all(
+        not item.exists() for item in [*directories, checkpoint_stage, config_temp]
+    )
+    assert other_model.is_dir()
+    assert unmanaged.read_text() == "safe"
+
+
+def test_model_stage_symlink_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    build_project(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "marker"
+    marker.write_text("safe")
+    stage = tmp_path / "data/06_result/XX" / f".stage-{'a' * 32}"
+    stage.parent.mkdir(parents=True)
+    stage.symlink_to(outside, target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(typer.Exit) as error:
+        _check_command(model="XX")
+    assert error.value.exit_code == 2
+    assert marker.read_text() == "safe"
 
 
 def test_per_range_testing_fingerprint(tmp_path: Path) -> None:
@@ -566,7 +675,7 @@ def _brightness_images(paths) -> None:
 def test_brightness_defaults(tmp_path: Path) -> None:
     config, paths = build_project(tmp_path)
     assert config.part.brightness_normalization.model_dump() == {
-        "enabled": True,
+        "enabled": False,
         "statistic": "median",
         "exclude_above": 230,
         "exclude_below": 0,
@@ -578,18 +687,25 @@ def test_brightness_defaults(tmp_path: Path) -> None:
     assert prepare_testing(config, paths, aligner=_aligned).sources
     from app.common.image_io import read_image
 
-    assert read_image(paths.prepared_train("XX", 0) / "a_00.png")[0, 0, 0] == 80
-    assert read_image(paths.prepared_test("XX") / "sample_00.png")[0, 0, 0] == 80
+    assert read_image(paths.prepared_train("XX", 0) / "a_00.png")[0, 0, 0] == 40
+    assert read_image(paths.prepared_test("XX") / "sample_00.png")[0, 0, 0] == 40
+    disabled_fingerprint = preparation_fingerprint(config, group=config.part.groups[0])
     path, payload = _payload(tmp_path)
     payload["brightness_normalization"] = {"statistic": "mean"}
     _save(path, payload)
     assert load_config(tmp_path, "XX").part.brightness_normalization.model_dump() == {
         **config.part.brightness_normalization.model_dump(),
+        "enabled": True,
         "statistic": "mean",
     }
     updated = load_config(tmp_path, "XX")
+    assert preparation_fingerprint(updated, group=updated.part.groups[0]) != (
+        disabled_fingerprint
+    )
     assert prepare_training(updated, paths, aligner=_aligned)[0].sources
     assert prepare_testing(updated, paths, aligner=_aligned).sources
+    assert read_image(paths.prepared_train("XX", 0) / "a_00.png")[0, 0, 0] == 80
+    assert read_image(paths.prepared_test("XX") / "sample_00.png")[0, 0, 0] == 80
 
 
 @pytest.mark.parametrize(
@@ -690,11 +806,14 @@ def test_brightness_testing_fingerprint(tmp_path: Path) -> None:
 def test_brightness_changes_invalidate_preparation(
     tmp_path: Path, field: str, value: object
 ) -> None:
-    config, paths = build_project(tmp_path)
+    _, paths = build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    payload["brightness_normalization"] = {}
+    _save(path, payload)
+    config = load_config(tmp_path, "XX")
     _brightness_images(paths)
     train_manifest = prepare_training(config, paths, group=0, aligner=_aligned)[0]
     test_manifest = prepare_testing(config, paths, aligner=_aligned)
-    path, payload = _payload(tmp_path)
     payload["brightness_normalization"] = {field: value}
     _save(path, payload)
     changed = load_config(tmp_path, "XX")

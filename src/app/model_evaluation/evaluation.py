@@ -45,7 +45,7 @@ def validate_score_contract(
     threshold = group.optuna_settings.threshold.value
     if threshold is None:
         raise ValueError(
-            "optuna_settings.threshold.value is required before evaluation"
+            "optuna_settings.threshold.value is not set; run train before evaluation"
         )
     expected_source = group.score.source
     if checkpoint_metadata.get("model") != config.model:
@@ -66,6 +66,11 @@ def validate_score_contract(
         or not np.isclose(checkpoint_threshold, threshold)
     ):
         raise ValueError("checkpoint threshold does not match model config")
+    if (
+        checkpoint_metadata.get("synthetic_anomaly")
+        != group.synthetic_anomaly.model_dump()
+    ):
+        raise ValueError("checkpoint synthetic_anomaly does not match model config")
     return threshold
 
 
@@ -96,8 +101,12 @@ def validate_best_trial_contract(
             "best_trial checkpoint mismatch: "
             f"expected {expected_checkpoint}, got {best.checkpoint}"
         )
-    if threshold is None or not np.isclose(best.threshold, threshold):
+    if threshold is None:
+        raise ValueError("optuna_settings.threshold.value is not set; run train")
+    if not np.isclose(best.threshold, threshold):
         raise ValueError("best_trial threshold does not match model config")
+    if best.synthetic_anomaly.model_dump() != group.synthetic_anomaly.model_dump():
+        raise ValueError("best_trial synthetic_anomaly does not match model config")
     parameters = best.parameters
     search = group.optuna_settings.search
     if not (

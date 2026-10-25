@@ -72,7 +72,7 @@ npm ci
 | `range` | 一意な分割IDと縮小前の開始座標の配列 |
 | `blacklist` | 学習準備だけで除外する元画像名と分割ID |
 | `alignment` | 型番内で共通のORB位置合わせ条件 |
-| `brightness_normalization` | 型番共通の分割画像の輝度補正。省略時も有効で、既定値は `enabled=true`、`statistic=median`、`exclude_above=230`、`exclude_below=0`、`min_gain=0.5`、`max_gain=2.0` |
+| `brightness_normalization` | 型番共通の分割画像の輝度補正。項目全体の省略時は無効。記述時の既定値は `enabled=true`、`statistic=median`、`exclude_above=230`、`exclude_below=0`、`min_gain=0.5`、`max_gain=2.0` |
 | `groups` | 必須の非空配列。グループIDは型番内で一意な非負整数。分割ごとの検査条件を置く |
 | `groups[].ranges` | 必須の非空配列。各要素に `id`、`inspection_threshold`、`heatmap_range` を必ず書く。グループ単位の上書きや既定値はない |
 | `groups[].ranges[].id` | 共通 `range` にある分割ID。同じグループ内では重複不可。同じIDを複数グループで参照できる |
@@ -91,7 +91,7 @@ npm ci
 輝度補正は`train-pre`と`test-pre`の分割画像に適用する。<br />
 `statistic`は`median`または`mean`を指定し、`exclude_below`以上・`exclude_above`未満の輝度を集計する。<br />
 集計できる画素がない場合や分割画像の輝度が0以下の場合は、その分割の補正を省略する。<br />
-補正を無効にするには`enabled=false`を指定する。<br />
+補正を無効にするには項目全体を省略するか`enabled=false`を指定する。<br />
 例えば`id: 0`に対応するキーは`"0"`とし、`"00"`は使用しない。<br />
 `groups` に置けない詳細項目や、両領域で項目が重複する設定は入力不備として拒否される。<br />
 `sampler.startup_trials` はグループごとに設定する。<br />
@@ -100,6 +100,7 @@ TPE による探索を行うには、`sampler.startup_trials` を合計試行回
 暫定閾値の`group_detail["<id>"].optuna_settings.threshold.value`は学習完了時に対象グループだけ更新される。<br />
 暫定閾値はグループ単位で算出し、分割ごとには算出しない。<br />
 checkpointと最良試行にも同じ値を保存するため、暫定閾値だけを手動で変更しない。<br />
+学習時に使用した擬似異常の設定範囲もcheckpointと`best_trial.json`の両方に記録する。<br />
 切り出し位置、サイズ、縮小倍率、位置合わせなどを変更したら、該当する`train-pre`または`test-pre`を再実行する。<br />
 準備指紋が一致しない入力は学習・検査の前に拒否される。
 
@@ -136,12 +137,13 @@ uv run --locked test --model XX --group 1
 ```
 
 `train`は実行のたびに対象グループの探索と学習を最初から行う。<br />
+5コマンドは開始時に対象型番の前回残った管理対象一時領域を全グループ分削除する。<br />
 `train-pre`、`train`、`test-pre`は一時領域で成果物を完成させ、対象の旧成果物を削除してから新成果物を公開する。<br />
-`test`は全対象グループの結果を一時領域で完成させ、グループごとに旧結果を退避して新結果を公開する。<br />
+`test`は全対象グループの結果を一時領域で完成させ、グループごとに旧結果を削除して新結果を公開する。<br />
 公開前に失敗・中断した場合は旧結果を保持し、一時結果は削除する。<br />
-公開途中の中断では次の`test`開始時に退避から復旧し、各グループを完全な旧結果または新結果に戻す。<br />
+公開途中の中断で結果が欠けた場合は`test`を再実行する。<br />
 新旧が混在した場合は全件`test`で解消する。<br />
-強制終了直後から復旧までの間は結果パスが一時的に欠けることがあるため、結果の直接読戻しは同型番の検査が止まり、必要な復旧を終えた後に行う。
+結果の直接読戻しは同型番の検査が止まり、必要な再実行を終えた後に行う。
 全件学習で後続グループが失敗した場合、コマンドはエラー終了し、失敗グループIDを表示する。<br />
 完了済みグループの成果物は保持する。<br />
 全件学習では成功したグループから学習成果物を置き換える。<br />
@@ -172,7 +174,6 @@ uv run --locked test --model XX --group 1
 結果を読む側は同じ型番の`test`が動いていない時にグループ別フォルダを直接開く。<br />
 単独検査では指定グループだけを置き換え、他グループの結果を変更しない。<br />
 全件検査では型番設定にないグループ結果を削除する。<br />
-旧形式の`generations/`と`current.json`は移行・自動削除せず、新結果の参照にも使用しない。<br />
 変更後は旧準備・学習・検査成果物を引き継がず、準備・学習・検査を順に再実行する。<br />
 検査完了時は`data/06_result/<model>/`を表示する。
 
@@ -340,9 +341,15 @@ npx --no-install openspec update
 | add-brightness-normalization | AC-005 | 未検証 | タスク3.5: 両OSのCPUと利用可能なGPUで準備・学習・検査を全件・単独グループでやり直し、成果物を読み戻す。 |
 | simplify-result-layout | AC-001 | 未検証 | タスク3.6: Ubuntu 24.04 LTS・Windows 11で固定保存先のJSON・PNG、直接読戻し、完了表示を確認する。 |
 | simplify-result-layout | AC-002 | 未検証 | タスク3.6: 両OSで全件・単独再検査、設定外グループの整理、他グループの保全を確認する。 |
-| simplify-result-layout | AC-003 | 未検証 | タスク3.6: 両OSで公開前失敗と公開途中の強制終了を起こし、次回検査時の退避復旧と全件再検査を確認する。 |
+| simplify-result-layout | AC-003 | 未検証 | タスク3.6: 両OSで公開前失敗と公開途中の強制終了を起こし、現行方式での再実行と全件再検査を確認する。 |
 | simplify-result-layout | AC-004 | 未検証 | タスク3.6: 両OSで結果親・対象のシンボリックリンク拒否と管理外ファイルの不変を確認する。 |
-| simplify-result-layout | AC-005 | 未検証 | タスク3.6: 両OSで準備・学習・検査を全再実行し、新結果の読戻しと旧形式の不変を確認する。 |
+| simplify-result-layout | AC-005 | 未検証 | タスク3.6: 両OSで準備・学習・検査を全再実行し、新結果の読戻しと管理外ファイルの不変を確認する。 |
+| fix-review-findings | AC-001 | 未検証 | タスク6.3: Ubuntu 24.04 LTSとWindows 11で補正省略・明記時の準備画素と指紋を確認する。 |
+| fix-review-findings | AC-002 | 未検証 | タスク6.3: 両OSで学習後のcheckpointと最良試行にある擬似異常設定を読み戻す。 |
+| fix-review-findings | AC-003 | 未検証 | タスク6.3: 両OSで検査結果の公開前・公開途中の失敗と再実行を確認する。 |
+| fix-review-findings | AC-004 | 未検証 | タスク6.3: Windows 11でOptuna接続終了後の履歴移動と読戻しを確認する。 |
+| fix-review-findings | AC-005 | 未検証 | タスク6.3: 両OSで5コマンド開始時に全グループの対象一時領域が消えることを確認する。 |
+| fix-review-findings | AC-007 | 未検証 | タスク6.3: 両OSで成果物・閾値の混在時に検査結果が公開されないことを確認する。 |
 
 `show-test-progress-and-update-backbone` のAC-003にある`racm_in1k`確認は当時の未検証事項であり、現在の運用には適用しない。<br />
 現在の学習は`wide_resnet50_2.tv_in1k`とグループ別の新形式設定から開始する。<br />

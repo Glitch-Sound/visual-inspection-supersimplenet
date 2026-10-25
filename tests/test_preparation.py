@@ -530,6 +530,10 @@ def test_brightness_skips_unavailable_statistics(
         image_size=4,
         ranges=[{"id": 0, "x": 0, "y": 0}, {"id": 1, "x": 8, "y": 0}],
     )
+    config_path = paths.model_config("XX")
+    payload = json.loads(config_path.read_text())
+    payload["brightness_normalization"] = {}
+    config_path.write_text(json.dumps(payload))
     base = np.full((16, 16, 3), 100, dtype=np.uint8)
     source = np.full((16, 16, 3), 50, dtype=np.uint8)
     if unavailable == "reference":

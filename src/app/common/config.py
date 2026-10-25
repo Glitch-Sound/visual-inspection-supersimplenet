@@ -149,7 +149,11 @@ class SyntheticFloatRange(StrictModel):
     def validate_number(cls, value: object) -> object:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError("synthetic_anomaly bounds must be finite numbers")
-        if not math.isfinite(value):
+        try:
+            finite = math.isfinite(value)
+        except OverflowError:
+            finite = False
+        if not finite:
             raise ValueError("synthetic_anomaly bounds must be finite numbers")
         return value
 
@@ -413,7 +417,7 @@ class ModelConfig(StrictModel):
     blacklist: list[BlacklistEntry]
     alignment: AlignmentSettings
     brightness_normalization: BrightnessNormalizationSettings = Field(
-        default_factory=BrightnessNormalizationSettings
+        default_factory=lambda: BrightnessNormalizationSettings(enabled=False)
     )
     groups: list[GroupConfig] = Field(min_length=1)
 
@@ -445,6 +449,16 @@ class ModelConfig(StrictModel):
                 return value
             misplaced = set(group) - summary_fields
             if misplaced:
+                deprecated = misplaced & {
+                    "range_ids",
+                    "inspection_threshold",
+                    "heatmap_range",
+                }
+                if deprecated:
+                    raise ValueError(
+                        f"group {group.get('id', 'unknown')} 廃止された項目: "
+                        f"{sorted(deprecated)}"
+                    )
                 raise ValueError(
                     f"group {group.get('id', 'unknown')} contains misplaced fields: "
                     f"{sorted(misplaced)}"
@@ -465,6 +479,15 @@ class ModelConfig(StrictModel):
                 raise ValueError(f"group_detail[{key!r}] must be an object")
             misplaced = set(detail) - detail_fields
             if misplaced:
+                deprecated = misplaced & {
+                    "range_ids",
+                    "inspection_threshold",
+                    "heatmap_range",
+                }
+                if deprecated:
+                    raise ValueError(
+                        f"group_detail[{key!r}] 廃止された項目: {sorted(deprecated)}"
+                    )
                 raise ValueError(
                     f"group_detail[{key!r}] contains misplaced fields: "
                     f"{sorted(misplaced)}"

@@ -8,7 +8,12 @@ import torch
 from conftest import build_project, write_test_image
 
 from app.common.config import load_config
-from app.common.contracts import BestTrialResult, ScoreContract, TrialParametersContract
+from app.common.contracts import (
+    BestTrialResult,
+    ScoreContract,
+    SyntheticAnomalyContract,
+    TrialParametersContract,
+)
 from app.common.runtime import DeviceSelection, RunRecorder
 from app.image_preparation.imaging import AlignedImage
 from app.image_preparation.preparation import prepare_testing
@@ -66,6 +71,7 @@ def make_model_artifacts(config, paths, group_id: int) -> None:
                 "score_source": "supersimplenet.pred_score",
                 "anomalib_post_processor": False,
                 "threshold": threshold,
+                "synthetic_anomaly": group.synthetic_anomaly.model_dump(),
             },
         },
         checkpoint,
@@ -86,6 +92,9 @@ def make_model_artifacts(config, paths, group_id: int) -> None:
         checkpoint=str(checkpoint.relative_to(paths.root)),
         score_contract=ScoreContract(),
         threshold=threshold,
+        synthetic_anomaly=SyntheticAnomalyContract.model_validate(
+            group.synthetic_anomaly.model_dump()
+        ),
         train_sources=["a.png"],
         validation_sources=["b.png"],
         seed=42,

@@ -12,7 +12,12 @@ import numpy as np
 import optuna
 
 from app.common.config import AppConfig, GroupConfig, write_threshold
-from app.common.contracts import BestTrialResult, ScoreContract, TrialParametersContract
+from app.common.contracts import (
+    BestTrialResult,
+    ScoreContract,
+    SyntheticAnomalyContract,
+    TrialParametersContract,
+)
 from app.common.paths import ProjectPaths
 from app.common.runtime import package_versions
 from app.model_training.search import DatasetSplit, TrialOutcome
@@ -53,8 +58,9 @@ def persist_best_trial(
     study: optuna.Study,
     outcomes: dict[int, TrialOutcome],
     study_dir: Path,
+    best_trial: optuna.trial.FrozenTrial | None = None,
 ) -> BestTrialResult:
-    best = study.best_trial
+    best = study.best_trial if best_trial is None else best_trial
     if best.value is None:
         raise RuntimeError("best trial does not have an objective value")
     outcome = outcomes.get(best.number)
@@ -77,7 +83,11 @@ def persist_best_trial(
     try:
         shutil.copy2(outcome.checkpoint, checkpoint_stage)
         _attach_checkpoint_metadata(
-            checkpoint_stage, model=config.model, group=group.id, threshold=threshold
+            checkpoint_stage,
+            model=config.model,
+            group=group.id,
+            threshold=threshold,
+            synthetic_anomaly=group.synthetic_anomaly.model_dump(),
         )
         result = BestTrialResult(
             model=config.model,
@@ -89,6 +99,9 @@ def persist_best_trial(
             checkpoint=str(target_checkpoint.relative_to(paths.root)),
             score_contract=ScoreContract(),
             threshold=threshold,
+            synthetic_anomaly=SyntheticAnomalyContract.model_validate(
+                group.synthetic_anomaly.model_dump()
+            ),
             train_sources=list(split.train_sources),
             validation_sources=list(split.validation_sources),
             seed=group.optuna_settings.execution.seed,
@@ -123,7 +136,12 @@ def _trial_parameters_contract(
 
 
 def _attach_checkpoint_metadata(
-    path: Path, *, model: str, group: int, threshold: float
+    path: Path,
+    *,
+    model: str,
+    group: int,
+    threshold: float,
+    synthetic_anomaly: dict[str, object],
 ) -> None:
     import torch
 
@@ -134,5 +152,6 @@ def _attach_checkpoint_metadata(
         "score_source": "supersimplenet.pred_score",
         "anomalib_post_processor": False,
         "threshold": threshold,
+        "synthetic_anomaly": synthetic_anomaly,
     }
     torch.save(payload, path)

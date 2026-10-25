@@ -12,7 +12,7 @@ from conftest import write_test_image
 from group_evaluation_helpers import FakePredictor, aligned, project, recorder
 
 from app.common.config import load_config
-from app.common.result_index import create_result_stage, recover_results
+from app.common.result_index import create_result_stage
 from app.image_preparation.imaging import AlignmentError
 from app.image_preparation.preparation import prepare_testing
 from app.model_evaluation import cli as evaluation_cli
@@ -100,6 +100,35 @@ def test_result_missing_model_preserves_all(
         group: (paths.result_group("XX", group) / "sample.png.json").read_bytes()
         for group in (0, 1)
     } == before
+
+
+@pytest.mark.parametrize(
+    "mismatch", ["old_checkpoint", "old_config_threshold", "missing_threshold"]
+)
+def test_mismatched_training_artifacts_require_train(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
+) -> None:
+    _, paths = project(tmp_path)
+    _run(monkeypatch, paths)
+    old_result = (paths.result_group("XX", 0) / "sample.png.json").read_bytes()
+    if mismatch == "old_checkpoint":
+        checkpoint = paths.checkpoint("XX", 0)
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        payload["visual_inspection"].pop("synthetic_anomaly")
+        torch.save(payload, checkpoint)
+        reason = "synthetic_anomaly"
+    else:
+        config_path = paths.model_config("XX")
+        payload = json.loads(config_path.read_text())
+        payload["group_detail"]["0"]["optuna_settings"]["threshold"]["value"] = (
+            0.3 if mismatch == "old_config_threshold" else None
+        )
+        config_path.write_text(json.dumps(payload))
+        reason = "threshold"
+    with pytest.raises(ValueError, match=reason) as error:
+        _run(monkeypatch, paths)
+    assert "rerun train" in str(error.value)
+    assert (paths.result_group("XX", 0) / "sample.png.json").read_bytes() == old_result
 
 
 @pytest.mark.parametrize("missing", ["checkpoint", "best_trial"])
@@ -323,39 +352,27 @@ def test_result_stage_failure_preserves_all_groups(
     assert not list(paths.results("XX").glob(".stage-*"))
 
 
-def test_result_recovery_after_publish_interrupt(
+def test_result_recreates_missing_group_after_publish_interrupt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, paths = project(tmp_path)
     _run(monkeypatch, paths)
-    root = paths.results("XX")
     target = paths.result_group("XX", 0)
-    old = (target / "sample.png.json").read_bytes()
-    backup = root / f".backup-group_00-{'a' * 32}"
-    target.replace(backup)
-    original = evaluation_cli.evaluate_model
+    original_replace = Path.replace
 
-    def assert_restored(*args, **kwargs):
-        assert (target / "sample.png.json").read_bytes() == old
-        return original(*args, **kwargs)
+    def fail_publish(source: Path, destination: Path) -> Path:
+        if source.parent.name.startswith(".stage-") and source.name == "group_00":
+            raise OSError("publish interrupted")
+        return original_replace(source, destination)
 
-    monkeypatch.setattr(evaluation_cli, "evaluate_model", assert_restored)
-    _run(monkeypatch, paths)
-    assert not backup.exists()
-    target.replace(backup)
-    target.mkdir()
-    (target / "sample.png.json").write_text("new")
-    recover_results(paths, "XX")
-    assert (target / "sample.png.json").read_text() == "new"
-    assert not backup.exists()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "marker.txt").write_text("safe")
-    bad_backup = root / f".backup-group_00-{'b' * 32}"
-    bad_backup.symlink_to(outside, target_is_directory=True)
-    with pytest.raises(ValueError, match="invalid result group directory"):
+    monkeypatch.setattr(Path, "replace", fail_publish)
+    with pytest.raises(RuntimeError, match="publish interrupted"):
         _run(monkeypatch, paths)
-    assert (outside / "marker.txt").read_text() == "safe"
+    assert not target.exists()
+    assert not list(paths.results("XX").glob(".backup-*"))
+    monkeypatch.setattr(Path, "replace", original_replace)
+    _run(monkeypatch, paths)
+    assert (target / "sample.png.json").is_file()
 
 
 @pytest.mark.parametrize("component", ["parent", "group"])
@@ -403,7 +420,7 @@ def test_result_residue_does_not_block_preparation(
     from app.common.cli import _run as execute
 
     execute("check", "XX", lambda _paths, _recorder: "ok")
-    assert stale.exists()
+    assert not stale.exists()
 
 
 def test_result_full_run_removes_unconfigured_groups(
@@ -432,15 +449,12 @@ def test_result_cleanup_managed_entries_only(
     _run(monkeypatch, paths)
     root = paths.results("XX")
     old = paths.result_group("XX", 0)
-    backup = root / f".backup-group_00-{'b' * 32}"
-    old.replace(backup)
     stale = root / f".stage-{'a' * 32}"
     stale.mkdir()
     unmanaged = root / "notes.txt"
     unmanaged.write_text("safe")
     _run(monkeypatch, paths)
     assert not stale.exists()
-    assert not backup.exists()
     assert (old / "sample.png.json").is_file()
     assert unmanaged.read_text() == "safe"
 

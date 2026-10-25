@@ -287,6 +287,22 @@ class TrialParametersContract(ContractModel):
     image_size: int = Field(gt=0)
 
 
+class SyntheticFloatRangeContract(ContractModel):
+    min: float
+    max: float
+
+
+class SyntheticIntRangeContract(ContractModel):
+    min: StrictInt
+    max: StrictInt
+
+
+class SyntheticAnomalyContract(ContractModel):
+    noise_std: SyntheticFloatRangeContract
+    perlin_threshold: SyntheticFloatRangeContract
+    perlin_scale_exponent: SyntheticIntRangeContract
+
+
 class BestTrialResult(ContractModel):
     model: str
     group: Annotated[StrictInt, Field(ge=0)]
@@ -297,6 +313,7 @@ class BestTrialResult(ContractModel):
     checkpoint: str
     score_contract: ScoreContract
     threshold: float = Field(ge=0.0, le=1.0)
+    synthetic_anomaly: SyntheticAnomalyContract
     train_sources: list[str]
     validation_sources: list[str]
     seed: int

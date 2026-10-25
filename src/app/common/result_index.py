@@ -13,7 +13,6 @@ from app.common.paths import ProjectPaths, ensure_no_symlink_components
 _RUN_ID = r"[0-9a-f]{32}"
 _GROUP = r"group_(?:0[0-9]|[1-9][0-9]+)"
 _STAGE = re.compile(rf"\.stage-{_RUN_ID}")
-_BACKUP = re.compile(rf"\.backup-({_GROUP})-{_RUN_ID}")
 _GROUP_NAME = re.compile(_GROUP)
 _SOURCE_JSON = re.compile(r".+\.(?:png|jpg|jpeg|bmp|tif|tiff)\.json", re.I)
 _RESULT_IMAGE = re.compile(r".+_result\.png", re.I)
@@ -47,38 +46,11 @@ def _validate_stage(stage: Path) -> None:
         _validate_group(group, allow_temporary=True)
 
 
-def recover_results(paths: ProjectPaths, model: str) -> None:
-    """Restore an old group when publication stopped between two renames."""
-
-    root = _root(paths, model)
-    if not root.exists():
-        return
-    backups: dict[str, Path] = {}
-    for entry in root.iterdir():
-        match = _BACKUP.fullmatch(entry.name)
-        if match is None:
-            continue
-        group_name = match.group(1)
-        if group_name in backups:
-            raise ValueError(f"multiple backups for result group {group_name}")
-        _validate_group(entry)
-        backups[group_name] = entry
-    for group_name, backup in sorted(backups.items()):
-        target = root / group_name
-        ensure_no_symlink_components(paths.root, target)
-        if target.exists():
-            _validate_group(target)
-            shutil.rmtree(backup)
-        else:
-            backup.replace(target)
-
-
 def create_result_stage(paths: ProjectPaths, model: str) -> Path:
-    """Recover publication and clear app-owned incomplete stages before a run."""
+    """Clear app-owned incomplete stages before a run."""
 
     root = _root(paths, model)
     root.mkdir(parents=True, exist_ok=True)
-    recover_results(paths, model)
     for stale in root.iterdir():
         if _STAGE.fullmatch(stale.name):
             _validate_stage(stale)
@@ -110,14 +82,12 @@ def validate_publish_targets(
 
 
 def publish_group(paths: ProjectPaths, model: str, group: int, stage: Path) -> None:
-    root = _root(paths, model)
     target = paths.result_group(model, group)
     staged_group = stage / paths.group_name(group)
     _validate_group(staged_group)
     if target.exists() or target.is_symlink():
         _validate_group(target)
-    backup = root / f".backup-{paths.group_name(group)}-{uuid4().hex}"
-    publish_staged_directory(staged_group, target, backup=backup)
+    publish_staged_directory(staged_group, target)
 
 
 def remove_result_stage(stage: Path) -> None:

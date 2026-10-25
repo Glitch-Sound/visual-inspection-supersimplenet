@@ -114,7 +114,12 @@ def suggest_parameters(trial: optuna.Trial, group: GroupConfig) -> TrialParamete
     )
 
 
-def create_study(config: AppConfig, group: GroupConfig, storage: Path) -> optuna.Study:
+def create_study(
+    config: AppConfig,
+    group: GroupConfig,
+    storage: Path,
+    storage_handle: optuna.storages.RDBStorage | None = None,
+) -> optuna.Study:
     settings = group.optuna_settings
     storage.parent.mkdir(parents=True, exist_ok=True)
     sampler = optuna.samplers.TPESampler(
@@ -128,7 +133,7 @@ def create_study(config: AppConfig, group: GroupConfig, storage: Path) -> optuna
     )
     return optuna.create_study(
         study_name=f"visual-inspection-{config.model}-group-{group.id}",
-        storage=f"sqlite:///{storage}",
+        storage=storage_handle or optuna.storages.RDBStorage(f"sqlite:///{storage}"),
         load_if_exists=False,
         direction="minimize",
         sampler=sampler,
