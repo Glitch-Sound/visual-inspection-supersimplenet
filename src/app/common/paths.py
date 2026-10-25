@@ -31,14 +31,14 @@ def ensure_within(root: Path, candidate: Path) -> Path:
 
 
 def ensure_no_symlink_components(root: Path, candidate: Path) -> None:
-    """Reject symlinks between a managed root and a prepared input path."""
+    """Reject symlinks in a managed path and identify the linked component."""
 
     relative = candidate.relative_to(root)
     current = root
     for component in relative.parts:
         current = current / component
         if current.is_symlink():
-            raise ValueError(f"prepared input must not be a symlink: {current}")
+            raise ValueError(f"symlink path is not allowed: {current}")
 
 
 @dataclass(frozen=True)

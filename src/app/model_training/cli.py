@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 
 import optuna
 import typer
@@ -67,6 +70,18 @@ def show_trial_outcome(trial: optuna.trial.FrozenTrial) -> None:
     show_stage(f"試行 {trial.number + 1} {status}{metric}")
 
 
+@contextmanager
+def _study_storage(path: Path) -> Iterator[optuna.storages.RDBStorage]:
+    storage = optuna.storages.RDBStorage(f"sqlite:///{path}")
+    try:
+        yield storage
+    finally:
+        try:
+            storage.remove_session()
+        finally:
+            storage.engine.dispose()
+
+
 def _train_command(
     model: str = typer.Option(..., "--model", help="処理対象の型番"),
     group: int | None = typer.Option(None, "--group", help="処理対象のグループID"),
@@ -82,7 +97,6 @@ def _train_command(
         summaries: list[str] = []
         for selected in groups:
             study_dir = None
-            storage_handle = None
             try:
                 study_dir = new_training_stage(paths, model, selected.id)
                 prepared = paths.prepared_train(model, selected.id)
@@ -98,38 +112,34 @@ def _train_command(
                     manifest, prepared, train_ratio=normal.train_ratio, seed=normal.seed
                 )
                 show_stage(f"グループ {selected.id}: Optuna 探索を実行")
-                storage_handle = optuna.storages.RDBStorage(
-                    f"sqlite:///{study_dir / 'study.db'}"
-                )
-                study = create_study(
-                    config, selected, study_dir / "study.db", storage_handle
-                )
-                total = selected.optuna_settings.execution.trials
-                show_stage(
-                    f"探索条件: バックボーン={BACKBONE_NAME} "
-                    f"学習画像={len(split.train_images)} 検証画像={len(split.validation_images)} "
-                    f"今回の試行={total}"
-                )
-                runner = AnomalibTrialRunner(
-                    study_dir / "trials", recorder.device, selected
-                )
-                study, outcomes = run_search(
-                    selected,
-                    split,
-                    study,
-                    runner,
-                    on_trial_start=lambda number, parameters, total=total: (
-                        show_trial_conditions(
-                            f"試行 {number + 1}/{total} 開始条件", parameters
-                        )
-                    ),
-                    on_trial_finish=show_trial_outcome,
-                )
-                best_trial = study.best_trial
-                trial_count = len(study.trials)
-                storage_handle.remove_session()
-                storage_handle.engine.dispose()
-                storage_handle = None
+                with _study_storage(study_dir / "study.db") as storage_handle:
+                    study = create_study(
+                        config, selected, study_dir / "study.db", storage_handle
+                    )
+                    total = selected.optuna_settings.execution.trials
+                    show_stage(
+                        f"探索条件: バックボーン={BACKBONE_NAME} "
+                        f"学習画像={len(split.train_images)} "
+                        f"検証画像={len(split.validation_images)} "
+                        f"今回の試行={total}"
+                    )
+                    runner = AnomalibTrialRunner(
+                        study_dir / "trials", recorder.device, selected
+                    )
+                    study, outcomes = run_search(
+                        selected,
+                        split,
+                        study,
+                        runner,
+                        on_trial_start=lambda number, parameters, total=total: (
+                            show_trial_conditions(
+                                f"試行 {number + 1}/{total} 開始条件", parameters
+                            )
+                        ),
+                        on_trial_finish=show_trial_outcome,
+                    )
+                    best_trial = study.best_trial
+                    trial_count = len(study.trials)
                 result = persist_best_trial(
                     config=config,
                     group=selected,
@@ -160,10 +170,6 @@ def _train_command(
                 if study_dir is not None and study_dir.exists():
                     shutil.rmtree(study_dir)
                 raise RuntimeError(f"group {selected.id} failed: {error}") from error
-            finally:
-                if storage_handle is not None:
-                    storage_handle.remove_session()
-                    storage_handle.engine.dispose()
         return "; ".join(summaries)
 
     _run("train", model, action, needs_device=True)

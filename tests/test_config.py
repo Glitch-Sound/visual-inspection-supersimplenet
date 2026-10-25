@@ -370,6 +370,43 @@ def test_synthetic_anomaly_huge_integer_is_input_error(
         _test_command,
     ],
 )
+def test_inspection_threshold_huge_integer_is_input_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command,
+) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    payload["groups"][0]["ranges"][0]["inspection_threshold"] = 10**1000
+    _save(path, payload)
+    marker = tmp_path / "data/03_check/XX/all.png"
+    marker.parent.mkdir(parents=True)
+    marker.write_bytes(b"old")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(typer.Exit) as error:
+        command(model="XX")
+
+    assert error.value.exit_code == 2
+    output = capsys.readouterr()
+    assert "入力不備" in output.err
+    assert "group 0 range 0" in output.err
+    assert "inspection_threshold" in output.err
+    assert json.loads(output.out)["exit_code"] == 2
+    assert marker.read_bytes() == b"old"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        _check_command,
+        _train_pre_command,
+        _train_command,
+        _test_pre_command,
+        _test_command,
+    ],
+)
 def test_all_commands_clear_model_stages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command
 ) -> None:
@@ -420,6 +457,48 @@ def test_model_stage_symlink_is_rejected(
         _check_command(model="XX")
     assert error.value.exit_code == 2
     assert marker.read_text() == "safe"
+
+
+@pytest.mark.parametrize(
+    "linked_path",
+    [
+        "config/part_XX.json",
+        "data/04_train",
+        "data/04_train/XX",
+        "optuna/XX",
+    ],
+)
+def test_symlink_error_identifies_rejected_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    linked_path: str,
+) -> None:
+    build_project(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "marker"
+    marker.write_text("safe")
+    old_result = tmp_path / "data/03_check/XX/all.png"
+    old_result.parent.mkdir(parents=True)
+    old_result.write_bytes(b"old result")
+    link = tmp_path / linked_path
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.exists():
+        link.unlink()
+    link.symlink_to(outside, target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(typer.Exit) as error:
+        _check_command(model="XX")
+
+    assert error.value.exit_code == 2
+    output = capsys.readouterr()
+    assert "symlink path is not allowed" in output.err
+    assert str(link) in output.err
+    assert json.loads(output.out)["exit_code"] == 2
+    assert marker.read_text() == "safe"
+    assert old_result.read_bytes() == b"old result"
 
 
 def test_per_range_testing_fingerprint(tmp_path: Path) -> None:

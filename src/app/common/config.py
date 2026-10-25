@@ -346,14 +346,19 @@ class GroupRangeConfig(StrictModel):
     @field_validator("inspection_threshold", mode="before")
     @classmethod
     def validate_inspection_threshold(cls, value: object) -> object:
-        if value is not None and (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-        ):
-            raise ValueError(
-                "inspection_threshold must be a finite JSON number or null"
-            )
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(
+                    "inspection_threshold must be a finite JSON number or null"
+                )
+            try:
+                finite = math.isfinite(value)
+            except OverflowError:
+                finite = False
+            if not finite:
+                raise ValueError(
+                    "inspection_threshold must be a finite JSON number or null"
+                )
         return value
 
 

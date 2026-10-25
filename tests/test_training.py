@@ -12,6 +12,7 @@ import pytest
 import torch
 import typer
 from conftest import build_project, write_test_image
+from sqlalchemy.engine import Engine
 
 from app.common.config import load_config, preparation_fingerprint
 from app.common.contracts import (
@@ -141,7 +142,8 @@ def _study(config, paths, *, group=0, trials=1):
     selected = config.part.select_groups(group)[0]
     selected.optuna_settings.execution.trials = trials
     stage = new_training_stage(paths, "XX", group)
-    study = create_study(config, selected, stage / "study.db")
+    storage = optuna.storages.RDBStorage(f"sqlite:///{stage / 'study.db'}")
+    study = create_study(config, selected, stage / "study.db", storage)
 
     def runner(parameters, split, trial):
         del parameters, split
@@ -149,9 +151,8 @@ def _study(config, paths, *, group=0, trials=1):
         torch.save({"state_dict": {}}, checkpoint)
         return TrialOutcome([0.2 + trial.number / 10], [0.1, 0.2], checkpoint)
 
-    return (
-        selected,
-        run_search(
+    try:
+        result = run_search(
             selected,
             split_by_source(
                 load_preparation_manifest(
@@ -165,9 +166,11 @@ def _study(config, paths, *, group=0, trials=1):
             ),
             study,
             runner,
-        ),
-        stage,
-    )
+        )
+    finally:
+        storage.remove_session()
+        storage.engine.dispose()
+    return selected, result, stage
 
 
 def test_group_req_022_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -283,12 +286,15 @@ def test_req_030_s01_sampler_startup_trials(
 
     monkeypatch.setattr(optuna.samplers, "TPESampler", capture_sampler)
     monkeypatch.setattr(optuna.pruners, "MedianPruner", capture_pruner)
-    study = create_study(config, group, tmp_path / "study.db")
+    storage = optuna.storages.RDBStorage(f"sqlite:///{tmp_path / 'study.db'}")
+    study = create_study(config, group, tmp_path / "study.db", storage)
     assert captured == [startup_trials]
     assert captured_pruner == [(5, 40, 10)]
     assert isinstance(study.sampler, real_sampler)
     assert group.optuna_settings.pruner.startup_trials == 5
     assert group.optuna_settings.execution.trials == 10
+    storage.remove_session()
+    storage.engine.dispose()
 
 
 def test_req_030_s02_default_startup_trials(
@@ -311,8 +317,13 @@ def test_req_030_s02_default_startup_trials(
         return real_sampler(*args, **kwargs)
 
     monkeypatch.setattr(optuna.samplers, "TPESampler", capture_sampler)
-    create_study(config, config.part.select_groups(0)[0], tmp_path / "study.db")
+    storage = optuna.storages.RDBStorage(f"sqlite:///{tmp_path / 'study.db'}")
+    create_study(
+        config, config.part.select_groups(0)[0], tmp_path / "study.db", storage
+    )
     assert captured == [5]
+    storage.remove_session()
+    storage.engine.dispose()
 
 
 @pytest.mark.parametrize("startup_trials", [2, 3])
@@ -323,7 +334,8 @@ def test_req_030_s03_trials_within_startup(
     group = config.part.select_groups(0)[0]
     group.optuna_settings.sampler.startup_trials = startup_trials
     group.optuna_settings.execution.trials = 2
-    study = create_study(config, group, tmp_path / "study.db")
+    storage = optuna.storages.RDBStorage(f"sqlite:///{tmp_path / 'study.db'}")
+    study = create_study(config, group, tmp_path / "study.db", storage)
     real_sample = optuna.samplers.RandomSampler.sample_independent
     random_calls: list[str] = []
 
@@ -335,6 +347,8 @@ def test_req_030_s03_trials_within_startup(
         optuna.samplers.RandomSampler, "sample_independent", count_random
     )
     study.optimize(lambda trial: trial.suggest_float("x", 0.0, 1.0), n_trials=2)
+    storage.remove_session()
+    storage.engine.dispose()
     assert len(study.trials) == group.optuna_settings.execution.trials
     assert random_calls == ["x", "x"]
 
@@ -726,6 +740,90 @@ def test_storage_session_closes_before_study_publication(
     monkeypatch.setattr(training_cli, "persist_best_trial", publish)
     _run_cli(monkeypatch, paths, group=0)
     assert events.index("closed") < events.index("published")
+
+
+def _track_failed_stage_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    events: list[str] = []
+    original_close = optuna.storages.RDBStorage.remove_session
+    original_dispose = Engine.dispose
+    original_rmtree = shutil.rmtree
+
+    def close(storage):
+        events.append("session closed")
+        return original_close(storage)
+
+    def dispose(engine, *args, **kwargs):
+        events.append("engine disposed")
+        return original_dispose(engine, *args, **kwargs)
+
+    def remove(path, *args, **kwargs):
+        if Path(path).name.startswith(".group_00-stage-"):
+            events.append("stage removed")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(optuna.storages.RDBStorage, "remove_session", close)
+    monkeypatch.setattr(Engine, "dispose", dispose)
+    monkeypatch.setattr(training_cli.shutil, "rmtree", remove)
+    return events
+
+
+def _old_training_artifacts(paths):
+    checkpoint = paths.checkpoint("XX", 0)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b"old checkpoint")
+    old_study = paths.study_dir("XX", 0) / "old.txt"
+    old_study.parent.mkdir(parents=True, exist_ok=True)
+    old_study.write_bytes(b"old study")
+    return checkpoint, old_study
+
+
+def test_storage_closes_before_failed_stage_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _project(tmp_path)
+    checkpoint, old_study = _old_training_artifacts(paths)
+    events = _track_failed_stage_cleanup(monkeypatch)
+
+    def fail_search(*_args, **_kwargs):
+        raise RuntimeError("injected search failure")
+
+    monkeypatch.setattr(training_cli, "run_search", fail_search)
+    with pytest.raises(RuntimeError, match="group 0 failed: injected search failure"):
+        _run_cli(monkeypatch, paths, group=0)
+
+    assert events.index("session closed") < events.index("engine disposed")
+    assert events.index("engine disposed") < events.index("stage removed")
+    assert checkpoint.read_bytes() == b"old checkpoint"
+    assert old_study.read_bytes() == b"old study"
+    assert not list(paths.study_dir("XX", 0).parent.glob(".group_00-stage-*"))
+
+    _stub_search(monkeypatch, paths)
+    _run_cli(monkeypatch, paths, group=0)
+    assert checkpoint.read_text() == "group 0"
+
+
+def test_storage_closes_before_publication_failure_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _project(tmp_path)
+    checkpoint, old_study = _old_training_artifacts(paths)
+    _stub_search(monkeypatch, paths, fail_group=0)
+    events = _track_failed_stage_cleanup(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="group 0 failed: injected failure"):
+        _run_cli(monkeypatch, paths, group=0)
+
+    assert events.index("session closed") < events.index("engine disposed")
+    assert events.index("engine disposed") < events.index("stage removed")
+    assert checkpoint.read_bytes() == b"old checkpoint"
+    assert old_study.read_bytes() == b"old study"
+    assert not list(paths.study_dir("XX", 0).parent.glob(".group_00-stage-*"))
+
+    _stub_search(monkeypatch, paths)
+    _run_cli(monkeypatch, paths, group=0)
+    assert checkpoint.read_text() == "group 0"
 
 
 def test_closed_storage_history_reads_from_published_path(tmp_path: Path) -> None:

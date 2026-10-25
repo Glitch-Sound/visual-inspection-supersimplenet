@@ -284,6 +284,10 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| polish-review-leftobers | AC-001 | 未検証 | タスク3.2: Ubuntu 24.04 LTS と Apple silicon macOS で、5 CLI が巨大整数の検査閾値を終了コード2で拒否し、旧成果物を保持することを確認する。 |
+| polish-review-leftobers | AC-002 | 未検証 | タスク3.2: 両対象環境で設定・準備・成果物のシンボリックリンクを拒否し、エラーにリンク自体のパスを示してリンク先を保持することを確認する。 |
+| polish-review-leftobers | AC-003 | 未検証 | タスク3.2: 両対象環境で学習の探索中・公開前の失敗後に接続が閉じられ、旧成果物を保持して新規探索を再実行できることを確認する。 |
+| polish-review-leftobers | AC-004 | 未検証 | タスク3.2: 両対象環境の実画像で `check`、`train-pre`、`train`、`test-pre`、`test` を全再実行し、成果物を読み戻す。 |
 | per-range-threshold-and-heatmap | AC-001 | 未検証 | タスク5.2: 対象環境で同じ分割IDを複数グループに設定し、それぞれの閾値・表示範囲を確認する。 |
 | per-range-threshold-and-heatmap | AC-002 | 未検証 | タスク5.2: 対象環境の5コマンドで分割条件の欠落・不正・旧項目を拒否し、旧成果物を保持することを確認する。 |
 | per-range-threshold-and-heatmap | AC-003 | 未検証 | タスク5.2: 対象環境の CPU と Ubuntu で利用可能な CUDA GPU で、分割別の判定境界・ヒートマップ・元画像判定を実画像で確認する。 |

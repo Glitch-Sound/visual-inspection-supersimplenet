@@ -118,7 +118,7 @@ def create_study(
     config: AppConfig,
     group: GroupConfig,
     storage: Path,
-    storage_handle: optuna.storages.RDBStorage | None = None,
+    storage_handle: optuna.storages.RDBStorage,
 ) -> optuna.Study:
     settings = group.optuna_settings
     storage.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +133,7 @@ def create_study(
     )
     return optuna.create_study(
         study_name=f"visual-inspection-{config.model}-group-{group.id}",
-        storage=storage_handle or optuna.storages.RDBStorage(f"sqlite:///{storage}"),
+        storage=storage_handle,
         load_if_exists=False,
         direction="minimize",
         sampler=sampler,
