@@ -6,12 +6,17 @@ import math
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import cv2
 import numpy as np
 
-from app.common.config import AppConfig, GroupConfig, preparation_fingerprint
+from app.common.config import (
+    AppConfig,
+    GroupConfig,
+    GroupRangeConfig,
+    preparation_fingerprint,
+)
 from app.common.contracts import (
     BestTrialResult,
     HeatmapRange,
@@ -64,16 +69,13 @@ def validate_score_contract(
     return threshold
 
 
-def effective_threshold(group: GroupConfig, provisional_threshold: float) -> float:
-    override = group.inspection_threshold
+def effective_threshold(split: GroupRangeConfig, provisional_threshold: float) -> float:
+    override = split.inspection_threshold
     return provisional_threshold if override is None else override
 
 
-def require_heatmap_range(group: GroupConfig) -> HeatmapRange:
-    heatmap_range = group.heatmap_range
-    if heatmap_range is None:
-        raise ValueError("heatmap_range is required for evaluation")
-    return heatmap_range
+def require_heatmap_range(split: GroupRangeConfig) -> HeatmapRange:
+    return split.heatmap_range
 
 
 def validate_best_trial_contract(
@@ -139,6 +141,7 @@ def evaluate_split(
     prediction: Prediction,
     split_id: int,
     threshold: float,
+    threshold_source: Literal["provisional", "configured"],
     heatmap_range: HeatmapRange,
     result_path: Path,
 ) -> SplitResult:
@@ -161,6 +164,9 @@ def evaluate_split(
         image=image_path.name,
         score=prediction.score,
         status=status,
+        threshold=threshold,
+        threshold_source=threshold_source,
+        heatmap_range=heatmap_range,
         result_image=result_path.name,
     )
 
@@ -175,11 +181,10 @@ def evaluate_model(
     finish_runtime: Callable[[], RunMetadata],
     record_warning: Callable[[str], None] = _ignore_message,
     record_error: Callable[[str], None] = _ignore_message,
-    on_threshold_selected: Callable[[float], None] | None = None,
+    on_threshold_selected: Callable[[int, float, str], None] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
     checkpoint_metadata: dict[str, object] | None = None,
 ) -> list[InspectionResult]:
-    heatmap_range = require_heatmap_range(group)
     checkpoint = paths.checkpoint(config.model, group.id)
     metadata = (
         load_checkpoint_metadata(checkpoint)
@@ -187,9 +192,15 @@ def evaluate_model(
         else checkpoint_metadata
     )
     provisional_threshold = validate_score_contract(config, group, metadata)
-    threshold = effective_threshold(group, provisional_threshold)
-    if on_threshold_selected is not None:
-        on_threshold_selected(threshold)
+    split_settings = {item.id: item for item in group.ranges}
+    for item in group.ranges:
+        if on_threshold_selected is not None:
+            source = (
+                "provisional" if item.inspection_threshold is None else "configured"
+            )
+            on_threshold_selected(
+                item.id, effective_threshold(item, provisional_threshold), source
+            )
     prepared_dir = paths.prepared_test(config.model)
     manifest = load_preparation_manifest(
         prepared_dir,
@@ -214,6 +225,12 @@ def evaluate_model(
         for split in source.splits:
             if split.split_id not in required_ids:
                 continue
+            settings = split_settings[split.split_id]
+            threshold = effective_threshold(settings, provisional_threshold)
+            threshold_source: Literal["provisional", "configured"] = (
+                "provisional" if settings.inspection_threshold is None else "configured"
+            )
+            heatmap_range = require_heatmap_range(settings)
             image_path = prepared_dir / split.image
             result_name = f"{split.image}_result.png"
             try:
@@ -229,6 +246,9 @@ def evaluate_model(
                         image=split.image,
                         score=None,
                         status=ResultStatus.ERROR,
+                        threshold=threshold,
+                        threshold_source=threshold_source,
+                        heatmap_range=heatmap_range,
                         error=message,
                     )
                 )
@@ -240,6 +260,7 @@ def evaluate_model(
                         prediction=prediction,
                         split_id=split.split_id,
                         threshold=threshold,
+                        threshold_source=threshold_source,
                         heatmap_range=heatmap_range,
                         result_path=output_dir / result_name,
                     )
@@ -255,8 +276,6 @@ def evaluate_model(
                 "range_ids": group.range_ids,
                 "checkpoint": str(checkpoint.relative_to(paths.root)),
                 "score_contract": ScoreContract(),
-                "threshold": threshold,
-                "heatmap_range": heatmap_range,
                 "splits": split_results,
                 "overall_status": overall,
                 "processed_at": datetime.now(UTC),

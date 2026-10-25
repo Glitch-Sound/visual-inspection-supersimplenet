@@ -28,11 +28,10 @@ def project(root: Path, *, two: bool = False, score: float = 0.5):
     )
     path = paths.model_config("XX")
     payload = json.loads(path.read_text())
-    payload["groups"][0]["range_ids"] = [0, 1]
     if two:
         second = json.loads(json.dumps(payload["groups"][0]))
         second["id"] = 1
-        second["range_ids"] = [0]
+        second["ranges"] = [second["ranges"][0]]
         payload["groups"].append(second)
         payload["group_detail"]["1"] = json.loads(
             json.dumps(payload["group_detail"]["0"])

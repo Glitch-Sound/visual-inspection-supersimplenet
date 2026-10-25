@@ -23,7 +23,6 @@ from app.common.result_index import (
 from app.common.runtime import RunRecorder
 from app.model_evaluation.evaluation import (
     evaluate_model,
-    require_heatmap_range,
     validate_best_trial_contract,
     validate_score_contract,
 )
@@ -93,7 +92,6 @@ def _test_command(
                 progress.update(0, len(manifest.sources))
                 for selected in groups:
                     try:
-                        require_heatmap_range(selected)
                         best = BestTrialResult.read_json(
                             paths.study_dir(model, selected.id) / "best_trial.json"
                         )
@@ -110,20 +108,17 @@ def _test_command(
                             learning_rate_multiplier=params.learning_rate_multiplier,
                             device=recorder.device.device,
                         )
-                        source = (
-                            "暫定閾値"
-                            if selected.inspection_threshold is None
-                            else "検査用設定"
-                        )
 
                         def show_threshold(
+                            split_id: int,
                             threshold: float,
+                            threshold_source: str,
                             *,
                             group_id: int = selected.id,
-                            threshold_source: str = source,
                         ) -> None:
                             show_stage(
-                                f"グループ {group_id} 判定閾値: {threshold} ({threshold_source})"
+                                f"グループ {group_id} 分割 {split_id} "
+                                f"判定閾値: {threshold} ({threshold_source})"
                             )
 
                         def show_progress(processed: int, total: int) -> None:

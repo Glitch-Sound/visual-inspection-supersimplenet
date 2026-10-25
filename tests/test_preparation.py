@@ -45,7 +45,7 @@ def _two_groups(root: Path):
     payload = json.loads(path.read_text())
     second = json.loads(json.dumps(payload["groups"][0]))
     second["id"] = 1
-    second["range_ids"] = [0]
+    second["ranges"] = [second["ranges"][0]]
     payload["groups"].append(second)
     payload["group_detail"]["1"] = json.loads(json.dumps(payload["group_detail"]["0"]))
     path.write_text(json.dumps(payload))

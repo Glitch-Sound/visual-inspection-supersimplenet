@@ -33,7 +33,14 @@ def build_project(
     )
     payload["range"] = ranges or [{"id": 0, "x": 0, "y": 0}]
     payload["blacklist"] = blacklist or []
-    payload["groups"][0]["range_ids"] = [item["id"] for item in payload["range"]]
+    payload["groups"][0]["ranges"] = [
+        {
+            "id": item["id"],
+            "inspection_threshold": None,
+            "heatmap_range": {"min": 0.0, "max": 1.0},
+        }
+        for item in payload["range"]
+    ]
     if groups is not None:
         payload["groups"] = groups
     (config_dir / "part_XX.json").write_text(

@@ -722,6 +722,21 @@ def test_req_029_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert (paths.study_dir("XX", 0) / "best_trial.json").is_file()
 
 
+def test_per_range_training_rejects_missing_detail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = _project(tmp_path)
+    checkpoint = paths.checkpoint("XX", 0)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b"previous")
+    payload = json.loads(paths.model_config("XX").read_text())
+    payload["group_detail"]["0"].pop("augmentation")
+    paths.model_config("XX").write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="augmentation"):
+        _run_cli(monkeypatch, paths, group=0)
+    assert checkpoint.read_bytes() == b"previous"
+
+
 def test_req_020_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.common import model_adapter
 
@@ -823,7 +838,7 @@ def test_req_020_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     config, paths = evaluation_project(tmp_path, two=True)
     payload = json.loads(paths.model_config("XX").read_text())
-    payload["groups"][1]["heatmap_range"] = {"min": 0.1, "max": 0.9}
+    payload["groups"][1]["ranges"][0]["heatmap_range"] = {"min": 0.1, "max": 0.9}
     payload["group_detail"]["1"]["optuna_settings"]["execution"]["trials"] = 1
     paths.model_config("XX").write_text(json.dumps(payload))
     config = load_config(tmp_path, "XX")
@@ -845,7 +860,7 @@ def test_req_020_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     old_group_one_result = json.loads(
         (paths.result_group("XX", 1) / "sample.png.json").read_text()
     )
-    assert old_group_one_result["threshold"] == pytest.approx(0.4)
+    assert old_group_one_result["splits"][0]["threshold"] == pytest.approx(0.4)
     assert old_group_one_result["overall_status"] == "normal"
 
     group_zero_checkpoint = paths.checkpoint("XX", 0).read_bytes()
@@ -877,8 +892,7 @@ def test_req_020_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     reloaded = load_config(tmp_path, "XX")
     selected = reloaded.part.select_groups(1)[0]
     assert selected.optuna_settings.threshold.value == pytest.approx(0.199)
-    assert selected.heatmap_range is not None
-    assert selected.heatmap_range.model_dump() == {"min": 0.1, "max": 0.9}
+    assert selected.ranges[0].heatmap_range.model_dump() == {"min": 0.1, "max": 0.9}
     assert reloaded.part.select_groups(0)[0].optuna_settings.threshold.value == 0.4
 
     evaluation_cli._test_command(model="XX", group=1)
@@ -886,8 +900,11 @@ def test_req_020_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     new_group_one_result = json.loads(
         (paths.result_group("XX", 1) / "sample.png.json").read_text()
     )
-    assert new_group_one_result["threshold"] == pytest.approx(0.199)
-    assert new_group_one_result["heatmap_range"] == {"min": 0.1, "max": 0.9}
+    assert new_group_one_result["splits"][0]["threshold"] == pytest.approx(0.199)
+    assert new_group_one_result["splits"][0]["heatmap_range"] == {
+        "min": 0.1,
+        "max": 0.9,
+    }
     assert new_group_one_result["overall_status"] == "anomaly"
 
 

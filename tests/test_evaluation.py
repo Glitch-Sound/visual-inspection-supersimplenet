@@ -254,7 +254,7 @@ def test_group_req_010_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_group_req_010_s04(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config, _ = project(tmp_path)
-    heatmap_range = require_heatmap_range(config.part.groups[0])
+    heatmap_range = require_heatmap_range(config.part.groups[0].ranges[0])
     image = np.zeros((2, 2, 3), dtype=np.uint8)
     low, high = heatmap_range.min, heatmap_range.max
     common = (low + high) / 2
@@ -524,20 +524,20 @@ def test_group_req_016_s03(tmp_path: Path) -> None:
 def test_group_req_018_s01(tmp_path: Path) -> None:
     config, _ = project(tmp_path)
     group = config.part.groups[0]
-    assert effective_threshold(group, 0.4) == 0.4
+    assert effective_threshold(group.ranges[0], 0.4) == 0.4
 
 
 def test_group_req_018_s02(tmp_path: Path) -> None:
     config, _ = project(tmp_path)
-    assert config.part.groups[0].inspection_threshold is None
-    assert effective_threshold(config.part.groups[0], 0.4) == 0.4
+    assert config.part.groups[0].ranges[0].inspection_threshold is None
+    assert effective_threshold(config.part.groups[0].ranges[0], 0.4) == 0.4
 
 
 def test_group_req_018_s03(tmp_path: Path) -> None:
     config, _ = project(tmp_path)
     group = config.part.groups[0]
-    group.inspection_threshold = 0.7
-    assert effective_threshold(group, 0.4) == 0.7
+    group.ranges[0].inspection_threshold = 0.7
+    assert effective_threshold(group.ranges[0], 0.4) == 0.7
     assert group.optuna_settings.threshold.value == 0.4
 
 
@@ -545,8 +545,8 @@ def test_group_req_018_s03(tmp_path: Path) -> None:
 def test_group_req_018_s04(tmp_path: Path, value: float) -> None:
     config, _ = project(tmp_path)
     group = config.part.groups[0]
-    group.inspection_threshold = value
-    assert effective_threshold(group, 0.4) == value
+    group.ranges[0].inspection_threshold = value
+    assert effective_threshold(group.ranges[0], 0.4) == value
     image = np.zeros((4, 4, 3), dtype=np.uint8)
     split = evaluate_split(
         image_path=Path("input.png"),
@@ -554,7 +554,8 @@ def test_group_req_018_s04(tmp_path: Path, value: float) -> None:
         prediction=Prediction(value, np.zeros((4, 4), dtype=np.float32)),
         split_id=0,
         threshold=value,
-        heatmap_range=require_heatmap_range(group),
+        threshold_source="configured",
+        heatmap_range=require_heatmap_range(group.ranges[0]),
         result_path=tmp_path / "result.png",
     )
     assert split.status == "anomaly"
@@ -565,7 +566,7 @@ def test_group_req_018_s04(tmp_path: Path, value: float) -> None:
 def test_group_req_018_s05(tmp_path: Path, value: object) -> None:
     _, paths = project(tmp_path)
     payload = json.loads(paths.model_config("XX").read_text())
-    payload["groups"][0]["inspection_threshold"] = value
+    payload["groups"][0]["ranges"][0]["inspection_threshold"] = value
     paths.model_config("XX").write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="inspection_threshold"):
         load_config(tmp_path, "XX")
@@ -584,7 +585,7 @@ def test_group_req_019_s01(tmp_path: Path) -> None:
     config, _ = project(tmp_path)
     group = config.part.groups[0]
     image = np.zeros((2, 2, 3), dtype=np.uint8)
-    scale = require_heatmap_range(group)
+    scale = require_heatmap_range(group.ranges[0])
     middle = (scale.min + scale.max) / 2
     first = np.array(
         [[scale.min - 1, middle], [scale.max + 1, middle]], dtype=np.float32
@@ -604,6 +605,7 @@ def test_group_req_019_s01(tmp_path: Path) -> None:
         prediction=Prediction(0.8, first),
         split_id=0,
         threshold=0.4,
+        threshold_source="provisional",
         heatmap_range=scale,
         result_path=tmp_path / "first.png",
     )
@@ -613,6 +615,7 @@ def test_group_req_019_s01(tmp_path: Path) -> None:
         prediction=Prediction(0.8, first),
         split_id=0,
         threshold=0.4,
+        threshold_source="provisional",
         heatmap_range=changed_scale,
         result_path=tmp_path / "second.png",
     )
@@ -620,6 +623,10 @@ def test_group_req_019_s01(tmp_path: Path) -> None:
         second_result.score,
         second_result.status,
     )
+    first_image = cv2.imread(str(tmp_path / "first.png"))
+    second_image = cv2.imread(str(tmp_path / "second.png"))
+    assert first_image is not None and second_image is not None
+    assert not np.array_equal(first_image, second_image)
 
 
 def test_result_non_tty_progress(
@@ -995,11 +1002,97 @@ def test_command_progress_preserves_single_stdout_record(
 def test_group_req_019_s02(tmp_path: Path, value: object) -> None:
     _, paths = project(tmp_path)
     payload = json.loads(paths.model_config("XX").read_text())
-    payload["groups"][0]["heatmap_range"] = value
+    payload["groups"][0]["ranges"][0]["heatmap_range"] = value
     paths.model_config("XX").write_text(json.dumps(payload))
-    if value is None:
-        with pytest.raises(ValueError, match="heatmap_range"):
-            require_heatmap_range(load_config(tmp_path, "XX").part.groups[0])
-    else:
-        with pytest.raises(ValueError, match="heatmap_range"):
-            load_config(tmp_path, "XX")
+    with pytest.raises(ValueError, match="heatmap_range"):
+        load_config(tmp_path, "XX")
+
+
+def test_per_range_group_results_are_distinct(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, paths = project(tmp_path, two=True)
+    payload = json.loads(paths.model_config("XX").read_text())
+    group_zero = payload["groups"][0]["ranges"]
+    group_zero[0]["inspection_threshold"] = 0.3
+    group_zero[0]["heatmap_range"] = {"min": 0.2, "max": 0.6}
+    group_zero[1]["heatmap_range"] = {"min": 0.0, "max": 2.0}
+    payload["groups"][1]["ranges"][0]["inspection_threshold"] = 0.9
+    paths.model_config("XX").write_text(json.dumps(payload))
+    _run(monkeypatch, paths, score=0.5)
+    first = json.loads((paths.result_group("XX", 0) / "sample.png.json").read_text())
+    second = json.loads((paths.result_group("XX", 1) / "sample.png.json").read_text())
+    assert "threshold" not in first and "heatmap_range" not in first
+    assert [
+        (s["split_id"], s["status"], s["threshold_source"]) for s in first["splits"]
+    ] == [
+        (0, "anomaly", "configured"),
+        (1, "anomaly", "provisional"),
+    ]
+    assert [s["threshold"] for s in first["splits"]] == [0.3, 0.4]
+    assert [s["heatmap_range"] for s in first["splits"]] == [
+        {"min": 0.2, "max": 0.6},
+        {"min": 0.0, "max": 2.0},
+    ]
+    assert first["overall_status"] == "anomaly"
+    assert [
+        (s["status"], s["threshold"], s["threshold_source"]) for s in second["splits"]
+    ] == [("normal", 0.9, "configured")]
+    assert second["overall_status"] == "normal"
+
+
+def test_per_range_values_change_without_repreparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, paths = project(tmp_path)
+    prepared = paths.prepared_test("XX") / "manifest.json"
+    before_manifest = prepared.read_bytes()
+    before_checkpoint = paths.checkpoint("XX", 0).read_bytes()
+    original_fingerprint = evaluation.preparation_fingerprint(config)
+    _run(monkeypatch, paths, score=0.5)
+    first = json.loads((paths.result_group("XX", 0) / "sample.png.json").read_text())
+    payload = json.loads(paths.model_config("XX").read_text())
+    payload["groups"][0]["ranges"][0]["inspection_threshold"] = 0.8
+    payload["groups"][0]["ranges"][0]["heatmap_range"] = {"min": -1.0, "max": 2.0}
+    paths.model_config("XX").write_text(json.dumps(payload))
+    assert (
+        evaluation.preparation_fingerprint(load_config(tmp_path, "XX"))
+        == original_fingerprint
+    )
+    _run(monkeypatch, paths, score=0.5)
+    second = json.loads((paths.result_group("XX", 0) / "sample.png.json").read_text())
+    assert first["splits"][0]["status"] == "anomaly"
+    assert second["splits"][0]["status"] == "normal"
+    assert second["splits"][0]["threshold"] == 0.8
+    assert second["splits"][0]["heatmap_range"] == {"min": -1.0, "max": 2.0}
+    assert prepared.read_bytes() == before_manifest
+    assert paths.checkpoint("XX", 0).read_bytes() == before_checkpoint
+
+
+def test_per_range_threshold_start_display(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, paths = project(tmp_path)
+    payload = json.loads(paths.model_config("XX").read_text())
+    payload["groups"][0]["ranges"][0]["inspection_threshold"] = 0.7
+    paths.model_config("XX").write_text(json.dumps(payload))
+    capsys.readouterr()
+    _run(monkeypatch, paths, score=0.5)
+    output = capsys.readouterr().err
+    result = json.loads((paths.result_group("XX", 0) / "sample.png.json").read_text())
+    for split in result["splits"]:
+        assert (
+            f"グループ 0 分割 {split['split_id']} 判定閾値: "
+            f"{split['threshold']} ({split['threshold_source']})"
+        ) in output
+
+
+def test_per_range_missing_threshold(tmp_path: Path) -> None:
+    _, paths = project(tmp_path)
+    payload = json.loads(paths.model_config("XX").read_text())
+    payload["groups"][0]["ranges"][0].pop("inspection_threshold")
+    paths.model_config("XX").write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="group 0 range 0.*inspection_threshold"):
+        load_config(tmp_path, "XX")

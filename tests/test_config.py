@@ -17,8 +17,14 @@ from app.common.config import (
     write_threshold,
 )
 from app.common.runtime import DeviceSelection
+from app.image_preparation.cli import (
+    _check_command,
+    _test_pre_command,
+    _train_pre_command,
+)
 from app.image_preparation.imaging import AlignedImage
 from app.image_preparation.preparation import prepare_testing, prepare_training
+from app.model_evaluation.cli import _test_command
 from app.model_training.cli import _train_command
 
 
@@ -158,8 +164,7 @@ def test_group_req_021_s01(tmp_path: Path) -> None:
     path, payload = _payload(tmp_path)
     second = json.loads(json.dumps(payload["groups"][0]))
     second["id"] = 1
-    second["range_ids"] = [0]
-    payload["groups"][0]["range_ids"] = [0, 1]
+    second["ranges"] = [second["ranges"][0]]
     payload["groups"].append(second)
     payload["group_detail"]["1"] = json.loads(json.dumps(payload["group_detail"]["0"]))
     payload["group_detail"]["1"]["optuna_settings"]["execution"]["seed"] = 73
@@ -170,6 +175,201 @@ def test_group_req_021_s01(tmp_path: Path) -> None:
     assert loaded.part.groups[1].optuna_settings.execution.seed == 73
     assert loaded.part.groups[0].optuna_settings.execution.seed == 42
     assert config.part.groups[0].range_ids == [0, 1]
+
+
+def test_per_range_shared_id_between_groups(tmp_path: Path) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    second = json.loads(json.dumps(payload["groups"][0]))
+    second["id"] = 1
+    second["ranges"][0]["inspection_threshold"] = 0.7
+    second["ranges"][0]["heatmap_range"] = {"min": -1.0, "max": 2.0}
+    payload["groups"].append(second)
+    payload["group_detail"]["1"] = json.loads(json.dumps(payload["group_detail"]["0"]))
+    _save(path, payload)
+    groups = load_config(tmp_path, "XX").part.select_groups()
+    assert [group.range_ids for group in groups] == [[0], [0]]
+    assert groups[0].ranges[0].inspection_threshold is None
+    assert groups[1].ranges[0].inspection_threshold == 0.7
+    assert groups[1].ranges[0].heatmap_range.model_dump() == {
+        "min": -1.0,
+        "max": 2.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        _check_command,
+        _train_pre_command,
+        _train_command,
+        _test_pre_command,
+        _test_command,
+    ],
+)
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_ranges",
+        "empty_ranges",
+        "missing_id",
+        "duplicate_id",
+        "unknown_id",
+        "missing_threshold",
+        "missing_heatmap",
+        "invalid_bounds",
+        "invalid_threshold",
+        "invalid_heatmap_type",
+        "old_range_ids",
+        "old_threshold",
+        "old_heatmap",
+    ],
+)
+def test_per_range_invalid_config_all_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command,
+    mutation: str,
+) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    group = payload["groups"][0]
+    entry = group["ranges"][0]
+    if mutation == "missing_ranges":
+        group.pop("ranges")
+    elif mutation == "empty_ranges":
+        group["ranges"] = []
+    elif mutation == "missing_id":
+        entry.pop("id")
+    elif mutation == "duplicate_id":
+        group["ranges"].append(json.loads(json.dumps(entry)))
+    elif mutation == "unknown_id":
+        entry["id"] = 3
+    elif mutation == "missing_threshold":
+        entry.pop("inspection_threshold")
+    elif mutation == "missing_heatmap":
+        entry.pop("heatmap_range")
+    elif mutation == "invalid_bounds":
+        entry["heatmap_range"] = {"min": 1.0, "max": 1.0}
+    elif mutation == "invalid_threshold":
+        entry["inspection_threshold"] = True
+    elif mutation == "invalid_heatmap_type":
+        entry["heatmap_range"] = {"min": True, "max": 1.0}
+    elif mutation == "old_range_ids":
+        group["range_ids"] = [0]
+    elif mutation == "old_threshold":
+        group["inspection_threshold"] = 0.5
+    else:
+        group["heatmap_range"] = {"min": 0.0, "max": 1.0}
+    _save(path, payload)
+    marker = tmp_path / "data" / "06_result" / "XX" / "group_00" / "old.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("old", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        common_cli, "select_device", lambda: DeviceSelection("cpu", "test", "test")
+    )
+    with pytest.raises(typer.Exit) as error:
+        if command in (_train_pre_command, _train_command, _test_command):
+            command(model="XX", group=0)
+        else:
+            command(model="XX")
+    output = capsys.readouterr()
+    assert error.value.exit_code == 2
+    assert "group 0" in output.err
+    if mutation == "duplicate_id":
+        assert "range 0 is duplicated" in output.err
+    assert any(name in output.err for name in ("range", "threshold", "heatmap"))
+    assert json.loads(output.out)["exit_code"] == 2
+    assert marker.read_text(encoding="utf-8") == "old"
+
+
+@pytest.mark.parametrize(
+    "field", ["range_ids", "inspection_threshold", "heatmap_range"]
+)
+def test_per_range_rejects_group_legacy_fields(tmp_path: Path, field: str) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    payload["groups"][0][field] = [] if field == "range_ids" else None
+    _save(path, payload)
+    with pytest.raises(ValidationError, match=f"group 0.*{field}"):
+        load_model_config(path)
+
+
+def test_per_range_testing_fingerprint(tmp_path: Path) -> None:
+    build_project(
+        tmp_path, ranges=[{"id": 0, "x": 0, "y": 0}, {"id": 1, "x": 8, "y": 0}]
+    )
+    path, payload = _payload(tmp_path)
+    before = load_config(tmp_path, "XX")
+    train_before = preparation_fingerprint(before, group=before.part.groups[0])
+    test_before = preparation_fingerprint(before)
+    payload["groups"][0]["ranges"][0]["inspection_threshold"] = 0.8
+    payload["groups"][0]["ranges"][1]["heatmap_range"] = {"min": -2.0, "max": 3.0}
+    _save(path, payload)
+    changed = load_config(tmp_path, "XX")
+    assert (
+        preparation_fingerprint(changed, group=changed.part.groups[0]) == train_before
+    )
+    assert preparation_fingerprint(changed) == test_before
+    payload["groups"][0]["ranges"].pop()
+    _save(path, payload)
+    changed_membership = load_config(tmp_path, "XX")
+    assert preparation_fingerprint(changed_membership) == test_before
+    assert (
+        preparation_fingerprint(
+            changed_membership, group=changed_membership.part.groups[0]
+        )
+        != train_before
+    )
+
+
+def test_per_range_brightness_fingerprint(tmp_path: Path) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    before = load_config(tmp_path, "XX")
+    train_before = preparation_fingerprint(before, group=before.part.groups[0])
+    test_before = preparation_fingerprint(before)
+    payload["brightness_normalization"] = {"enabled": True, "statistic": "mean"}
+    _save(path, payload)
+    changed = load_config(tmp_path, "XX")
+    assert (
+        preparation_fingerprint(changed, group=changed.part.groups[0]) != train_before
+    )
+    assert preparation_fingerprint(changed) != test_before
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, True, "0.5", float("nan"), float("inf")])
+def test_per_range_invalid_threshold_all_commands(
+    tmp_path: Path, value: object
+) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    payload["groups"][0]["ranges"][0]["inspection_threshold"] = value
+    _save(path, payload)
+    with pytest.raises(ValidationError, match="group 0 range 0.*inspection_threshold"):
+        load_model_config(path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        {"min": 0},
+        {"min": 1, "max": 1},
+        {"min": 2, "max": 1},
+        {"min": True, "max": 1},
+        {"min": float("inf"), "max": 1},
+    ],
+)
+def test_per_range_invalid_heatmap_all_commands(tmp_path: Path, value: object) -> None:
+    build_project(tmp_path)
+    path, payload = _payload(tmp_path)
+    payload["groups"][0]["ranges"][0]["heatmap_range"] = value
+    _save(path, payload)
+    with pytest.raises(ValidationError, match="group 0 range 0.*heatmap_range"):
+        load_model_config(path)
 
 
 def test_req_031_s01_negative_sampler_startup_trials(tmp_path: Path) -> None:
@@ -211,8 +411,8 @@ def test_req_031_s02_noninteger_sampler_startup_trials(
         ("duplicate_group", "unique"),
         ("negative_group", "greater than or equal"),
         ("float_group", "integer"),
-        ("empty_ranges", "range_ids"),
-        ("duplicate_range", "unique"),
+        ("empty_ranges", "ranges"),
+        ("duplicate_range", "range 0 is duplicated"),
         ("unknown_range", "unknown range"),
         ("invalid_threshold", "inspection_threshold"),
     ],
@@ -230,13 +430,13 @@ def test_group_req_021_s02(tmp_path: Path, mutation: str, reason: str) -> None:
     elif mutation == "float_group":
         group["id"] = 0.5
     elif mutation == "empty_ranges":
-        group["range_ids"] = []
+        group["ranges"] = []
     elif mutation == "duplicate_range":
-        group["range_ids"] = [0, 0]
+        group["ranges"] = [group["ranges"][0], group["ranges"][0]]
     elif mutation == "unknown_range":
-        group["range_ids"] = [3]
+        group["ranges"][0]["id"] = 3
     elif mutation == "invalid_threshold":
-        group["inspection_threshold"] = True
+        group["ranges"][0]["inspection_threshold"] = True
     _save(path, payload)
     with pytest.raises(ValidationError, match=reason):
         load_model_config(path)
@@ -271,7 +471,7 @@ def test_group_detail_rejects_mismatched_ids(tmp_path: Path, mutation: str) -> N
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     [
-        ("old", "groups"),
+        ("old", "group 0"),
         ("summary_in_detail", "group_detail"),
         ("missing_detail", "group_detail"),
         ("missing_setting", "augmentation"),
@@ -315,7 +515,7 @@ def test_training_threshold_updates_only_one_group(tmp_path: Path) -> None:
     second["id"] = 1
     payload["groups"].append(second)
     payload["group_detail"]["1"] = json.loads(json.dumps(payload["group_detail"]["0"]))
-    payload["groups"][0]["inspection_threshold"] = 0.2
+    payload["groups"][0]["ranges"][0]["inspection_threshold"] = 0.2
     _save(path, payload)
     before = preparation_fingerprint(
         load_config(tmp_path, "XX"), group=load_config(tmp_path, "XX").part.groups[0]
@@ -327,7 +527,7 @@ def test_training_threshold_updates_only_one_group(tmp_path: Path) -> None:
     raw = json.loads(path.read_text())
     assert raw["group_detail"]["0"]["optuna_settings"]["threshold"]["value"] is None
     assert raw["group_detail"]["1"]["optuna_settings"]["threshold"]["value"] == 0.4
-    assert raw["groups"][0]["inspection_threshold"] == 0.2
+    assert raw["groups"][0]["ranges"][0]["inspection_threshold"] == 0.2
     assert preparation_fingerprint(updated, group=updated.part.groups[0]) == before
 
 

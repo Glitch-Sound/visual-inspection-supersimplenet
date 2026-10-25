@@ -19,7 +19,7 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | --- | --- |
 | 型番 / `model` | CLI の `--model` で指定する対象製品の識別子。学習済みモデルそのものは指さない |
 | 分割 / `range` | 基準画像上の左上座標と分割IDで定義する切り出し範囲 |
-| グループ / `group` | 共通の分割IDを参照し、学習・検査条件と学習済みモデルを独立して持つ単位 |
+| グループ / `group` | 共通の分割IDを参照し、学習条件と学習済みモデルを独立して持ち、分割ごとの検査条件をまとめる単位 |
 | グループ詳細 / `group_detail` | グループIDをキーに、探索条件・スコア契約・データ拡張をまとめた型番設定の領域 |
 | 擬似異常 / `synthetic_anomaly` | SuperSimpleNetが学習中に作る異常。ノイズの強さ、範囲、かたまりの細かさをグループごとに指定する |
 | 初期ランダム探索試行数 / `sampler.startup_trials` | グループの TPESampler が TPE による探索へ移る前の試行数。MedianPruner の同名項目とは別 |
@@ -34,7 +34,7 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | 異常スコア | SuperSimpleNetの`pred_score`。校正済み確率ではない |
 | 異常マップ | 分割画像の画素ごとの`anomaly_map`。ヒートマップ表示に使う |
 | 暫定閾値 | 学習集合の異常スコアから算出する、初期評価用の判定境界 |
-| 検査用閾値 | グループの`inspection_threshold`。指定時に暫定閾値に代えて使う |
+| 検査用閾値 | `groups[].ranges[].inspection_threshold`。分割ごとに指定し、`null` ならグループの暫定閾値を使う |
 | `undetermined` | 位置合わせ失敗や分割不足などで正常と確定できないグループ内判定 |
 | グループ結果 | `test`が `data/06_result/<model>/group_<2桁以上のID>/` に保存する、グループの最新の結果画像とJSONの一式 |
 | capability | 継続して管理する機能・責務の単位。このプロジェクトでは画像準備、モデル学習、モデル評価の3つ |
@@ -73,10 +73,11 @@ npm ci
 | `blacklist` | 学習準備だけで除外する元画像名と分割ID |
 | `alignment` | 型番内で共通のORB位置合わせ条件 |
 | `brightness_normalization` | 型番共通の分割画像の輝度補正。省略時も有効で、既定値は `enabled=true`、`statistic=median`、`exclude_above=230`、`exclude_below=0`、`min_gain=0.5`、`max_gain=2.0` |
-| `groups` | 必須の非空配列。グループIDは型番内で一意な非負整数。対象分割と検査条件を置く |
-| `groups[].range_ids` | 非空・重複なしの既存分割ID。同じ分割IDを複数グループで参照できる |
-| `groups[].inspection_threshold` | `null`なら暫定閾値。0以上1以下の数値なら検査で使用 |
-| `groups[].heatmap_range` | 検査時に必須の有限な下限・上限。`min < max` |
+| `groups` | 必須の非空配列。グループIDは型番内で一意な非負整数。分割ごとの検査条件を置く |
+| `groups[].ranges` | 必須の非空配列。各要素に `id`、`inspection_threshold`、`heatmap_range` を必ず書く。グループ単位の上書きや既定値はない |
+| `groups[].ranges[].id` | 共通 `range` にある分割ID。同じグループ内では重複不可。同じIDを複数グループで参照できる |
+| `groups[].ranges[].inspection_threshold` | `null` ならそのグループの暫定閾値。0以上1以下の有限数値なら当該分割の検査に使用 |
+| `groups[].ranges[].heatmap_range` | 各分割で必須の有限な下限・上限。`min < max` |
 | `group_detail` | グループIDの通常の10進文字列をキーにする詳細設定。`groups`のIDと一対一に対応 |
 | `group_detail["<id>"].optuna_settings` | グループ別の探索、学習・検証分離、暫定閾値 |
 | `group_detail["<id>"].optuna_settings.sampler.startup_trials` | TPESampler の初期ランダム探索試行数。0以上の整数で、省略時は5 |
@@ -85,6 +86,8 @@ npm ci
 | `group_detail["<id>"].synthetic_anomaly` | 学習中の擬似異常生成範囲。`noise_std` は `0.010`〜`0.020`、`perlin_threshold` は `0.2`〜`0.4`、`perlin_scale_exponent` は整数 `0`〜`5` が省略時の推奨値。各項目は `min` と `max` で指定する |
 
 `blacklist`、`alignment`、`brightness_normalization`は型番共通である。<br />
+旧形式の `groups[].range_ids`、グループ単位の `inspection_threshold` と `heatmap_range` は使用できない。<br />
+分割ごとの検査閾値と表示範囲が不正な場合、5つのコマンドはいずれも入力不備として終了し、既存成果物を更新しない。<br />
 輝度補正は`train-pre`と`test-pre`の分割画像に適用する。<br />
 `statistic`は`median`または`mean`を指定し、`exclude_below`以上・`exclude_above`未満の輝度を集計する。<br />
 集計できる画素がない場合や分割画像の輝度が0以下の場合は、その分割の補正を省略する。<br />
@@ -95,9 +98,13 @@ npm ci
 TPE による探索を行うには、`sampler.startup_trials` を合計試行回数の `execution.trials` より小さくする。<br />
 同じ値以上にすると、設定された試行はすべて初期ランダム探索となり、TPE による探索は行われない。<br />
 暫定閾値の`group_detail["<id>"].optuna_settings.threshold.value`は学習完了時に対象グループだけ更新される。<br />
+暫定閾値はグループ単位で算出し、分割ごとには算出しない。<br />
 checkpointと最良試行にも同じ値を保存するため、暫定閾値だけを手動で変更しない。<br />
 切り出し位置、サイズ、縮小倍率、位置合わせなどを変更したら、該当する`train-pre`または`test-pre`を再実行する。<br />
 準備指紋が一致しない入力は学習・検査の前に拒否される。
+
+分割ごとの `inspection_threshold` または `heatmap_range` だけを変更した場合、準備指紋は変わらない。<br />
+準備と学習をやり直さず、`test` のみ再実行できる。
 
 輝度補正条件を変更した場合は、旧成果物を引き継がず、`train-pre`、`train`、`test-pre`、`test`を順に再実行する。<br />
 分割位置も確認したい場合は先に`check`を実行する。
@@ -142,6 +149,9 @@ uv run --locked test --model XX --group 1
 各グループのモデル一式はそのグループの推論前に照合する。
 
 元画像の判定はグループごとに、`anomaly`が一つでもあれば`anomaly`、必要な全分割が`normal`なら`normal`、それ以外は`undetermined`とする。<br />
+各分割は `pred_score >=` 使用閾値を `anomaly` とし、結果JSONの分割結果に使用閾値、その出どころ (`provisional` または `configured`)、ヒートマップ表示範囲を記録する。<br />
+グループ単位の `threshold` と `heatmap_range` は結果JSONに置かない。<br />
+検査開始時もグループID・分割IDごとの使用閾値と出どころを表示する。<br />
 グループ間の総合判定は作らない。
 
 ### 成果物と読戻し
@@ -270,6 +280,12 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| per-range-threshold-and-heatmap | AC-001 | 未検証 | タスク5.2: Ubuntu 24.04 LTS・Windows 11で同じ分割IDを複数グループに設定し、それぞれの閾値・表示範囲を確認する。 |
+| per-range-threshold-and-heatmap | AC-002 | 未検証 | タスク5.2: 両OSの5コマンドで分割条件の欠落・不正・旧項目を拒否し、旧成果物を保持することを確認する。 |
+| per-range-threshold-and-heatmap | AC-003 | 未検証 | タスク5.2: 両OSのCPUと利用可能なGPUで、分割別の判定境界・ヒートマップ・元画像判定を実画像で確認する。 |
+| per-range-threshold-and-heatmap | AC-004 | 未検証 | タスク5.2: 両OSで分割別の使用閾値・出どころ・表示範囲を結果JSONと検査開始表示で照合する。 |
+| per-range-threshold-and-heatmap | AC-005 | 未検証 | タスク5.2: 両OSで内部の分割IDと準備指紋を確認し、検査値だけを変えて準備・学習なしで再検査する。 |
+| per-range-threshold-and-heatmap | AC-006 | 未検証 | タスク5.2: 両OSで新形式設定を使って全工程を再実行し、成果物の読戻しと案内手順を確認する。 |
 | configure-synthetic-anomaly-generation | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11の実画像でグループ別の3範囲、省略値、maskごとの選択を確認する。 |
 | configure-synthetic-anomaly-generation | AC-002 | 未検証 | タスク4.2: 両OSの学習CLIで不正な範囲・型の拒否、旧成果物の保持、設定修正後の再実行を確認する。 |
 | configure-synthetic-anomaly-generation | AC-003 | 未検証 | タスク4.2: 両OSのCPUと利用可能なGPUで、擬似異常の50%判定、生成手順、学習seedによる再現を確認する。 |

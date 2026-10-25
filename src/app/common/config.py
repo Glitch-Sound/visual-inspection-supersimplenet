@@ -17,6 +17,7 @@ from pydantic import (
     Field,
     StrictBool,
     StrictInt,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -333,17 +334,10 @@ class BrightnessNormalizationSettings(StrictModel):
         return self
 
 
-class GroupConfig(StrictModel):
-    id: Annotated[StrictInt, Field(ge=0)]
-    range_ids: list[Annotated[StrictInt, Field(ge=0, le=99)]] = Field(min_length=1)
-    inspection_threshold: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
-    heatmap_range: HeatmapRange | None = None
-    optuna_settings: OptunaSettings
-    score: ScoreSettings
-    augmentation: AugmentationSettings
-    synthetic_anomaly: SyntheticAnomalySettings = Field(
-        default_factory=SyntheticAnomalySettings
-    )
+class GroupRangeConfig(StrictModel):
+    id: Annotated[StrictInt, Field(ge=0, le=99)]
+    inspection_threshold: Annotated[float, Field(ge=0.0, le=1.0)] | None
+    heatmap_range: HeatmapRange
 
     @field_validator("inspection_threshold", mode="before")
     @classmethod
@@ -358,10 +352,54 @@ class GroupConfig(StrictModel):
             )
         return value
 
+
+class GroupConfig(StrictModel):
+    id: Annotated[StrictInt, Field(ge=0)]
+    ranges: list[GroupRangeConfig] = Field(min_length=1)
+    optuna_settings: OptunaSettings
+    score: ScoreSettings
+    augmentation: AugmentationSettings
+    synthetic_anomaly: SyntheticAnomalySettings = Field(
+        default_factory=SyntheticAnomalySettings
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_range_entries(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        group_id = value.get("id", "unknown")
+        ranges = value.get("ranges")
+        if ranges is None:
+            raise ValueError(f"group {group_id} ranges is required")
+        if not isinstance(ranges, list) or not ranges:
+            raise ValueError(f"group {group_id} ranges must be a nonempty array")
+        for index, item in enumerate(ranges):
+            split_id = (
+                item.get("id", "missing") if isinstance(item, dict) else "missing"
+            )
+            try:
+                GroupRangeConfig.model_validate(item)
+            except ValidationError as error:
+                first = error.errors()[0]
+                field = ".".join(str(part) for part in first["loc"])
+                raise ValueError(
+                    f"group {group_id} range {split_id} at ranges[{index}] "
+                    f"{field}: {first['msg']}"
+                ) from error
+        return value
+
+    @property
+    def range_ids(self) -> list[int]:
+        return [item.id for item in self.ranges]
+
     @model_validator(mode="after")
     def validate_group(self) -> GroupConfig:
-        if len(self.range_ids) != len(set(self.range_ids)):
-            raise ValueError(f"group {self.id} range_ids must be unique")
+        seen_ids: set[int] = set()
+        for range_id in self.range_ids:
+            if range_id in seen_ids:
+                raise ValueError(f"group {self.id} range {range_id} is duplicated")
+            seen_ids.add(range_id)
         if self.score.source != self.optuna_settings.threshold.score_source:
             raise ValueError(
                 f"group {self.id} score.source must equal threshold.score_source"
@@ -393,9 +431,7 @@ class ModelConfig(StrictModel):
 
         summary_fields = {
             "id",
-            "range_ids",
-            "inspection_threshold",
-            "heatmap_range",
+            "ranges",
         }
         detail_fields = {
             "optuna_settings",
@@ -410,7 +446,8 @@ class ModelConfig(StrictModel):
             misplaced = set(group) - summary_fields
             if misplaced:
                 raise ValueError(
-                    f"groups contains misplaced fields: {sorted(misplaced)}"
+                    f"group {group.get('id', 'unknown')} contains misplaced fields: "
+                    f"{sorted(misplaced)}"
                 )
             group_id = group.get("id")
             if (
@@ -471,12 +508,15 @@ class ModelConfig(StrictModel):
                 raise ValueError(f"blacklist references unknown range ids: {unknown}")
         group_ids = [group.id for group in self.groups]
         if len(group_ids) != len(set(group_ids)):
-            raise ValueError("groups.id must be unique")
+            duplicate = next(
+                group_id for group_id in group_ids if group_ids.count(group_id) > 1
+            )
+            raise ValueError(f"group {duplicate} groups.id must be unique")
         for group in self.groups:
             unknown = set(group.range_ids) - valid_ids
             if unknown:
                 raise ValueError(
-                    f"group {group.id} references unknown range ids: {sorted(unknown)}"
+                    f"group {group.id} range {sorted(unknown)[0]} references unknown range id"
                 )
         return self
 

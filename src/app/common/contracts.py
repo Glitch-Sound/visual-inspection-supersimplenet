@@ -330,6 +330,9 @@ class SplitResult(ContractModel):
     image: str
     score: float | None = Field(default=None, ge=0.0, le=1.0)
     status: ResultStatus
+    threshold: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    threshold_source: Literal["provisional", "configured"]
+    heatmap_range: HeatmapRange
     result_image: str | None = None
     error: str | None = None
 
@@ -356,8 +359,6 @@ class InspectionResult(ContractModel):
     range_ids: list[Annotated[StrictInt, Field(ge=0, le=99)]] = Field(min_length=1)
     checkpoint: str
     score_contract: ScoreContract
-    threshold: float = Field(ge=0.0, le=1.0)
-    heatmap_range: HeatmapRange
     splits: list[SplitResult]
     overall_status: ResultStatus
     processed_at: datetime

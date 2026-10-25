@@ -9,6 +9,7 @@ from group_evaluation_helpers import FakePredictor, aligned, project, recorder
 
 from app.common.config import preparation_fingerprint
 from app.common.contracts import (
+    HeatmapRange,
     InspectionResult,
     ResultStatus,
     SplitResult,
@@ -36,7 +37,13 @@ def test_group_req_011_s01() -> None:
     status, _ = aggregate_status(
         [
             SplitResult(
-                split_id=0, image="a.png", score=0.8, status=ResultStatus.ANOMALY
+                split_id=0,
+                image="a.png",
+                score=0.8,
+                status=ResultStatus.ANOMALY,
+                threshold=0.4,
+                threshold_source="configured",
+                heatmap_range=HeatmapRange(min=0.0, max=1.0),
             )
         ],
         required_split_ids={0, 1},
@@ -46,7 +53,17 @@ def test_group_req_011_s01() -> None:
 
 def test_group_req_011_s02() -> None:
     status, _ = aggregate_status(
-        [SplitResult(split_id=0, image="a.png", score=0.1, status=ResultStatus.NORMAL)],
+        [
+            SplitResult(
+                split_id=0,
+                image="a.png",
+                score=0.1,
+                status=ResultStatus.NORMAL,
+                threshold=0.4,
+                threshold_source="configured",
+                heatmap_range=HeatmapRange(min=0.0, max=1.0),
+            )
+        ],
         required_split_ids={0},
     )
     assert status == ResultStatus.NORMAL
@@ -77,6 +94,11 @@ def test_inference_failure_is_recorded_per_split(tmp_path: Path) -> None:
     assert result.overall_status == ResultStatus.UNDETERMINED
     assert all(split.status == ResultStatus.ERROR for split in result.splits)
     assert all(split.score is None for split in result.splits)
+    assert all(split.threshold == 0.4 for split in result.splits)
+    assert all(split.threshold_source == "provisional" for split in result.splits)
+    assert all(
+        split.heatmap_range == HeatmapRange(min=0.0, max=1.0) for split in result.splits
+    )
 
 
 def test_group_req_011_s04(tmp_path: Path) -> None:
@@ -94,8 +116,52 @@ def test_group_req_012_s01(tmp_path: Path) -> None:
     saved = InspectionResult.read_json(paths.results("XX") / "one" / "sample.png.json")
     assert saved.group == 0
     assert saved.range_ids == [0, 1]
-    assert saved.heatmap_range == result.heatmap_range
+    assert saved.splits[0].heatmap_range == result.splits[0].heatmap_range
     assert len(saved.splits) == 2
+
+
+def test_per_range_result_contract(tmp_path: Path) -> None:
+    config, paths = project(tmp_path)
+    result = _evaluate(config, paths)[0]
+    payload = json.loads((paths.results("XX") / "one" / "sample.png.json").read_text())
+    assert result.overall_status == ResultStatus.ANOMALY
+    assert "threshold" not in payload and "heatmap_range" not in payload
+    assert len(payload["splits"]) == 2
+    for split in payload["splits"]:
+        assert split["threshold"] == 0.4
+        assert split["threshold_source"] == "provisional"
+        assert split["heatmap_range"] == {"min": 0.0, "max": 1.0}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_threshold",
+        "missing_source",
+        "invalid_source",
+        "missing_heatmap",
+        "old_group_threshold",
+    ],
+)
+def test_per_range_rejects_invalid_result(tmp_path: Path, mutation: str) -> None:
+    config, paths = project(tmp_path)
+    _evaluate(config, paths)
+    path = paths.results("XX") / "one" / "sample.png.json"
+    payload = json.loads(path.read_text())
+    split = payload["splits"][0]
+    if mutation == "missing_threshold":
+        split.pop("threshold")
+    elif mutation == "missing_source":
+        split.pop("threshold_source")
+    elif mutation == "invalid_source":
+        split["threshold_source"] = "unknown"
+    elif mutation == "missing_heatmap":
+        split.pop("heatmap_range")
+    else:
+        payload["threshold"] = 0.4
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError):
+        InspectionResult.read_json(path)
 
 
 def test_group_req_012_s02(tmp_path: Path) -> None:
