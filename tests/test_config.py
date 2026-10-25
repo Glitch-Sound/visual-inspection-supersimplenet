@@ -38,6 +38,22 @@ def _save(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+@pytest.mark.parametrize(
+    "filename",
+    ["", ".", "..", "/source.png", "nested/source.png", r"nested\source.png"],
+)
+def test_safe_artifact_filename_posix_path_rejected(filename: str) -> None:
+    with pytest.raises(ValidationError, match="filename without path components"):
+        contracts.PreparedSplit(source_image=filename, split_id=0, image="split.png")
+
+    assert (
+        contracts.PreparedSplit(
+            source_image="C:source.png", split_id=0, image="split.png"
+        ).source_image
+        == "C:source.png"
+    )
+
+
 def _assert_invalid_training_preserves_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

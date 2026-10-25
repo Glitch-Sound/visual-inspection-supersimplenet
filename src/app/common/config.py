@@ -8,7 +8,7 @@ import json
 import math
 import re
 import warnings
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -514,7 +514,6 @@ class ModelConfig(StrictModel):
             or "/" in value
             or "\\" in value
             or Path(value).is_absolute()
-            or PureWindowsPath(value).drive
         ):
             raise ValueError("base must be a filename without path components")
         return value

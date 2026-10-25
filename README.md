@@ -39,12 +39,14 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | グループ結果 | `test`が `data/06_result/<model>/group_<2桁以上のID>/` に保存する、グループの最新の結果画像とJSONの一式 |
 | capability | 継続して管理する機能・責務の単位。このプロジェクトでは画像準備、モデル学習、モデル評価の3つ |
 | OpenSpec change | 一回の変更を計画・実装・検証する単位 |
+| WSL2 | Windows 上で Ubuntu を動かす実行基盤。このプロジェクトでは Ubuntu 24.04 LTS を対象とする |
+| Apple silicon | macOS を動かす Apple 製の Arm 系プロセッサー。対象環境では CPU で学習・検査する |
 
 ## 動作環境
 
 - Python 3.13と`uv`
-- Ubuntu 24.04 LTSまたはWindows 11 (x86-64)
-- CUDA対応GPUは任意。利用できない場合はCPUを使う
+- Ubuntu 24.04 LTS (ネイティブまたは WSL2) または Apple silicon の macOS
+- Ubuntu で利用可能な CUDA GPU は任意。利用できない場合と macOS では CPU を使う
 - Node.js 22とnpm (OpenSpec操作と開発時の品質検査)
 
 依存関係を同期する。
@@ -185,7 +187,7 @@ uv run --locked test --model XX --group 1
 
 ## 実機スモーク試験
 
-Ubuntu 24.04 LTSとWindows 11の対象実機で、CPUと利用可能なGPUによる全件・単独グループの実行と成果物読戻しを確認する。<br />
+Ubuntu 24.04 LTS (ネイティブまたは WSL2) と Apple silicon の macOS の対象環境で、CPU と Ubuntu で利用可能な CUDA GPU による全件・単独グループの実行と成果物読戻しを確認する。<br />
 `--output`には実行ごとに異なるパスを指定する。
 
 ```bash
@@ -193,7 +195,7 @@ uv run --locked python scripts/run_visual_inspection_smoke.py --model XX --outpu
 uv run --locked python scripts/run_visual_inspection_smoke.py --model XX --group 1 --output smoke/group-1.json
 ```
 
-結果JSONは対象OS、Python、依存版、使用デバイス、実行状態、保存先の読戻し結果を記録する。<br />
+結果JSONは対象環境、Python、依存版、使用デバイス、実行状態、保存先の読戻し結果を記録する。<br />
 本番利用の性能・誤検出基準は別途評価する。
 
 ## 仕様
@@ -253,7 +255,7 @@ uv run --locked python scripts/check_openspec_traceability.py --change <change-n
 
 proposal の受け入れ条件には `AC-001` 形式のIDを付け、design の「受け入れ検証」に検証範囲・方法・残る検証・状態・証跡を対応付ける。<br />
 通常の完了段階では全条件を検証済みとし、残る検証を「なし」にして、リポジトリ相対パスの空でない証跡ファイルを用意する。<br />
-自動試験の収集と成功は、実機や対象OSでの確認を代替しない。
+自動試験の収集と成功は、実機や対象環境での確認を代替しない。
 
 実機など利用できない環境での受け入れ確認だけが残る場合は、この README の「延期中の受け入れ確認」に change 名、AC-ID、状態「未検証」、未完了タスク番号と確認内容を記録し、明示的な了承を得て制限付きでアーカイブできる。<br />
 `archive-deferred.md`、実施責任者・再開条件、GitHub Issue や別の spec の作成は必須ではない。<br />
@@ -277,83 +279,88 @@ npx --no-install openspec update
 ## 延期中の受け入れ確認
 
 実機確認を延期している change と AC-ID を記録する。<br />
+現行の対象環境は Ubuntu 24.04 LTS (ネイティブまたは WSL2) と Apple silicon の macOS である。<br />
 検証後は状態と証跡を更新し、change の受け入れ検証記録にも結果を反映する。
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
-| per-range-threshold-and-heatmap | AC-001 | 未検証 | タスク5.2: Ubuntu 24.04 LTS・Windows 11で同じ分割IDを複数グループに設定し、それぞれの閾値・表示範囲を確認する。 |
-| per-range-threshold-and-heatmap | AC-002 | 未検証 | タスク5.2: 両OSの5コマンドで分割条件の欠落・不正・旧項目を拒否し、旧成果物を保持することを確認する。 |
-| per-range-threshold-and-heatmap | AC-003 | 未検証 | タスク5.2: 両OSのCPUと利用可能なGPUで、分割別の判定境界・ヒートマップ・元画像判定を実画像で確認する。 |
-| per-range-threshold-and-heatmap | AC-004 | 未検証 | タスク5.2: 両OSで分割別の使用閾値・出どころ・表示範囲を結果JSONと検査開始表示で照合する。 |
-| per-range-threshold-and-heatmap | AC-005 | 未検証 | タスク5.2: 両OSで内部の分割IDと準備指紋を確認し、検査値だけを変えて準備・学習なしで再検査する。 |
-| per-range-threshold-and-heatmap | AC-006 | 未検証 | タスク5.2: 両OSで新形式設定を使って全工程を再実行し、成果物の読戻しと案内手順を確認する。 |
-| configure-synthetic-anomaly-generation | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11の実画像でグループ別の3範囲、省略値、maskごとの選択を確認する。 |
-| configure-synthetic-anomaly-generation | AC-002 | 未検証 | タスク4.2: 両OSの学習CLIで不正な範囲・型の拒否、旧成果物の保持、設定修正後の再実行を確認する。 |
-| configure-synthetic-anomaly-generation | AC-003 | 未検証 | タスク4.2: 両OSのCPUと利用可能なGPUで、擬似異常の50%判定、生成手順、学習seedによる再現を確認する。 |
-| configure-synthetic-anomaly-generation | AC-004 | 未検証 | タスク4.2: 両OSで探索条件に擬似異常を含めず、5 CLIを再実行してcheckpointから既存形式の検査結果を読み戻す。 |
-| configure-synthetic-anomaly-generation | AC-005 | 未検証 | タスク4.2: 両OSの実画像で異なるグループ設定の学習・検査と成果物読戻しを確認し、検出性能は別途評価する。 |
-| configure-tpe-startup-trials | AC-001 | 未検証 | タスク3.2: Ubuntu 24.04 LTS・Windows 11の実画像で指定値・省略時・合計試行回数以上の探索を確認する。 |
-| configure-tpe-startup-trials | AC-002 | 未検証 | タスク3.2: 両OSの学習CLIで負数・非整数の入力不備と修正後の再実行を確認する。 |
-| configure-tpe-startup-trials | AC-004 | 未検証 | タスク3.2: 両OSの実画像でMedianPrunerの条件と、準備・学習・検査の全工程を確認する。 |
-| drop-legacy-and-recovery-handling | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11で四CLIの公開前失敗、旧成果物の保持、残存一時領域の削除を確認する。 |
-| drop-legacy-and-recovery-handling | AC-002 | 未検証 | タスク3.3: 両OSの実モデルで毎回の新規探索と全グループ途中失敗時の部分成功、失敗グループIDと理由を確認する。 |
-| drop-legacy-and-recovery-handling | AC-003 | 未検証 | タスク3.3: 両OSで学習成果物公開後の対象閾値書戻しと他設定・別グループの保持を確認する。 |
-| drop-legacy-and-recovery-handling | AC-004 | 未検証 | タスク3.3: 両OSで公開途中の中断による成果物の欠落・不整合の拒否と、準備・学習・検査の再実行案内を確認する。 |
-| drop-legacy-and-recovery-handling | AC-005 | 未検証 | タスク3.3: 両OSで準備指紋、最良試行とcheckpointの整合、型番排他、シンボリックリンク拒否と四CLIの実行を確認する。 |
-| split-group-config-details | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11の対象環境で新形式の複数グループ設定を使い、5 CLIの全件・単独実行と成果物読戻しを確認する。 |
-| split-group-config-details | AC-002 | 未検証 | タスク3.4: 両OSで詳細の欠落・余分・非標準IDキーと`groups`に置けない項目を入力不備として拒否し、既存成果物が変わらないことを確認する。 |
-| split-group-config-details | AC-003 | 未検証 | タスク3.5: 両OSで実モデルの単独グループ学習を行い、対象の暫定閾値だけが詳細設定へ書き戻されることを確認する。 |
-| pad-group-artifact-names | AC-001 | 未検証 | タスク3.3: Ubuntu 24.04 LTS・Windows 11の対象環境でID 0・10のグループ別成果物名と整数IDを全CLIで確認する。 |
-| align-inspection-progress-and-scenario-tests | AC-001 | 未検証 | タスク4.1: 対象OSの実端末・非端末で全・単独グループ検査の元画像進捗、途中失敗、標準出力JSONを確認する。 |
-| align-inspection-progress-and-scenario-tests | AC-002 | 未検証 | タスク4.2: 対象OSの実画像と実GPU/CPUで準備、判定画像、色尺度、CLI表示を確認する。 |
+| per-range-threshold-and-heatmap | AC-001 | 未検証 | タスク5.2: 対象環境で同じ分割IDを複数グループに設定し、それぞれの閾値・表示範囲を確認する。 |
+| per-range-threshold-and-heatmap | AC-002 | 未検証 | タスク5.2: 対象環境の5コマンドで分割条件の欠落・不正・旧項目を拒否し、旧成果物を保持することを確認する。 |
+| per-range-threshold-and-heatmap | AC-003 | 未検証 | タスク5.2: 対象環境の CPU と Ubuntu で利用可能な CUDA GPU で、分割別の判定境界・ヒートマップ・元画像判定を実画像で確認する。 |
+| per-range-threshold-and-heatmap | AC-004 | 未検証 | タスク5.2: 対象環境で分割別の使用閾値・出どころ・表示範囲を結果JSONと検査開始表示で照合する。 |
+| per-range-threshold-and-heatmap | AC-005 | 未検証 | タスク5.2: 対象環境で内部の分割IDと準備指紋を確認し、検査値だけを変えて準備・学習なしで再検査する。 |
+| per-range-threshold-and-heatmap | AC-006 | 未検証 | タスク5.2: 対象環境で新形式設定を使って全工程を再実行し、成果物の読戻しと案内手順を確認する。 |
+| configure-synthetic-anomaly-generation | AC-001 | 未検証 | タスク4.2: 対象環境の実画像でグループ別の3範囲、省略値、maskごとの選択を確認する。 |
+| configure-synthetic-anomaly-generation | AC-002 | 未検証 | タスク4.2: 対象環境の学習CLIで不正な範囲・型の拒否、旧成果物の保持、設定修正後の再実行を確認する。 |
+| configure-synthetic-anomaly-generation | AC-003 | 未検証 | タスク4.2: 対象環境の CPU と Ubuntu で利用可能な CUDA GPU で、擬似異常の50%判定、生成手順、学習seedによる再現を確認する。 |
+| configure-synthetic-anomaly-generation | AC-004 | 未検証 | タスク4.2: 対象環境で探索条件に擬似異常を含めず、5 CLIを再実行してcheckpointから既存形式の検査結果を読み戻す。 |
+| configure-synthetic-anomaly-generation | AC-005 | 未検証 | タスク4.2: 対象環境の実画像で異なるグループ設定の学習・検査と成果物読戻しを確認し、検出性能は別途評価する。 |
+| configure-tpe-startup-trials | AC-001 | 未検証 | タスク3.2: 対象環境の実画像で指定値・省略時・合計試行回数以上の探索を確認する。 |
+| configure-tpe-startup-trials | AC-002 | 未検証 | タスク3.2: 対象環境の学習CLIで負数・非整数の入力不備と修正後の再実行を確認する。 |
+| configure-tpe-startup-trials | AC-004 | 未検証 | タスク3.2: 対象環境の実画像でMedianPrunerの条件と、準備・学習・検査の全工程を確認する。 |
+| drop-legacy-and-recovery-handling | AC-001 | 未検証 | タスク3.3: 対象環境で四CLIの公開前失敗、旧成果物の保持、残存一時領域の削除を確認する。 |
+| drop-legacy-and-recovery-handling | AC-002 | 未検証 | タスク3.3: 対象環境の実モデルで毎回の新規探索と全グループ途中失敗時の部分成功、失敗グループIDと理由を確認する。 |
+| drop-legacy-and-recovery-handling | AC-003 | 未検証 | タスク3.3: 対象環境で学習成果物公開後の対象閾値書戻しと他設定・別グループの保持を確認する。 |
+| drop-legacy-and-recovery-handling | AC-004 | 未検証 | タスク3.3: 対象環境で公開途中の中断による成果物の欠落・不整合の拒否と、準備・学習・検査の再実行案内を確認する。 |
+| drop-legacy-and-recovery-handling | AC-005 | 未検証 | タスク3.3: 対象環境で準備指紋、最良試行とcheckpointの整合、型番排他、シンボリックリンク拒否と四CLIの実行を確認する。 |
+| split-group-config-details | AC-001 | 未検証 | タスク3.3: 対象環境で新形式の複数グループ設定を使い、5 CLIの全件・単独実行と成果物読戻しを確認する。 |
+| split-group-config-details | AC-002 | 未検証 | タスク3.4: 対象環境で詳細の欠落・余分・非標準IDキーと`groups`に置けない項目を入力不備として拒否し、既存成果物が変わらないことを確認する。 |
+| split-group-config-details | AC-003 | 未検証 | タスク3.5: 対象環境で実モデルの単独グループ学習を行い、対象の暫定閾値だけが詳細設定へ書き戻されることを確認する。 |
+| pad-group-artifact-names | AC-001 | 未検証 | タスク3.3: 対象環境でID 0・10のグループ別成果物名と整数IDを全CLIで確認する。 |
+| align-inspection-progress-and-scenario-tests | AC-001 | 未検証 | タスク4.1: 対象環境の実端末・非端末で全・単独グループ検査の元画像進捗、途中失敗、標準出力JSONを確認する。 |
+| align-inspection-progress-and-scenario-tests | AC-002 | 未検証 | タスク4.2: 対象環境の実画像とUbuntu の CUDA GPU と対象環境の CPUで準備、判定画像、色尺度、CLI表示を確認する。 |
 | align-inspection-progress-and-scenario-tests | AC-003 | 未検証 | タスク4.3: 実重みで指定グループを再学習し、checkpointによる検査と他グループ保持を確認する。 |
-| group-scoped-inspection-models | AC-007 | 未検証 | タスク6.7: Ubuntu 24.04 LTS・Windows 11の対象実機でCPUと利用可能なGPUを使い、全件・単独グループの5 CLIと成果物読戻しを確認する。 |
-| group-scoped-inspection-models | AC-008 | 未検証 | タスク6.8: 両OSで同一型番・別型番の同時起動、終了コード3の拒否、中断後の欠落検出と再実行を確認する。 |
-| organize-app-by-capability | AC-002 | 未検証 | タスク4.3: Ubuntu 24.04 LTS・Windows 11 の実機で5 CLIの名前・引数・終了コード・出力を確認する。 |
-| organize-app-by-capability | AC-003 | 未検証 | タスク4.4: 両OSの実機でmanifest・checkpoint・検査結果の形式、保存先、読戻しを確認する。 |
-| organize-app-by-capability | AC-004 | 未検証 | タスク4.5: 両OSでGPU有効・無効の計4条件を実行し、学習・推論で実際に使用したデバイスを確認する。 |
-| resize-and-knn-image-alignment | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTS・Windows 11の実機で倍率0.5の確認・学習・試験を実行し、縮小後の寸法、座標、切り出しSIZE、元画像の不変を確認する。 |
-| resize-and-knn-image-alignment | AC-002 | 未検証 | タスク4.2: 両OSの実機で運用画像によるKNN比率判定と位置合わせの成功・失敗、処理時間、縮小・分割画像の画質を確認する。 |
-| resize-and-knn-image-alignment | AC-003 | 未検証 | タスク4.3: 両OSの実機で不正設定、範囲外・0寸法、位置合わせ失敗を確認し、終了コード、旧成果物維持、学習除外と試験未判定を確認する。 |
-| fix-anomalib-training-checkpoint | AC-001 | 未検証 | タスク3.1: Ubuntu 24.04 LTSで元画像単位に分けた検証画像が追加分割されず全件利用されることを確認する。 |
-| fix-anomalib-training-checkpoint | AC-002 | 未検証 | タスク3.2: Ubuntu 24.04 LTSで試行ごとの学習率倍率を維持してcheckpointを保存できることを確認する。 |
-| fix-anomalib-training-checkpoint | AC-003 | 未検証 | タスク3.3: Ubuntu 24.04 LTSでPreProcessor入りcheckpointのメタデータを読み込み、契約照合を通過して検査を開始できることを確認する。 |
-| fix-anomalib-training-checkpoint | AC-004 | 未検証 | タスク3.4: Ubuntu 24.04 LTSで学習から検査までを実行し、報告された3件のエラーなく完了することを確認する。 |
-| improve-inspection-configuration-and-cli | AC-001 | 未検証 | タスク4.1: 対象OSと実モデルで暫定・検査用閾値による判定と学習成果物の整合を確認する。 |
-| improve-inspection-configuration-and-cli | AC-003 | 未検証 | タスク4.2: Ubuntu 24.04 LTSとWindows 11で5 CLIの段階表示、準備進捗、標準出力JSON、終了コードを確認する。 |
+| group-scoped-inspection-models | AC-007 | 未検証 | タスク6.7: 対象環境の実機で CPU と Ubuntu で利用可能な CUDA GPUを使い、全件・単独グループの5 CLIと成果物読戻しを確認する。 |
+| group-scoped-inspection-models | AC-008 | 未検証 | タスク6.8: 対象環境で同一型番・別型番の同時起動、終了コード3の拒否、中断後の欠落検出と再実行を確認する。 |
+| organize-app-by-capability | AC-002 | 未検証 | タスク4.3: 対象環境の実機で5 CLIの名前・引数・終了コード・出力を確認する。 |
+| organize-app-by-capability | AC-003 | 未検証 | タスク4.4: 対象環境の実機でmanifest・checkpoint・検査結果の形式、保存先、読戻しを確認する。 |
+| organize-app-by-capability | AC-004 | 未検証 | タスク4.5: 対象環境で CPU、Ubuntu で CUDA GPU の有効・無効を実行し、学習・推論で実際に使用したデバイスを確認する。 |
+| resize-and-knn-image-alignment | AC-001 | 未検証 | タスク4.1: 対象環境の実機で倍率0.5の確認・学習・試験を実行し、縮小後の寸法、座標、切り出しSIZE、元画像の不変を確認する。 |
+| resize-and-knn-image-alignment | AC-002 | 未検証 | タスク4.2: 対象環境の実機で運用画像によるKNN比率判定と位置合わせの成功・失敗、処理時間、縮小・分割画像の画質を確認する。 |
+| resize-and-knn-image-alignment | AC-003 | 未検証 | タスク4.3: 対象環境の実機で不正設定、範囲外・0寸法、位置合わせ失敗を確認し、終了コード、旧成果物維持、学習除外と試験未判定を確認する。 |
+| fix-anomalib-training-checkpoint | AC-001 | 未検証 | タスク3.1: 対象環境で元画像単位に分けた検証画像が追加分割されず全件利用されることを確認する。 |
+| fix-anomalib-training-checkpoint | AC-002 | 未検証 | タスク3.2: 対象環境で試行ごとの学習率倍率を維持してcheckpointを保存できることを確認する。 |
+| fix-anomalib-training-checkpoint | AC-003 | 未検証 | タスク3.3: 対象環境でPreProcessor入りcheckpointのメタデータを読み込み、契約照合を通過して検査を開始できることを確認する。 |
+| fix-anomalib-training-checkpoint | AC-004 | 未検証 | タスク3.4: 対象環境で学習から検査までを実行し、報告された3件のエラーなく完了することを確認する。 |
+| improve-inspection-configuration-and-cli | AC-001 | 未検証 | タスク4.1: 対象環境と実モデルで暫定・検査用閾値による判定と学習成果物の整合を確認する。 |
+| improve-inspection-configuration-and-cli | AC-003 | 未検証 | タスク4.2: 対象環境で5 CLIの段階表示、準備進捗、標準出力JSON、終了コードを確認する。 |
 | improve-inspection-configuration-and-cli | AC-004 | 未検証 | タスク4.3: 実際の基準画像で縮小前座標、確認画像、学習・試験の切り出し位置と`SIZE`を照合する。 |
 | improve-inspection-configuration-and-cli | AC-005 | 未検証 | タスク4.4: 対象環境で不正設定・位置合わせ失敗・途中処理失敗の理由、終了状態、旧成果物保全と未判定を確認する。 |
-| comparable-heatmap-scale | AC-001 | 未検証 | タスク4.2: Ubuntu 24.04 LTS・Windows 11で同一学習済みモデルと表示範囲を確認し、異なる異常マップの同値同色をヒートマップ層で確認する。 |
-| comparable-heatmap-scale | AC-002 | 未検証 | タスク4.3: 両OSで正常画像の非着色、異常画像の着色、スコア・閾値・判定の独立性を確認する。 |
-| comparable-heatmap-scale | AC-003 | 未検証 | タスク4.4: 両OSで表示範囲変更後の`test`と結果JSONの表示範囲を確認する。 |
-| comparable-heatmap-scale | AC-004 | 未検証 | タスク4.5: 両OSで未指定・不正な表示範囲のCLI拒否と新結果が作られないことを確認する。 |
-| show-test-progress-and-update-backbone | AC-001 | 未検証 | タスク4.1: Ubuntu 24.04 LTS・Windows 11の端末・非端末で`test`の元画像進捗、標準出力JSONと終了コードを確認する。 |
-| show-test-progress-and-update-backbone | AC-002 | 未検証 | タスク4.2: 両OSの実画像で未判定・個別分割エラー・全体失敗時の進捗と終了状態を確認する。 |
+| comparable-heatmap-scale | AC-001 | 未検証 | タスク4.2: 対象環境で同一学習済みモデルと表示範囲を確認し、異なる異常マップの同値同色をヒートマップ層で確認する。 |
+| comparable-heatmap-scale | AC-002 | 未検証 | タスク4.3: 対象環境で正常画像の非着色、異常画像の着色、スコア・閾値・判定の独立性を確認する。 |
+| comparable-heatmap-scale | AC-003 | 未検証 | タスク4.4: 対象環境で表示範囲変更後の`test`と結果JSONの表示範囲を確認する。 |
+| comparable-heatmap-scale | AC-004 | 未検証 | タスク4.5: 対象環境で未指定・不正な表示範囲のCLI拒否と新結果が作られないことを確認する。 |
+| show-test-progress-and-update-backbone | AC-001 | 未検証 | タスク4.1: 対象環境の端末・非端末で`test`の元画像進捗、標準出力JSONと終了コードを確認する。 |
+| show-test-progress-and-update-backbone | AC-002 | 未検証 | タスク4.2: 対象環境の実画像で未判定・個別分割エラー・全体失敗時の進捗と終了状態を確認する。 |
 | show-test-progress-and-update-backbone | AC-003 | 未検証 | タスク4.3: 対象型番で`racm_in1k`実重みの取得、再学習、checkpointによる検査を確認する。 |
 | show-test-progress-and-update-backbone | AC-004 | 未検証 | タスク4.4: 全型番で旧探索履歴・checkpointの破棄、閾値・表示範囲の見直し、旧検査結果の再生成を確認する。 |
-| restore-tv-backbone-and-improve-output | AC-001 | 未検証 | タスク5.1: Ubuntu 24.04 LTSとWindows 11で`tv_in1k`の実重みを取得して学習し、checkpointによる検査を確認する。 |
-| restore-tv-backbone-and-improve-output | AC-003 | 未検証 | タスク5.3: 両OSの実画像で正常分割と、異常分割の左原画像・右ヒートマップ付き画像を結果JSONと照合する。 |
-| restore-tv-backbone-and-improve-output | AC-004 | 未検証 | タスク5.4: 両OSの端末・非端末で試行条件表、終了状態、毎回の新規探索件数、標準出力JSONと終了コードを確認する。 |
-| add-brightness-normalization | AC-001 | 未検証 | タスク3.5: Ubuntu 24.04 LTS・Windows 11でmedian・mean・無効化の学習・試験分割画像を読み戻して確認する。 |
-| add-brightness-normalization | AC-002 | 未検証 | タスク3.5: 両OSで値なし・対象輝度0の分割が補正前画素で保存されることを確認する。 |
-| add-brightness-normalization | AC-003 | 未検証 | タスク3.5: 両OSのCLIで不正な補正設定の入力不備表示・終了コード2と既存成果物の保持を確認する。 |
-| add-brightness-normalization | AC-004 | 未検証 | タスク3.5: 両OSで有効時の全補正項目の変更が学習・試験指紋に反映され、旧成果物が拒否されることを確認する。 |
-| add-brightness-normalization | AC-005 | 未検証 | タスク3.5: 両OSのCPUと利用可能なGPUで準備・学習・検査を全件・単独グループでやり直し、成果物を読み戻す。 |
-| simplify-result-layout | AC-001 | 未検証 | タスク3.6: Ubuntu 24.04 LTS・Windows 11で固定保存先のJSON・PNG、直接読戻し、完了表示を確認する。 |
-| simplify-result-layout | AC-002 | 未検証 | タスク3.6: 両OSで全件・単独再検査、設定外グループの整理、他グループの保全を確認する。 |
-| simplify-result-layout | AC-003 | 未検証 | タスク3.6: 両OSで公開前失敗と公開途中の強制終了を起こし、現行方式での再実行と全件再検査を確認する。 |
-| simplify-result-layout | AC-004 | 未検証 | タスク3.6: 両OSで結果親・対象のシンボリックリンク拒否と管理外ファイルの不変を確認する。 |
-| simplify-result-layout | AC-005 | 未検証 | タスク3.6: 両OSで準備・学習・検査を全再実行し、新結果の読戻しと管理外ファイルの不変を確認する。 |
-| fix-review-findings | AC-001 | 未検証 | タスク6.3: Ubuntu 24.04 LTSとWindows 11で補正省略・明記時の準備画素と指紋を確認する。 |
-| fix-review-findings | AC-002 | 未検証 | タスク6.3: 両OSで学習後のcheckpointと最良試行にある擬似異常設定を読み戻す。 |
-| fix-review-findings | AC-003 | 未検証 | タスク6.3: 両OSで検査結果の公開前・公開途中の失敗と再実行を確認する。 |
-| fix-review-findings | AC-004 | 未検証 | タスク6.3: Windows 11でOptuna接続終了後の履歴移動と読戻しを確認する。 |
-| fix-review-findings | AC-005 | 未検証 | タスク6.3: 両OSで5コマンド開始時に全グループの対象一時領域が消えることを確認する。 |
-| fix-review-findings | AC-007 | 未検証 | タスク6.3: 両OSで成果物・閾値の混在時に検査結果が公開されないことを確認する。 |
+| restore-tv-backbone-and-improve-output | AC-001 | 未検証 | タスク5.1: 対象環境で`tv_in1k`の実重みを取得して学習し、checkpointによる検査を確認する。 |
+| restore-tv-backbone-and-improve-output | AC-003 | 未検証 | タスク5.3: 対象環境の実画像で正常分割と、異常分割の左原画像・右ヒートマップ付き画像を結果JSONと照合する。 |
+| restore-tv-backbone-and-improve-output | AC-004 | 未検証 | タスク5.4: 対象環境の端末・非端末で試行条件表、終了状態、毎回の新規探索件数、標準出力JSONと終了コードを確認する。 |
+| add-brightness-normalization | AC-001 | 未検証 | タスク3.5: 対象環境でmedian・mean・無効化の学習・試験分割画像を読み戻して確認する。 |
+| add-brightness-normalization | AC-002 | 未検証 | タスク3.5: 対象環境で値なし・対象輝度0の分割が補正前画素で保存されることを確認する。 |
+| add-brightness-normalization | AC-003 | 未検証 | タスク3.5: 対象環境のCLIで不正な補正設定の入力不備表示・終了コード2と既存成果物の保持を確認する。 |
+| add-brightness-normalization | AC-004 | 未検証 | タスク3.5: 対象環境で有効時の全補正項目の変更が学習・試験指紋に反映され、旧成果物が拒否されることを確認する。 |
+| add-brightness-normalization | AC-005 | 未検証 | タスク3.5: 対象環境の CPU と Ubuntu で利用可能な CUDA GPU で準備・学習・検査を全件・単独グループでやり直し、成果物を読み戻す。 |
+| simplify-result-layout | AC-001 | 未検証 | タスク3.6: 対象環境で固定保存先のJSON・PNG、直接読戻し、完了表示を確認する。 |
+| simplify-result-layout | AC-002 | 未検証 | タスク3.6: 対象環境で全件・単独再検査、設定外グループの整理、他グループの保全を確認する。 |
+| simplify-result-layout | AC-003 | 未検証 | タスク3.6: 対象環境で公開前失敗と公開途中の強制終了を起こし、現行方式での再実行と全件再検査を確認する。 |
+| simplify-result-layout | AC-004 | 未検証 | タスク3.6: 対象環境で結果親・対象のシンボリックリンク拒否と管理外ファイルの不変を確認する。 |
+| simplify-result-layout | AC-005 | 未検証 | タスク3.6: 対象環境で準備・学習・検査を全再実行し、新結果の読戻しと管理外ファイルの不変を確認する。 |
+| fix-review-findings | AC-001 | 未検証 | タスク6.3: 対象環境で補正省略・明記時の準備画素と指紋を確認する。 |
+| fix-review-findings | AC-002 | 未検証 | タスク6.3: 対象環境で学習後のcheckpointと最良試行にある擬似異常設定を読み戻す。 |
+| fix-review-findings | AC-003 | 未検証 | タスク6.3: 対象環境で検査結果の公開前・公開途中の失敗と再実行を確認する。 |
+| fix-review-findings | AC-004 | 未検証 | タスク6.3: 旧対象環境固有の履歴移動確認は現行の受け入れ対象外。未検証の履歴として保持する。 |
+| fix-review-findings | AC-005 | 未検証 | タスク6.3: 対象環境で5コマンド開始時に全グループの対象一時領域が消えることを確認する。 |
+| fix-review-findings | AC-007 | 未検証 | タスク6.3: 対象環境で成果物・閾値の混在時に検査結果が公開されないことを確認する。 |
+| drop-windows-support | AC-001 | 未検証 | タスク3.2: Ubuntu 24.04 LTS (ネイティブまたは WSL2) で固定済み依存関係を同期し、既存の自動試験と品質検査を実行して環境・版・結果を記録する。 |
+| drop-windows-support | AC-002 | 未検証 | タスク3.3: 両対象環境で実画像を使って5 CLIを全再実行し、CPU と利用可能な CUDA GPU、GPU 無効化、成果物読戻しと実行記録を確認する。 |
+| drop-windows-support | AC-003 | 未検証 | タスク3.3: 両対象環境の CLI で基準画像名と成果物名の通常値、POSIX 絶対パス、区切り文字、親参照の扱いと成果物不変を確認する。 |
 
 `show-test-progress-and-update-backbone` のAC-003にある`racm_in1k`確認は当時の未検証事項であり、現在の運用には適用しない。<br />
 現在の学習は`wide_resnet50_2.tv_in1k`とグループ別の新形式設定から開始する。<br />
 上表は対象環境で未検証の受け入れ確認を追跡する。<br />
+旧対象環境に固有の確認は未検証の履歴として残し、現行の受け入れ対象には含めない。<br />
 破壊的変更後は準備・学習・検査をすべて再実行する。
 
 `comparable-heatmap-scale` の実機確認時は、[アーカイブ済みchangeの検証記録](openspec/changes/archive/2026-10-08-comparable-heatmap-scale/verification.md)にモデル確認方法、使用範囲、結果画像・JSON、実行コマンド、環境、日付、制約を追記する。<br />
@@ -362,5 +369,5 @@ AC-001〜AC-004 は未検証であり、自動試験の成功やアーカイブ�
 タスク4.3〜4.5の実行時は各条件で別の出力先を使い、OS・Python・依存版、GPU無効化方法、5 CLIの結果、成果物の読戻し、実測デバイスを change 内の `evidence/acceptance.md` へ記録する。<br />
 現時点では実機確認と運用受け入れは完了していない。
 
-`fix-anomalib-training-checkpoint` のタスク3.1〜3.4では、Ubuntu 24.04 LTSで学習から検査まで実行し、条件・結果を[アーカイブ済みchangeの検証記録](openspec/changes/archive/2026-10-07-fix-anomalib-training-checkpoint/evidence/acceptance.md)へ記録する。<br />
-自動試験は成功しているが、対象OSでの一連の実行結果は未検証であり、運用開始の承認を意味しない。
+`fix-anomalib-training-checkpoint` のタスク3.1〜3.4では、対象環境で学習から検査まで実行し、条件・結果を[アーカイブ済みchangeの検証記録](openspec/changes/archive/2026-10-07-fix-anomalib-training-checkpoint/evidence/acceptance.md)へ記録する。<br />
+自動試験は成功しているが、対象環境での一連の実行結果は未検証であり、運用開始の承認を意味しない。

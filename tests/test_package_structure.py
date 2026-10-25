@@ -63,8 +63,6 @@ def test_console_script_entry_points() -> None:
         assert scripts[name].value == target
         assert callable(scripts[name].load())
         executable = Path(sys.executable).parent / name
-        if sys.platform == "win32":
-            executable = executable.with_suffix(".exe")
         completed = subprocess.run(  # noqa: S603 - installed environment script
             [str(executable), "--help"],
             capture_output=True,

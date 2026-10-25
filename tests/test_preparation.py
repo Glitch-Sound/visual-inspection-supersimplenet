@@ -122,10 +122,21 @@ def test_group_req_001_s02(tmp_path: Path) -> None:
     assert not paths.check_image("XX").exists()
 
 
-def test_group_req_001_s03(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "base",
+    [
+        "../outside.png",
+        "/outside.png",
+        ".",
+        "..",
+        "nested/base.png",
+        r"nested\base.png",
+    ],
+)
+def test_group_req_001_s03(tmp_path: Path, base: str) -> None:
     _, paths = build_project(tmp_path)
     payload = json.loads(paths.model_config("XX").read_text())
-    payload["base"] = "../outside.png"
+    payload["base"] = base
     paths.model_config("XX").write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="base"):
         load_config(tmp_path, "XX")
