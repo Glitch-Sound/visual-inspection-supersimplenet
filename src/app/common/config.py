@@ -648,7 +648,7 @@ def validate_blacklist_images(config: AppConfig, available_images: set[str]) -> 
 
 
 def preparation_fingerprint(
-    config: AppConfig, *, group: GroupConfig | None = None
+    config: AppConfig, *, group: GroupConfig | None = None, testing: bool = False
 ) -> str:
     """Hash only settings that determine prepared image pixels and membership."""
     part = config.part
@@ -664,7 +664,8 @@ def preparation_fingerprint(
         brightness.model_dump() if brightness.enabled else {"enabled": False}
     )
     if group is not None:
-        payload["blacklist"] = [item.model_dump() for item in part.blacklist]
+        if not testing:
+            payload["blacklist"] = [item.model_dump() for item in part.blacklist]
         payload["group"] = group.id
         payload["range_ids"] = group.range_ids
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

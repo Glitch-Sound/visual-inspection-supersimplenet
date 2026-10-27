@@ -279,7 +279,28 @@ def prepare_testing(
     *,
     aligner: Callable[..., AlignedImage] = align_orb,
     on_progress: ProgressCallback | None = None,
-) -> PreparationManifest:
+    group: int | None = None,
+    _alignment_cache: dict[str, AlignedImage | AlignmentError] | None = None,
+) -> dict[int, PreparationManifest]:
+    if group is None:
+        manifests: dict[int, PreparationManifest] = {}
+        alignment_cache: dict[str, AlignedImage | AlignmentError] = {}
+        for selected in config.part.select_groups():
+            try:
+                manifests.update(
+                    prepare_testing(
+                        config,
+                        paths,
+                        aligner=aligner,
+                        on_progress=on_progress,
+                        group=selected.id,
+                        _alignment_cache=alignment_cache,
+                    )
+                )
+            except Exception as error:
+                raise type(error)(f"group {selected.id} failed: {error}") from error
+        return manifests
+    selected = config.part.select_groups(group)[0]
     source_dir = paths.original_test(config.model)
     images = list_images(source_dir)
     if on_progress is not None:
@@ -289,14 +310,27 @@ def prepare_testing(
         config.image_resize,
     )
     manifest: PreparationManifest | None = None
+    if _alignment_cache is None:
+        _alignment_cache = {}
 
     def populate(stage: Path) -> None:
         nonlocal manifest
         sources: list[PreparedSource] = []
         for source_path in images:
-            source = resize_image(read_image(source_path), config.image_resize)
             try:
-                aligned = aligner(source, reference, config.part.alignment)
+                if source_path.name in _alignment_cache:
+                    cached = _alignment_cache[source_path.name]
+                    if isinstance(cached, AlignmentError):
+                        raise cached
+                    aligned = cached
+                else:
+                    source = resize_image(read_image(source_path), config.image_resize)
+                    try:
+                        aligned = aligner(source, reference, config.part.alignment)
+                    except AlignmentError as error:
+                        _alignment_cache[source_path.name] = error
+                        raise
+                    _alignment_cache[source_path.name] = aligned
             except AlignmentError as error:
                 sources.append(
                     PreparedSource(
@@ -314,7 +348,7 @@ def prepare_testing(
                     on_progress(len(sources), len(images))
                 continue
             splits: list[PreparedSplit] = []
-            for crop in config.part.ranges:
+            for crop in config.part.ranges_for(selected):
                 split = _prepared_crop(
                     aligned.image,
                     crop,
@@ -347,13 +381,17 @@ def prepare_testing(
                 on_progress(len(sources), len(images))
         manifest = PreparationManifest(
             model=config.model,
-            preparation_fingerprint=preparation_fingerprint(config),
+            group=selected.id,
+            range_ids=selected.range_ids,
+            preparation_fingerprint=preparation_fingerprint(
+                config, group=selected, testing=True
+            ),
             created_at=datetime.now(UTC),
             sources=sources,
         )
         manifest.write_json(stage / "manifest.json")
 
-    replace_directory(paths.prepared_test(config.model), populate)
+    replace_directory(paths.prepared_test(config.model, selected.id), populate)
     if manifest is None:  # pragma: no cover
         raise RuntimeError("testing manifest was not created")
-    return manifest
+    return {selected.id: manifest}

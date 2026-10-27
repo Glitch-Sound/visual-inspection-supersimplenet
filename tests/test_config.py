@@ -779,11 +779,11 @@ def test_brightness_defaults(tmp_path: Path) -> None:
     }
     _brightness_images(paths)
     assert prepare_training(config, paths, aligner=_aligned)[0].sources
-    assert prepare_testing(config, paths, aligner=_aligned).sources
+    assert prepare_testing(config, paths, aligner=_aligned)[0].sources
     from app.common.image_io import read_image
 
     assert read_image(paths.prepared_train("XX", 0) / "a_00.png")[0, 0, 0] == 40
-    assert read_image(paths.prepared_test("XX") / "sample_00.png")[0, 0, 0] == 40
+    assert read_image(paths.prepared_test("XX", 0) / "sample_00.png")[0, 0, 0] == 40
     disabled_fingerprint = preparation_fingerprint(config, group=config.part.groups[0])
     path, payload = _payload(tmp_path)
     payload["brightness_normalization"] = {"statistic": "mean"}
@@ -798,9 +798,9 @@ def test_brightness_defaults(tmp_path: Path) -> None:
         disabled_fingerprint
     )
     assert prepare_training(updated, paths, aligner=_aligned)[0].sources
-    assert prepare_testing(updated, paths, aligner=_aligned).sources
+    assert prepare_testing(updated, paths, aligner=_aligned)[0].sources
     assert read_image(paths.prepared_train("XX", 0) / "a_00.png")[0, 0, 0] == 80
-    assert read_image(paths.prepared_test("XX") / "sample_00.png")[0, 0, 0] == 80
+    assert read_image(paths.prepared_test("XX", 0) / "sample_00.png")[0, 0, 0] == 80
 
 
 @pytest.mark.parametrize(
@@ -834,7 +834,7 @@ def test_brightness_rejects_invalid_settings(
     path, payload = _payload(tmp_path)
     payload["brightness_normalization"] = {field: value}
     _save(path, payload)
-    target = paths.prepared_test("XX")
+    target = paths.prepared_test("XX", 0)
     target.mkdir(parents=True)
     marker = target / "old.txt"
     marker.write_text("preserved")
@@ -876,15 +876,18 @@ def test_brightness_training_fingerprint(tmp_path: Path) -> None:
 def test_brightness_testing_fingerprint(tmp_path: Path) -> None:
     config, paths = build_project(tmp_path)
     _brightness_images(paths)
-    manifest = prepare_testing(config, paths, aligner=_aligned)
-    assert manifest.preparation_fingerprint == preparation_fingerprint(config)
+    manifest = prepare_testing(config, paths, aligner=_aligned)[0]
+    assert manifest.preparation_fingerprint == preparation_fingerprint(
+        config, group=config.part.select_groups(0)[0], testing=True
+    )
     path, payload = _payload(tmp_path)
     payload["blacklist"] = [{"image": "a.png", "id": [0]}]
     payload["group_detail"]["0"]["augmentation"]["seed"] = 99
     _save(path, payload)
-    assert preparation_fingerprint(load_config(tmp_path, "XX")) == (
-        manifest.preparation_fingerprint
-    )
+    changed_config = load_config(tmp_path, "XX")
+    assert preparation_fingerprint(
+        changed_config, group=changed_config.part.select_groups(0)[0], testing=True
+    ) == (manifest.preparation_fingerprint)
 
 
 @pytest.mark.parametrize(
@@ -908,7 +911,7 @@ def test_brightness_changes_invalidate_preparation(
     config = load_config(tmp_path, "XX")
     _brightness_images(paths)
     train_manifest = prepare_training(config, paths, group=0, aligner=_aligned)[0]
-    test_manifest = prepare_testing(config, paths, aligner=_aligned)
+    test_manifest = prepare_testing(config, paths, aligner=_aligned)[0]
     payload["brightness_normalization"] = {field: value}
     _save(path, payload)
     changed = load_config(tmp_path, "XX")
@@ -921,9 +924,11 @@ def test_brightness_changes_invalidate_preparation(
         ),
         (
             test_manifest.preparation_fingerprint,
-            preparation_fingerprint(changed),
-            paths.prepared_test("XX"),
-            None,
+            preparation_fingerprint(
+                changed, group=changed.part.select_groups(0)[0], testing=True
+            ),
+            paths.prepared_test("XX", 0),
+            0,
         ),
     ):
         assert new != old

@@ -159,7 +159,7 @@ def test_nreq_002_s01(
         "check": lambda: preparation_cli._check_command(model="XX"),
         "train-pre": lambda: preparation_cli._train_pre_command(model="XX", group=None),
         "train": lambda: training_cli._train_command(model="XX", group=0),
-        "test-pre": lambda: preparation_cli._test_pre_command(model="XX"),
+        "test-pre": lambda: preparation_cli._test_pre_command(model="XX", group=None),
         "test": lambda: evaluation_cli._test_command(model="XX", group=0),
     }
     capsys.readouterr()

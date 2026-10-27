@@ -31,7 +31,7 @@ def run_command(
     root: Path, command: str, model: str, group: int | None = None
 ) -> dict[str, Any]:
     arguments = [command, "--model", model]
-    if group is not None and command in {"train-pre", "train", "test"}:
+    if group is not None and command in {"train-pre", "train", "test-pre", "test"}:
         arguments.extend(["--group", str(group)])
     completed = subprocess.run(  # noqa: S603 - fixed allow-list supplied by main
         arguments,
@@ -106,7 +106,6 @@ def inspect_artifacts(
     groups = config.part.select_groups(group)
     checks: list[tuple[str, Path, Any]] = [
         ("check_image", paths.check_image(model), _read_image),
-        ("test_manifest", paths.prepared_test(model) / "manifest.json", _read_manifest),
     ]
     for selected in config.part.select_groups():
         checks.append(
@@ -119,6 +118,11 @@ def inspect_artifacts(
     for selected in groups:
         checks.extend(
             [
+                (
+                    f"test_manifest_{selected.id}",
+                    paths.prepared_test(model, selected.id) / "manifest.json",
+                    _read_manifest,
+                ),
                 (
                     f"train_manifest_{selected.id}",
                     paths.prepared_train(model, selected.id) / "manifest.json",

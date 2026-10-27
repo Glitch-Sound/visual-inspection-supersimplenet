@@ -129,12 +129,13 @@ uv run --locked test --model XX
 
 `check`は全分割と各グループの確認画像を作る。<br />
 `train-pre`と`train`は省略時に全グループをID昇順で処理する。<br />
-`test-pre`は常に全分割を一度準備し、`test`は省略時に全グループを検査する。<br />
+`test-pre`と`test`は省略時に全グループを処理する。<br />
 単独グループを操作する場合は次のように指定する。
 
 ```bash
 uv run --locked train-pre --model XX --group 1
 uv run --locked train --model XX --group 1
+uv run --locked test-pre --model XX --group 1
 uv run --locked test --model XX --group 1
 ```
 
@@ -164,7 +165,7 @@ uv run --locked test --model XX --group 1
 | --- | --- |
 | 全分割と各グループの確認画像 | `data/03_check/<model>/all.png`、`group_<2桁以上のID>.png` |
 | グループ別学習準備 | `data/04_train/<model>/group_<2桁以上のID>/` |
-| 全分割の試験準備 | `data/05_test/<model>/` |
+| グループ別試験準備 | `data/05_test/<model>/group_<2桁以上のID>/` |
 | グループ別探索と最良試行 | `optuna/<model>/group_<2桁以上のID>/` |
 | グループ別checkpoint | `weights/<model>/group_<2桁以上のID>.ckpt` |
 | 検査結果画像と元画像・グループ別JSON | `data/06_result/<model>/group_<2桁以上のID>/` |
@@ -284,6 +285,10 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| add-test-pre-group | AC-001 | 未検証 | タスク3.2: 両対象環境の実画像で単独グループの試験準備・検査と他グループ成果物の保持を確認する。 |
+| add-test-pre-group | AC-002 | 未検証 | タスク3.2: 両対象環境の実画像で全グループの試験準備・検査と成果物読戻しを確認する。 |
+| add-test-pre-group | AC-003 | 未検証 | タスク3.2: 両対象環境で未知ID、準備失敗、準備欠落・不整合の拒否と旧成果物保持を確認する。 |
+| add-test-pre-group | AC-004 | 未検証 | タスク3.2: 両対象環境の実画像で `check`、`train-pre`、`train`、`test-pre`、`test` を全再実行し、新形式の成果物を読み戻す。 |
 | polish-review-leftobers | AC-001 | 未検証 | タスク3.2: Ubuntu 24.04 LTS と Apple silicon macOS で、5 CLI が巨大整数の検査閾値を終了コード2で拒否し、旧成果物を保持することを確認する。 |
 | polish-review-leftobers | AC-002 | 未検証 | タスク3.2: 両対象環境で設定・準備・成果物のシンボリックリンクを拒否し、エラーにリンク自体のパスを示してリンク先を保持することを確認する。 |
 | polish-review-leftobers | AC-003 | 未検証 | タスク3.2: 両対象環境で学習の探索中・公開前の失敗後に接続が閉じられ、旧成果物を保持して新規探索を再実行できることを確認する。 |

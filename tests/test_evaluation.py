@@ -208,7 +208,7 @@ def test_group_req_010_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
         for split in splits:
             assert split["score"] == pytest.approx(0.2)
             assert split["status"] == "normal"
-            original = cv2.imread(str(paths.prepared_test("XX") / split["image"]))
+            original = cv2.imread(str(paths.prepared_test("XX", 0) / split["image"]))
             rendered = cv2.imread(str(result.parent / split["result_image"]))
             assert original is not None and rendered is not None
             assert np.array_equal(rendered, original)
@@ -219,7 +219,7 @@ def test_group_req_010_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     _run(monkeypatch, paths, group=1, score=0.8)
     result = paths.results("XX") / _current(paths)[1] / "sample.png.json"
     split = json.loads(result.read_text())["splits"][0]
-    original = cv2.imread(str(paths.prepared_test("XX") / split["image"]))
+    original = cv2.imread(str(paths.prepared_test("XX", 0) / split["image"]))
     rendered = cv2.imread(str(result.parent / split["result_image"]))
     assert original is not None and rendered is not None
     assert split["score"] == pytest.approx(0.8)
@@ -1059,10 +1059,12 @@ def test_per_range_values_change_without_repreparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config, paths = project(tmp_path)
-    prepared = paths.prepared_test("XX") / "manifest.json"
+    prepared = paths.prepared_test("XX", 0) / "manifest.json"
     before_manifest = prepared.read_bytes()
     before_checkpoint = paths.checkpoint("XX", 0).read_bytes()
-    original_fingerprint = evaluation.preparation_fingerprint(config)
+    original_fingerprint = evaluation.preparation_fingerprint(
+        config, group=config.part.select_groups(0)[0], testing=True
+    )
     _run(monkeypatch, paths, score=0.5)
     first = json.loads((paths.result_group("XX", 0) / "sample.png.json").read_text())
     payload = json.loads(paths.model_config("XX").read_text())
@@ -1070,7 +1072,11 @@ def test_per_range_values_change_without_repreparation(
     payload["groups"][0]["ranges"][0]["heatmap_range"] = {"min": -1.0, "max": 2.0}
     paths.model_config("XX").write_text(json.dumps(payload))
     assert (
-        evaluation.preparation_fingerprint(load_config(tmp_path, "XX"))
+        evaluation.preparation_fingerprint(
+            load_config(tmp_path, "XX"),
+            group=load_config(tmp_path, "XX").part.select_groups(0)[0],
+            testing=True,
+        )
         == original_fingerprint
     )
     _run(monkeypatch, paths, score=0.5)

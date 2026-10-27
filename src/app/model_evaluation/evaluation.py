@@ -210,12 +210,13 @@ def evaluate_model(
             on_threshold_selected(
                 item.id, effective_threshold(item, provisional_threshold), source
             )
-    prepared_dir = paths.prepared_test(config.model)
+    prepared_dir = paths.prepared_test(config.model, group.id)
     manifest = load_preparation_manifest(
         prepared_dir,
         model=config.model,
-        allowed_split_ids={item.id for item in config.part.ranges},
-        fingerprint=preparation_fingerprint(config),
+        group=group.id,
+        allowed_split_ids=set(group.range_ids),
+        fingerprint=preparation_fingerprint(config, group=group, testing=True),
     )
     total_sources = len(manifest.sources)
     if on_progress is not None:

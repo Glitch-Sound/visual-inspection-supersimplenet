@@ -89,7 +89,7 @@ def test_req_003_s05(tmp_path: Path) -> None:
     config, paths = build_project(tmp_path)
     _train_images(paths)
     write_test_image(paths.original_test("XX") / "sample.png", size=32)
-    target = paths.prepared_test("XX")
+    target = paths.prepared_test("XX", 0)
     target.mkdir(parents=True)
     (target / "old.txt").write_text("old")
     stale = target.with_name(f".{target.name}-stage-{'b' * 32}")
@@ -284,21 +284,26 @@ def test_group_req_025_s02(tmp_path: Path) -> None:
     config, paths = _two_groups(tmp_path)
     _train_images(paths)
     write_test_image(paths.original_test("XX") / "sample.png", size=32)
-    manifest = prepare_testing(config, paths, aligner=aligned)
+    manifests = prepare_testing(config, paths, aligner=aligned)
     assert {
-        split.split_id for source in manifest.sources for split in source.splits
+        split.split_id
+        for manifest in manifests.values()
+        for source in manifest.sources
+        for split in source.splits
     } == {0, 1}
-    assert manifest.preparation_fingerprint == preparation_fingerprint(config)
+    assert manifests[0].preparation_fingerprint == preparation_fingerprint(
+        config, group=config.part.select_groups(0)[0], testing=True
+    )
 
 
 def test_req_003_s01(tmp_path: Path) -> None:
     config, paths = build_project(tmp_path, blacklist=[{"image": "a.png", "id": [0]}])
     _train_images(paths)
     write_test_image(paths.original_test("XX") / "a.png", size=32)
-    manifest = prepare_testing(config, paths, aligner=aligned)
+    manifest = prepare_testing(config, paths, aligner=aligned)[0]
     assert [source.source_image for source in manifest.sources] == ["a.png"]
     assert [split.image for split in manifest.sources[0].splits] == ["a_00.png"]
-    assert (paths.prepared_test("XX") / "a_00.png").is_file()
+    assert (paths.prepared_test("XX", 0) / "a_00.png").is_file()
 
 
 def test_req_003_s02(
@@ -321,18 +326,18 @@ def test_req_003_s02(
     )
     monkeypatch.chdir(tmp_path)
     capsys.readouterr()
-    preparation_cli._test_pre_command(model="XX")
+    preparation_cli._test_pre_command(model="XX", group=None)
     captured = capsys.readouterr()
     assert "recapture is required" in captured.err
     assert json.loads(captured.out)["exit_code"] == 0
-    saved = json.loads((paths.prepared_test("XX") / "manifest.json").read_text())
+    saved = json.loads((paths.prepared_test("XX", 0) / "manifest.json").read_text())
     source = saved["sources"][0]
     assert source["alignment"]["recapture_required"] is True
     assert source["source_image"] == "sample.png"
     assert source["alignment"]["status"] == "undetermined"
     assert source["alignment"]["reason"] == "too few matches"
     assert source["splits"] == []
-    assert not (paths.prepared_test("XX") / "sample_00.png").exists()
+    assert not (paths.prepared_test("XX", 0) / "sample_00.png").exists()
 
 
 def test_req_003_s03(tmp_path: Path) -> None:
@@ -341,7 +346,7 @@ def test_req_003_s03(tmp_path: Path) -> None:
     write_test_image(paths.original_test("XX") / "sample.png", size=32)
     with pytest.raises(PreparationError, match="sample.png.*0"):
         prepare_testing(config, paths, aligner=aligned)
-    assert not paths.prepared_test("XX").exists()
+    assert not paths.prepared_test("XX", 0).exists()
 
 
 def test_req_003_s04(tmp_path: Path) -> None:
@@ -349,7 +354,7 @@ def test_req_003_s04(tmp_path: Path) -> None:
     _train_images(paths)
     write_test_image(paths.original_test("XX") / "sample.png", size=32)
     prepare_testing(config, paths, aligner=aligned)
-    prepared = paths.prepared_test("XX")
+    prepared = paths.prepared_test("XX", 0)
     before = {path.name: path.read_bytes() for path in prepared.iterdir()}
     (paths.original_test("XX") / "sample.png").write_bytes(b"bad image")
     with pytest.raises(ImageReadError, match="sample.png"):
@@ -392,7 +397,7 @@ def test_req_017_s01(
         total = 3
         summary = "学習準備完了"
     else:
-        preparation_cli._test_pre_command(model="XX")
+        preparation_cli._test_pre_command(model="XX", group=None)
         total = 2
         summary = "試験準備完了"
     captured = capsys.readouterr()
@@ -442,7 +447,7 @@ def test_req_017_s02(
         if command == "train-pre":
             preparation_cli._train_pre_command(model="XX", group=None)
         else:
-            preparation_cli._test_pre_command(model="XX")
+            preparation_cli._test_pre_command(model="XX", group=None)
     captured = capsys.readouterr()
     stderr = captured.err
     assert error.value.exit_code == 3
@@ -502,7 +507,7 @@ def test_brightness_normalizes_train_and_test_splits(
     prepare_testing(config, paths, aligner=aligned)
     for path in (
         paths.prepared_train("XX", 0) / "a_00.png",
-        paths.prepared_test("XX") / "sample_00.png",
+        paths.prepared_test("XX", 0) / "sample_00.png",
     ):
         assert np.all(cv2.imread(str(path)) == expected)
     assert all(path.read_bytes() == content for path, content in before.items())
@@ -561,7 +566,7 @@ def test_brightness_skips_unavailable_statistics(
     prepare_testing(config, paths, aligner=aligned)
     for directory, stem in (
         (paths.prepared_train("XX", 0), "a"),
-        (paths.prepared_test("XX"), "sample"),
+        (paths.prepared_test("XX", 0), "sample"),
     ):
         assert np.array_equal(_read_bgr(directory / f"{stem}_00.png"), source[:4, :4])
         assert np.all(cv2.imread(str(directory / f"{stem}_01.png")) == 100)
@@ -582,6 +587,6 @@ def test_brightness_disabled_preserves_splits(tmp_path: Path) -> None:
     prepare_testing(config, paths, aligner=aligned)
     for path in (
         paths.prepared_train("XX", 0) / "a_00.png",
-        paths.prepared_test("XX") / "sample_00.png",
+        paths.prepared_test("XX", 0) / "sample_00.png",
     ):
         assert np.array_equal(_read_bgr(path), source[:4, :4])

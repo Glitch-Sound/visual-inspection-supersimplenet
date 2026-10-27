@@ -71,12 +71,20 @@ def _test_command(
         config = load_config(paths.root, model)
         groups = config.part.select_groups(group)
         recorder.groups = [item.id for item in groups]
-        manifest = load_preparation_manifest(
-            paths.prepared_test(model),
-            model=config.model,
-            allowed_split_ids={item.id for item in config.part.ranges},
-            fingerprint=preparation_fingerprint(config),
-        )
+        manifests = {}
+        for selected in groups:
+            try:
+                manifests[selected.id] = load_preparation_manifest(
+                    paths.prepared_test(model, selected.id),
+                    model=config.model,
+                    group=selected.id,
+                    allowed_split_ids=set(selected.range_ids),
+                    fingerprint=preparation_fingerprint(
+                        config, group=selected, testing=True
+                    ),
+                )
+            except (ValueError, FileNotFoundError) as error:
+                raise ValueError(f"group {selected.id} failed: {error}") from error
         stage = create_result_stage(paths, model)
         all_results = []
         try:
@@ -89,7 +97,8 @@ def _test_command(
                 configured_ids=configured_ids if group is None else None,
             )
             with EvaluationProgress() as progress:
-                progress.update(0, len(manifest.sources))
+                source_count = len(manifests[groups[-1].id].sources)
+                progress.update(0, source_count)
                 for selected in groups:
                     try:
                         best = BestTrialResult.read_json(
@@ -180,8 +189,8 @@ def _test_command(
                     remove_unconfigured_groups(
                         paths, model, configured_ids=configured_ids
                     )
-                if manifest.sources:
-                    progress.update(len(manifest.sources), len(manifest.sources))
+                if source_count:
+                    progress.update(source_count, source_count)
         finally:
             remove_result_stage(stage)
         counts = {

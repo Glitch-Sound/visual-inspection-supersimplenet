@@ -89,11 +89,16 @@ class ProjectPaths:
         ensure_no_symlink_components(self.root, target)
         return ensure_within(model_dir, target)
 
-    def prepared_test(self, model: str) -> Path:
+    def prepared_test(self, model: str, group: int | None = None) -> Path:
         ensure_no_symlink_components(
             self.root, self.root / "data/05_test" / validate_model_name(model)
         )
-        return self._model_dir("data/05_test", model)
+        model_dir = self._model_dir("data/05_test", model)
+        if group is None:
+            return model_dir
+        target = model_dir / self.group_name(group)
+        ensure_no_symlink_components(self.root, target)
+        return ensure_within(model_dir, target)
 
     def results(self, model: str) -> Path:
         candidate = self.root / "data/06_result" / validate_model_name(model)

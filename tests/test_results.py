@@ -188,7 +188,7 @@ def test_group_req_012_s03(tmp_path: Path) -> None:
 
 def test_group_req_012_s04(tmp_path: Path) -> None:
     config, paths = project(tmp_path)
-    prepared = paths.prepared_test("XX")
+    prepared = paths.prepared_test("XX", 0)
     image = prepared / "sample_00.png"
     image.unlink()
     image.symlink_to(paths.original_test("XX") / "sample.png")
@@ -197,7 +197,10 @@ def test_group_req_012_s04(tmp_path: Path) -> None:
             prepared,
             model="XX",
             allowed_split_ids={0, 1},
-            fingerprint=preparation_fingerprint(config),
+            group=0,
+            fingerprint=preparation_fingerprint(
+                config, group=config.part.select_groups(0)[0], testing=True
+            ),
         )
 
 

@@ -44,6 +44,7 @@ def _clear_model_stages(paths: ProjectPaths, model: str) -> None:
         (paths.root / "data/04_train", rf"\.{re.escape(model)}-stage-{_RUN_ID}", True),
         (paths.root / "data/05_test", rf"\.{re.escape(model)}-stage-{_RUN_ID}", True),
         (paths.root / "data/04_train" / model, rf"\.{_GROUP}-stage-{_RUN_ID}", True),
+        (paths.root / "data/05_test" / model, rf"\.{_GROUP}-stage-{_RUN_ID}", True),
         (paths.root / "optuna" / model, rf"\.{_GROUP}-stage-{_RUN_ID}", True),
         (paths.root / "weights" / model, rf"\.{_GROUP}\.ckpt-stage-{_RUN_ID}", False),
         (paths.root / "data/06_result" / model, rf"\.stage-{_RUN_ID}", True),

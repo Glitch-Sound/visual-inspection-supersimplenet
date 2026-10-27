@@ -8,9 +8,11 @@ import typer
 
 from app.common.cli import PreparationProgress, _run, show_stage
 from app.common.config import load_config
+from app.common.image_io import ImageReadError
 from app.common.paths import ProjectPaths
 from app.common.runtime import RunRecorder
 from app.image_preparation.preparation import (
+    PreparationError,
     alignment_warning,
     create_check_image,
     prepare_testing,
@@ -84,31 +86,46 @@ def _train_pre_command(
 
 def _test_pre_command(
     model: str = typer.Option(..., "--model", help="処理対象の型番"),
+    group: int | None = typer.Option(None, "--group", help="処理対象のグループID"),
 ) -> None:
     """試験画像を位置合わせして分割する。"""
 
     def action(paths: ProjectPaths, recorder: RunRecorder) -> str:
         show_stage("設定読込と試験元画像の列挙・位置合わせ・切り出し")
         config = load_config(paths.root, model)
-        recorder.groups = [item.id for item in config.part.select_groups()]
         with PreparationProgress() as progress:
-            manifest = prepare_testing(config, paths, on_progress=progress.update)
+            try:
+                manifests = prepare_testing(
+                    config, paths, group=group, on_progress=progress.update
+                )
+            except (ImageReadError, PreparationError) as error:
+                if group is None:
+                    raise
+                raise type(error)(f"group {group} failed: {error}") from error
+        recorder.groups = sorted(manifests)
         recorder.warnings.extend(
             alignment_warning(
                 source.source_image,
                 source.alignment.reason or "alignment_failed",
                 testing=True,
             )
+            for manifest in manifests.values()
             for source in manifest.sources
             if source.alignment.status != "aligned"
         )
-        prepared = sum(bool(source.splits) for source in manifest.sources)
-        undetermined = sum(
-            source.alignment.status != "aligned" for source in manifest.sources
+        prepared = sum(
+            bool(source.splits)
+            for manifest in manifests.values()
+            for source in manifest.sources
         )
-        target = paths.prepared_test(model)
+        undetermined = sum(
+            source.alignment.status != "aligned"
+            for manifest in manifests.values()
+            for source in manifest.sources
+        )
+        target = paths.prepared_test(model, group)
         show_stage(
-            f"試験準備完了: 対象={len(manifest.sources)} 準備={prepared} "
+            f"試験準備完了: 対象={sum(len(item.sources) for item in manifests.values())} 準備={prepared} "
             f"未判定={undetermined} 保存先={target}"
         )
         return str(target)

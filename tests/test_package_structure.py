@@ -73,5 +73,5 @@ def test_console_script_entry_points() -> None:
         assert "--model" in completed.stdout
         assert "--restart" not in completed.stdout
         assert ("--group" in completed.stdout) == (
-            name in {"train-pre", "train", "test"}
+            name in {"train-pre", "train", "test-pre", "test"}
         )
