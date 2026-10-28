@@ -11,6 +11,7 @@ from conftest import build_project, write_test_image
 
 from app.common.config import (
     BrightnessNormalizationSettings,
+    CropRange,
     load_config,
     preparation_fingerprint,
 )
@@ -20,6 +21,7 @@ from app.image_preparation.imaging import (
     AlignedImage,
     AlignmentError,
     brightness_statistic,
+    draw_ranges,
     normalize_brightness,
 )
 from app.image_preparation.preparation import (
@@ -177,6 +179,193 @@ def test_group_req_001_s05(tmp_path: Path) -> None:
     )
 
 
+def test_change_req_001_s06() -> None:
+    image = np.full((720, 720, 3), 120, dtype=np.uint8)
+    first = CropRange(id=0, x=20, y=20)
+    second = CropRange(id=1, x=220, y=20)
+    all_ranges = draw_ranges(image, [first, second], 400)
+    group_range = draw_ranges(image, [first], 400)
+    assert np.array_equal(image, np.full_like(image, 120))
+    assert tuple(all_ranges[100, 20]) == tuple(group_range[100, 20])
+    assert tuple(all_ranges[100, 20]) != tuple(all_ranges[100, 220])
+    assert (
+        np.count_nonzero(np.any(all_ranges[100, 18:23] != image[100, 18:23], axis=1))
+        >= 4
+    )
+    assert np.array_equal(all_ranges[25:70, 25:120], group_range[25:70, 25:120])
+    label_pixels = all_ranges[25:70, 25:120]
+    assert np.any(np.all(label_pixels == 0, axis=2))
+    assert np.any(np.all(label_pixels == 255, axis=2))
+
+
+def _set_alignment(paths, value: dict[str, object]) -> None:
+    path = paths.model_config("XX")
+    payload = json.loads(path.read_text())
+    payload["alignment"] = value
+    path.write_text(json.dumps(payload))
+
+
+def test_change_req_042_s01(tmp_path: Path) -> None:
+    _, paths = build_project(tmp_path)
+    _set_alignment(paths, {"orb": {"minimum_matches": 4}})
+    config = load_config(tmp_path, "XX")
+    assert config.part.alignment.method == "ORB"
+    assert config.part.alignment.orb is not None
+    assert config.part.alignment.orb.minimum_matches == 4
+
+
+def test_change_req_042_s02(tmp_path: Path) -> None:
+    _, paths = build_project(tmp_path)
+    fingerprints = []
+    settings: tuple[dict[str, object], ...] = (
+        {"method": "ORB", "orb": {}},
+        {"method": "ECC", "ecc": {"min_correlation": 0.75}},
+        {"method": "NONE"},
+    )
+    for setting in settings:
+        _set_alignment(paths, setting)
+        config = load_config(tmp_path, "XX")
+        assert config.part.alignment.method == setting["method"]
+        fingerprints.append(
+            preparation_fingerprint(config, group=config.part.groups[0])
+        )
+    assert len(set(fingerprints)) == 3
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        {"method": "UNKNOWN"},
+        {"method": "NONE", "orb": {}},
+        {"method": "ORB", "ecc": {"min_correlation": 0.5}},
+        {"method": "ECC", "ecc": {"min_correlation": True}},
+        {"method": "ECC", "ecc": {"min_correlation": 0.0}},
+        {"method": "ECC", "ecc": {"min_correlation": 0.5, "max_rotation_degrees": 11}},
+        {"method": "ORB", "knn_k": 2},
+    ],
+)
+def test_change_req_042_s03(tmp_path: Path, setting: dict[str, object]) -> None:
+    _, paths = build_project(tmp_path)
+    _set_alignment(paths, setting)
+    target = paths.check_image("XX")
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"old")
+    with pytest.raises(ValueError, match="alignment|method|knn_k"):
+        load_config(tmp_path, "XX")
+    assert target.read_bytes() == b"old"
+
+
+def test_change_req_002_s11(tmp_path: Path) -> None:
+    _, paths = build_project(tmp_path)
+    _set_alignment(paths, {"method": "NONE"})
+    config = load_config(tmp_path, "XX")
+    source = write_test_image(paths.original_train("XX") / "base.png", size=32)
+    write_test_image(paths.original_train("XX") / "a.png", size=32)
+    manifest = prepare_training(config, paths)[0]
+    saved = cv2.imread(str(paths.prepared_train("XX", 0) / "base_00.png"))
+    assert saved is not None
+    assert np.array_equal(saved, source[:8, :8])
+    assert all(item.alignment.method == "NONE" for item in manifest.sources)
+    assert all(item.alignment.status == "skipped" for item in manifest.sources)
+    assert manifest.excluded == []
+
+
+def test_change_req_002_s12(tmp_path: Path) -> None:
+    _, paths = build_project(
+        tmp_path, image_size=64, ranges=[{"id": 0, "x": 64, "y": 64}]
+    )
+    _set_alignment(paths, {"method": "ECC", "ecc": {"min_correlation": 0.8}})
+    config = load_config(tmp_path, "XX")
+    rng = np.random.default_rng(4)
+    reference = cv2.GaussianBlur(
+        rng.integers(0, 256, (256, 256, 3), dtype=np.uint8), (5, 5), 0
+    )
+    matrix = cv2.getRotationMatrix2D((128, 128), 10, 1.1)
+    matrix[:, 2] += (20, -20)
+    source = cv2.warpAffine(reference, cv2.invertAffineTransform(matrix), (256, 256))
+    paths.original_train("XX").mkdir(parents=True, exist_ok=True)
+    assert cv2.imwrite(str(paths.original_train("XX") / "base.png"), reference)
+    assert cv2.imwrite(str(paths.original_train("XX") / "a.png"), source)
+    manifest = prepare_training(config, paths)[0]
+    prepared = next(item for item in manifest.sources if item.source_image == "a.png")
+    assert prepared.alignment.status == "aligned"
+    assert prepared.alignment.method == "ECC"
+    assert prepared.alignment.correlation is not None
+    assert prepared.alignment.correlation >= 0.8
+    saved = cv2.imread(str(paths.prepared_train("XX", 0) / "a_00.png"))
+    assert saved is not None
+    assert np.mean(np.abs(saved.astype(float) - reference[64:128, 64:128])) < 20
+
+    blank = np.full_like(source, 128)
+    assert cv2.imwrite(str(paths.original_train("XX") / "a.png"), blank)
+    failed = prepare_training(config, paths)[0]
+    excluded = next(item for item in failed.sources if item.source_image == "a.png")
+    assert excluded.alignment.status == "failed"
+    assert excluded.alignment.reason == "insufficient_texture"
+
+    excessive = cv2.getRotationMatrix2D((128, 128), 12, 1.2)
+    excessive[:, 2] += (35, 0)
+    assert cv2.imwrite(
+        str(paths.original_train("XX") / "a.png"),
+        cv2.warpAffine(reference, cv2.invertAffineTransform(excessive), (256, 256)),
+    )
+    rejected = prepare_training(config, paths)[0]
+    out_of_range = next(
+        item for item in rejected.sources if item.source_image == "a.png"
+    )
+    assert out_of_range.alignment.status == "failed"
+    assert out_of_range.alignment.reason == "ecc_out_of_range"
+
+
+def test_change_req_003_s08(tmp_path: Path) -> None:
+    _, paths = build_project(tmp_path)
+    _set_alignment(paths, {"method": "NONE"})
+    config = load_config(tmp_path, "XX")
+    write_test_image(paths.original_train("XX") / "base.png", size=32)
+    source = write_test_image(paths.original_test("XX") / "sample.png", size=32)
+    manifest = prepare_testing(config, paths)[0]
+    saved = cv2.imread(str(paths.prepared_test("XX", 0) / "sample_00.png"))
+    assert saved is not None
+    assert np.array_equal(saved, source[:8, :8])
+    assert manifest.sources[0].alignment.status == "skipped"
+    assert manifest.sources[0].alignment.recapture_required is False
+
+
+def test_change_req_003_s09(tmp_path: Path) -> None:
+    _, paths = build_project(tmp_path)
+    _set_alignment(paths, {"method": "ECC", "ecc": {"min_correlation": 0.8}})
+    config = load_config(tmp_path, "XX")
+    write_test_image(paths.original_train("XX") / "base.png", size=32)
+    paths.original_test("XX").mkdir(parents=True, exist_ok=True)
+    assert cv2.imwrite(
+        str(paths.original_test("XX") / "sample.png"),
+        np.full((32, 32, 3), 128, dtype=np.uint8),
+    )
+    manifest = prepare_testing(config, paths)[0]
+    result = manifest.sources[0].alignment
+    assert result.method == "ECC"
+    assert result.status == "undetermined"
+    assert result.reason == "insufficient_texture"
+    assert result.recapture_required
+    assert manifest.sources[0].splits == []
+
+
+def test_change_req_025_s05(tmp_path: Path) -> None:
+    config, paths = build_project(tmp_path)
+    _train_images(paths)
+    prepare_training(config, paths, group=0, aligner=aligned)
+    _set_alignment(paths, {"method": "NONE"})
+    changed = load_config(tmp_path, "XX")
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        load_preparation_manifest(
+            paths.prepared_train("XX", 0),
+            model="XX",
+            group=0,
+            allowed_split_ids={0},
+            fingerprint=preparation_fingerprint(changed, group=changed.part.groups[0]),
+        )
+
+
 def test_group_req_002_s01(tmp_path: Path) -> None:
     config, paths = _two_groups(tmp_path)
     _train_images(paths)
@@ -231,7 +420,7 @@ def test_group_req_002_s05(tmp_path: Path) -> None:
 def test_group_req_002_s06(tmp_path: Path) -> None:
     _, paths = build_project(tmp_path)
     payload = json.loads(paths.model_config("XX").read_text())
-    payload["alignment"]["knn_k"] = 3
+    payload["alignment"]["orb"]["knn_k"] = 3
     paths.model_config("XX").write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="knn_k"):
         load_config(tmp_path, "XX")

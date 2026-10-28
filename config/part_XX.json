@@ -10,12 +10,14 @@
     "blacklist": [],
     "alignment": {
         "method": "ORB",
-        "knn_k": 2,
-        "ratio_threshold": 0.75,
-        "minimum_matches": 10,
-        "ransac_reprojection_threshold_px": 8.0,
-        "ransac_confidence": 0.95,
-        "minimum_inlier_ratio": 0.2
+        "orb": {
+            "knn_k": 2,
+            "ratio_threshold": 0.75,
+            "minimum_matches": 10,
+            "ransac_reprojection_threshold_px": 8.0,
+            "ransac_confidence": 0.95,
+            "minimum_inlier_ratio": 0.2
+        }
     },
     "groups": [
         {
@@ -123,8 +125,8 @@
             },
             "synthetic_anomaly": {
                 "noise_std": {
-                    "min": 0.010,
-                    "max": 0.020
+                    "min": 0.01,
+                    "max": 0.02
                 },
                 "perlin_threshold": {
                     "min": 0.2,

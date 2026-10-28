@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from app.common.config import AlignmentSettings
+from app.common.config import OrbAlignmentSettings
 from app.image_preparation.imaging import AlignmentError, align_orb
 
 
@@ -30,7 +30,7 @@ def test_align_orb_uses_configured_ransac_contract(
         return np.eye(3, dtype=np.float64), np.ones((len(source), 1), dtype=np.uint8)
 
     monkeypatch.setattr(cv2, "findHomography", find_homography)
-    settings = AlignmentSettings(
+    settings = OrbAlignmentSettings(
         minimum_matches=4,
         ransac_reprojection_threshold_px=2.5,
         ransac_confidence=0.9,
@@ -39,6 +39,7 @@ def test_align_orb_uses_configured_ransac_contract(
 
     result = align_orb(reference.copy(), reference, settings)
 
+    assert result.matches is not None
     assert result.matches >= settings.minimum_matches
     assert result.inlier_ratio == 1.0
     assert captured == {"threshold": 2.5, "confidence": 0.9}
@@ -81,13 +82,13 @@ def test_align_orb_filters_knn_candidates(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(cv2, "BFMatcher", matcher_factory)
     monkeypatch.setattr(cv2, "findHomography", find_homography)
-    result = align_orb(reference.copy(), reference, AlignmentSettings())
+    result = align_orb(reference.copy(), reference, OrbAlignmentSettings())
     assert result.matches == 10
     assert captured == {"k": 2, "cross_check": False, "points": 10}
     with pytest.raises(AlignmentError, match="insufficient_matches") as error:
         align_orb(
             reference.copy(),
             reference,
-            AlignmentSettings(minimum_matches=11),
+            OrbAlignmentSettings(minimum_matches=11),
         )
     assert error.value.matches == 10

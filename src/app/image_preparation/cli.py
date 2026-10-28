@@ -111,7 +111,7 @@ def _test_pre_command(
             )
             for manifest in manifests.values()
             for source in manifest.sources
-            if source.alignment.status != "aligned"
+            if source.alignment.status not in {"aligned", "skipped"}
         )
         prepared = sum(
             bool(source.splits)
@@ -119,7 +119,7 @@ def _test_pre_command(
             for source in manifest.sources
         )
         undetermined = sum(
-            source.alignment.status != "aligned"
+            source.alignment.status not in {"aligned", "skipped"}
             for manifest in manifests.values()
             for source in manifest.sources
         )

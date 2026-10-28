@@ -228,7 +228,7 @@ def evaluate_model(
         split_results: list[SplitResult] = []
         errors: list[str] = []
         warnings: list[str] = []
-        if source.alignment.status != "aligned":
+        if source.alignment.status not in {"aligned", "skipped"}:
             warning = source.alignment.reason or "alignment_failed"
             warnings.append(warning)
             record_warning(f"group {group.id} {source.source_image}: {warning}")

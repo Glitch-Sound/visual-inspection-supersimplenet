@@ -24,7 +24,7 @@ from app.common.paths import ProjectPaths
 from app.image_preparation.imaging import (
     AlignedImage,
     AlignmentError,
-    align_orb,
+    align_image,
     crop_image,
     draw_ranges,
     normalize_brightness,
@@ -128,7 +128,7 @@ def prepare_training(
     config: AppConfig,
     paths: ProjectPaths,
     *,
-    aligner: Callable[..., AlignedImage] = align_orb,
+    aligner: Callable[..., AlignedImage] | None = None,
     on_progress: ProgressCallback | None = None,
     group: int | None = None,
     _alignment_cache: dict[str, AlignedImage | AlignmentError] | None = None,
@@ -188,7 +188,9 @@ def prepare_training(
                 else:
                     source = resize_image(read_image(source_path), config.image_resize)
                     try:
-                        aligned = aligner(source, reference, config.part.alignment)
+                        aligned = (aligner or align_image)(
+                            source, reference, config.part.alignment
+                        )
                     except AlignmentError as error:
                         _alignment_cache[source_path.name] = error
                         raise
@@ -199,10 +201,19 @@ def prepare_training(
                         PreparedSource(
                             source_image=source_path.name,
                             alignment=AlignmentResult(
+                                method=config.part.alignment.method,
                                 status="failed",
                                 reason=error.reason,
-                                matches=error.matches,
-                                inlier_ratio=error.inlier_ratio,
+                                matches=(
+                                    error.matches
+                                    if config.part.alignment.method == "ORB"
+                                    else None
+                                ),
+                                inlier_ratio=(
+                                    error.inlier_ratio
+                                    if config.part.alignment.method == "ORB"
+                                    else None
+                                ),
                             ),
                         )
                     )
@@ -245,9 +256,19 @@ def prepare_training(
                     PreparedSource(
                         source_image=source_path.name,
                         alignment=AlignmentResult(
-                            status="aligned",
+                            method=config.part.alignment.method,
+                            status=(
+                                "skipped"
+                                if config.part.alignment.method == "NONE"
+                                else "aligned"
+                            ),
                             matches=aligned.matches,
                             inlier_ratio=aligned.inlier_ratio,
+                            correlation=aligned.correlation,
+                            translation_x=aligned.translation_x,
+                            translation_y=aligned.translation_y,
+                            rotation_degrees=aligned.rotation_degrees,
+                            scale=aligned.scale,
                         ),
                         splits=splits,
                     )
@@ -277,7 +298,7 @@ def prepare_testing(
     config: AppConfig,
     paths: ProjectPaths,
     *,
-    aligner: Callable[..., AlignedImage] = align_orb,
+    aligner: Callable[..., AlignedImage] | None = None,
     on_progress: ProgressCallback | None = None,
     group: int | None = None,
     _alignment_cache: dict[str, AlignedImage | AlignmentError] | None = None,
@@ -326,7 +347,9 @@ def prepare_testing(
                 else:
                     source = resize_image(read_image(source_path), config.image_resize)
                     try:
-                        aligned = aligner(source, reference, config.part.alignment)
+                        aligned = (aligner or align_image)(
+                            source, reference, config.part.alignment
+                        )
                     except AlignmentError as error:
                         _alignment_cache[source_path.name] = error
                         raise
@@ -336,11 +359,20 @@ def prepare_testing(
                     PreparedSource(
                         source_image=source_path.name,
                         alignment=AlignmentResult(
+                            method=config.part.alignment.method,
                             status="undetermined",
                             reason=error.reason,
                             recapture_required=True,
-                            matches=error.matches,
-                            inlier_ratio=error.inlier_ratio,
+                            matches=(
+                                error.matches
+                                if config.part.alignment.method == "ORB"
+                                else None
+                            ),
+                            inlier_ratio=(
+                                error.inlier_ratio
+                                if config.part.alignment.method == "ORB"
+                                else None
+                            ),
                         ),
                     )
                 )
@@ -370,9 +402,19 @@ def prepare_testing(
                 PreparedSource(
                     source_image=source_path.name,
                     alignment=AlignmentResult(
-                        status="aligned",
+                        method=config.part.alignment.method,
+                        status=(
+                            "skipped"
+                            if config.part.alignment.method == "NONE"
+                            else "aligned"
+                        ),
                         matches=aligned.matches,
                         inlier_ratio=aligned.inlier_ratio,
+                        correlation=aligned.correlation,
+                        translation_x=aligned.translation_x,
+                        translation_y=aligned.translation_y,
+                        rotation_degrees=aligned.rotation_degrees,
+                        scale=aligned.scale,
                     ),
                     splits=splits,
                 )

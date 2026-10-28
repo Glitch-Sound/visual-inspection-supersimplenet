@@ -2,7 +2,7 @@
 
 SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデルの学習、外観検査をローカルCLIで実行するプロジェクトである。
 
-大容量の元画像を基準画像へ位置合わせして分割し、正常画像中心のデータから評価用モデルと暫定閾値を生成する。<br />
+大容量の元画像を選択した方法で基準画像に合わせて分割し、正常画像中心のデータから評価用モデルと暫定閾値を生成する。<br />
 検査では分割画像ごとの異常スコアと可視化画像を保存し、元画像・グループ単位の判定へ集約する。
 
 > [!IMPORTANT]
@@ -25,7 +25,10 @@ SuperSimpleNetを使用し、型番ごとの画像準備、異常検出モデル
 | 初期ランダム探索試行数 / `sampler.startup_trials` | グループの TPESampler が TPE による探索へ移る前の試行数。MedianPruner の同名項目とは別 |
 | 基準画像 | 元画像の位置合わせ先となる画像 |
 | 元画像 | 学習または検査に入力する、分割前の画像 |
-| 分割画像 | 元画像を位置合わせし、設定範囲で切り出した画像 |
+| 分割画像 | 元画像に選択した位置合わせ方法を適用し、設定範囲で切り出した画像 |
+| 位置合わせ方法 / `alignment.method` | 型番単位で選ぶ `ORB`、`ECC`、`NONE`。省略時は `ORB` |
+| ECC | 画像全体の相関を使い、移動・回転・等方拡大縮小を大まかに推定する位置合わせ方法 |
+| 相関下限 / `min_correlation` | ECC の推定結果を採用するために型番ごとに指定する相関値の下限 |
 | 輝度補正 / `brightness_normalization` | 学習・試験準備の分割画像の明るさを、同じ範囲の基準画像に近づける処理 |
 | 準備manifest | 元画像と分割画像の対応、準備条件の指紋を記録するJSON |
 | 再撮影要否 / `recapture_required` | 位置合わせ結果に記録する、再撮影が原則必要な状態。試験準備結果から検査結果にも引き継ぐ |
@@ -73,7 +76,7 @@ npm ci
 | `base` | 学習元画像領域直下の基準画像名 |
 | `range` | 一意な分割IDと縮小前の開始座標の配列 |
 | `blacklist` | 学習準備だけで除外する元画像名と分割ID |
-| `alignment` | 型番内で共通のORB位置合わせ条件 |
+| `alignment` | 型番内で共通の位置合わせ方法と、その方法固有の条件 |
 | `brightness_normalization` | 型番共通の分割画像の輝度補正。項目全体の省略時は無効。記述時の既定値は `enabled=true`、`statistic=median`、`exclude_above=230`、`exclude_below=0`、`min_gain=0.5`、`max_gain=2.0` |
 | `groups` | 必須の非空配列。グループIDは型番内で一意な非負整数。分割ごとの検査条件を置く |
 | `groups[].ranges` | 必須の非空配列。各要素に `id`、`inspection_threshold`、`heatmap_range` を必ず書く。グループ単位の上書きや既定値はない |
@@ -88,6 +91,24 @@ npm ci
 | `group_detail["<id>"].synthetic_anomaly` | 学習中の擬似異常生成範囲。`noise_std` は `0.010`〜`0.020`、`perlin_threshold` は `0.2`〜`0.4`、`perlin_scale_exponent` は整数 `0`〜`5` が省略時の推奨値。各項目は `min` と `max` で指定する |
 
 `blacklist`、`alignment`、`brightness_normalization`は型番共通である。<br />
+`alignment.method` は `ORB`、`ECC`、`NONE` から選ぶ。<br />
+`alignment` 自体は必須で、`method` を省略すると `ORB` を使用する。<br />
+`ORB` の条件は `alignment.orb`、`ECC` の条件は `alignment.ecc` に置き、`NONE` ではどちらも置かない。<br />
+`ECC` では `min_correlation` を必ず指定する。値は 0 より大きく 1 以下とし、実画像の撮影条件に合わせて決める。<br />
+移動の上限は画像の幅・高さそれぞれの 10%、回転の上限は 10°、倍率は 0.9～1.1 倍が既定値である。<br />
+`NONE` は元画像を変形せず、基準画像の分割座標でそのまま切り出す。<br />
+例えば位置合わせ設定は次のように書く。
+
+```json
+{"alignment": {"method": "ECC", "ecc": {"min_correlation": 0.8}}}
+```
+
+```json
+{"alignment": {"method": "NONE"}}
+```
+
+ORB の設定例は [part_XX.json](config/part_XX.json) を参照する。<br />
+旧形式の `alignment` 直下の ORB 条件、選択方法と無関係な条件、不正な数値は入力不備として拒否され、既存成果物を更新しない。<br />
 旧形式の `groups[].range_ids`、グループ単位の `inspection_threshold` と `heatmap_range` は使用できない。<br />
 分割ごとの検査閾値と表示範囲が不正な場合、5つのコマンドはいずれも入力不備として終了し、既存成果物を更新しない。<br />
 輝度補正は`train-pre`と`test-pre`の分割画像に適用する。<br />
@@ -105,6 +126,9 @@ checkpointと最良試行にも同じ値を保存するため、暫定閾値だ�
 学習時に使用した擬似異常の設定範囲もcheckpointと`best_trial.json`の両方に記録する。<br />
 切り出し位置、サイズ、縮小倍率、位置合わせなどを変更したら、該当する`train-pre`または`test-pre`を再実行する。<br />
 準備指紋が一致しない入力は学習・検査の前に拒否される。
+
+位置合わせ方法または条件を変更した場合は、旧準備・学習・試験成果物を引き継がず、`check`、`train-pre`、`train`、`test-pre`、`test` の順に再実行する。<br />
+`method` や方法固有の条件は準備指紋に含まれる。
 
 分割ごとの `inspection_threshold` または `heatmap_range` だけを変更した場合、準備指紋は変わらない。<br />
 準備と学習をやり直さず、`test` のみ再実行できる。
@@ -285,6 +309,11 @@ npx --no-install openspec update
 
 | change | 受け入れID | 状態 | 記録 |
 | --- | --- | --- | --- |
+| improve-check-visuals-and-alignment-options | AC-001 | 未検証 | タスク3.2: Ubuntu 24.04 LTS と Apple silicon macOS で複数・重複分割の確認画像を開き、枠・番号・色を目視する。 |
+| improve-check-visuals-and-alignment-options | AC-002 | 未検証 | タスク3.3: 両対象環境の実CLIで3方法、ORB既定値、不正・旧形式の拒否と旧成果物保持を確認する。 |
+| improve-check-visuals-and-alignment-options | AC-003 | 未検証 | タスク3.4: 両対象環境で3方法の学習・試験準備と検査を行い、結果・警告・未判定を読み戻す。 |
+| improve-check-visuals-and-alignment-options | AC-004 | 未検証 | タスク3.5: 両対象環境の実画像でECCの移動・回転・倍率、相関下限、分割位置と失敗例を確認する。 |
+| improve-check-visuals-and-alignment-options | AC-005 | 未検証 | タスク3.6: 両対象環境で方法・条件変更後の旧成果物拒否と5コマンドの再実行・読戻しを確認する。 |
 | add-test-pre-group | AC-001 | 未検証 | タスク3.2: 両対象環境の実画像で単独グループの試験準備・検査と他グループ成果物の保持を確認する。 |
 | add-test-pre-group | AC-002 | 未検証 | タスク3.2: 両対象環境の実画像で全グループの試験準備・検査と成果物読戻しを確認する。 |
 | add-test-pre-group | AC-003 | 未検証 | タスク3.2: 両対象環境で未知ID、準備失敗、準備欠落・不整合の拒否と旧成果物保持を確認する。 |

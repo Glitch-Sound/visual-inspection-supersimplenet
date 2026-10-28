@@ -63,6 +63,57 @@ def _two_sources(root: Path):
     return paths
 
 
+def _change_alignment(paths, setting: dict[str, object]) -> None:
+    path = paths.model_config("XX")
+    payload = json.loads(path.read_text())
+    payload["alignment"] = setting
+    path.write_text(json.dumps(payload))
+
+
+def test_change_req_043_s01(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path)
+    _change_alignment(paths, {"method": "NONE"})
+    config = load_config(tmp_path, "XX")
+    prepare_testing(config, paths)
+    _run(monkeypatch, paths)
+    result = json.loads((paths.result_group("XX", 0) / "sample.png.json").read_text())
+    assert result["alignment"]["method"] == "NONE"
+    assert result["alignment"]["status"] == "skipped"
+    assert result["alignment"]["recapture_required"] is False
+    assert result["overall_status"] == "anomaly"
+    assert not result["warnings"]
+
+
+def test_change_req_043_s02(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path)
+    _change_alignment(paths, {"method": "ECC", "ecc": {"min_correlation": 0.8}})
+    config = load_config(tmp_path, "XX")
+    blank = np.full((32, 32, 3), 128, dtype=np.uint8)
+    assert cv2.imwrite(str(paths.original_test("XX") / "sample.png"), blank)
+    prepare_testing(config, paths)
+    _run(monkeypatch, paths)
+    result = json.loads((paths.result_group("XX", 0) / "sample.png.json").read_text())
+    assert result["alignment"]["method"] == "ECC"
+    assert result["alignment"]["status"] == "undetermined"
+    assert result["alignment"]["reason"] == "insufficient_texture"
+    assert result["alignment"]["recapture_required"] is True
+    assert result["overall_status"] == "undetermined"
+
+
+def test_change_req_043_s03(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, paths = project(tmp_path)
+    _run(monkeypatch, paths)
+    result_path = paths.result_group("XX", 0) / "sample.png.json"
+    before = result_path.read_bytes()
+    manifest_path = paths.prepared_test("XX", 0) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["sources"][0]["alignment"]["method"] = "NONE"
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="NONE alignment"):
+        _run(monkeypatch, paths)
+    assert result_path.read_bytes() == before
+
+
 def test_result_all_groups(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _, paths = project(tmp_path, two=True)
     _run(monkeypatch, paths)

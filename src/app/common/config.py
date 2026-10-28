@@ -296,14 +296,61 @@ class AugmentationSettings(StrictModel):
         return self
 
 
-class AlignmentSettings(StrictModel):
-    method: Literal["ORB"] = "ORB"
+class OrbAlignmentSettings(StrictModel):
     knn_k: Literal[2] = 2
     ratio_threshold: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.75
     minimum_matches: Annotated[int, Field(ge=4)] = 10
     ransac_reprojection_threshold_px: PositiveFloat = 8.0
     ransac_confidence: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.95
     minimum_inlier_ratio: Probability = 0.2
+
+
+class EccAlignmentSettings(StrictModel):
+    min_correlation: Annotated[float, Field(gt=0.0, le=1.0)]
+    max_translation_ratio: Annotated[float, Field(gt=0.0, le=0.1)] = 0.1
+    max_rotation_degrees: Annotated[float, Field(gt=0.0, le=10.0)] = 10.0
+    min_scale: Annotated[float, Field(ge=0.9, le=1.0)] = 0.9
+    max_scale: Annotated[float, Field(ge=1.0, le=1.1)] = 1.1
+
+    @field_validator(
+        "min_correlation",
+        "max_translation_ratio",
+        "max_rotation_degrees",
+        "min_scale",
+        "max_scale",
+        mode="before",
+    )
+    @classmethod
+    def require_finite_number(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("ECC alignment parameters must be finite numbers")
+        try:
+            finite = math.isfinite(value)
+        except OverflowError:
+            finite = False
+        if not finite:
+            raise ValueError("ECC alignment parameters must be finite numbers")
+        return value
+
+
+class AlignmentSettings(StrictModel):
+    method: Literal["ORB", "ECC", "NONE"] = "ORB"
+    orb: OrbAlignmentSettings | None = None
+    ecc: EccAlignmentSettings | None = None
+
+    @model_validator(mode="after")
+    def validate_method_settings(self) -> AlignmentSettings:
+        if self.method == "ORB":
+            if self.ecc is not None:
+                raise ValueError("alignment.ecc is not valid for ORB")
+            if self.orb is None:
+                self.orb = OrbAlignmentSettings()
+        elif self.method == "ECC":
+            if self.orb is not None or self.ecc is None:
+                raise ValueError("ECC requires alignment.ecc and forbids alignment.orb")
+        elif self.orb is not None or self.ecc is not None:
+            raise ValueError("NONE forbids alignment.orb and alignment.ecc")
+        return self
 
 
 class BrightnessNormalizationSettings(StrictModel):

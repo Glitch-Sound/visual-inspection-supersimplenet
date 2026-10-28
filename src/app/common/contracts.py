@@ -135,11 +135,76 @@ class RunMetadata(ContractModel):
 
 
 class AlignmentResult(ContractModel):
-    status: Literal["aligned", "failed", "undetermined"]
+    method: Literal["ORB", "ECC", "NONE"]
+    status: Literal["aligned", "skipped", "failed", "undetermined"]
     reason: str | None = None
     recapture_required: bool = False
     matches: int | None = None
     inlier_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    correlation: float | None = Field(default=None, ge=-1.0, le=1.0)
+    translation_x: float | None = None
+    translation_y: float | None = None
+    rotation_degrees: float | None = None
+    scale: float | None = Field(default=None, gt=0)
+
+    @field_validator(
+        "inlier_ratio",
+        "correlation",
+        "translation_x",
+        "translation_y",
+        "rotation_degrees",
+        "scale",
+    )
+    @classmethod
+    def metrics_are_finite(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("alignment metrics must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def method_matches_result(self) -> AlignmentResult:
+        ecc_metrics = (
+            self.correlation,
+            self.translation_x,
+            self.translation_y,
+            self.rotation_degrees,
+            self.scale,
+        )
+        if self.method == "NONE":
+            if (
+                self.status != "skipped"
+                or self.reason is not None
+                or self.recapture_required
+            ):
+                raise ValueError("NONE alignment must have skipped status")
+            if (
+                self.matches is not None
+                or self.inlier_ratio is not None
+                or any(value is not None for value in ecc_metrics)
+            ):
+                raise ValueError("NONE alignment must not have method metrics")
+        elif self.method == "ORB":
+            if self.status == "skipped" or any(
+                value is not None for value in ecc_metrics
+            ):
+                raise ValueError("ORB alignment has invalid status or ECC metrics")
+        elif (
+            self.status == "skipped"
+            or self.matches is not None
+            or self.inlier_ratio is not None
+        ):
+            raise ValueError("ECC alignment has invalid status or ORB metrics")
+        if self.status in {"failed", "undetermined"} and not self.reason:
+            raise ValueError("failed alignment requires reason")
+        if self.status == "aligned" and self.reason is not None:
+            raise ValueError("aligned result must not have a reason")
+        if (
+            self.method == "ECC"
+            and self.status == "aligned"
+            and any(value is None for value in ecc_metrics)
+        ):
+            raise ValueError("aligned ECC result requires transform metrics")
+        return self
 
 
 class PreparedSplit(ContractModel):
@@ -165,6 +230,8 @@ class PreparedSource(ContractModel):
 
     @model_validator(mode="after")
     def splits_match_source(self) -> PreparedSource:
+        if self.alignment.status in {"failed", "undetermined"} and self.splits:
+            raise ValueError("failed alignment must not have splits")
         if any(split.source_image != self.source_image for split in self.splits):
             raise ValueError("split source_image must match parent source_image")
         source_path = Path(self.source_image)
